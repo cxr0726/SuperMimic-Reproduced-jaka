@@ -1,0 +1,83 @@
+{
+  "source_urdf": "ref_thirdparty/jaka_code/Textop/TextOpTracker/source/textop_tracker/textop_tracker/assets/Khan_mini_simplified/khan.urdf",
+  "source_urdf_sha256": "c2bd7763fc00e2f3b24ec7267d264810493a4f220b94006143583af6b52a3055",
+  "source_config": "ref_thirdparty/jaka_code/Textop/TextOpTracker/source/textop_tracker/textop_tracker/robots/K1L.py",
+  "source_config_sha256": "ec29ce5707000d803ffcde6409c0fd07e33a0fd8ed23c4f1785ca1d5d97afd7c",
+  "source_configuration": "Khan_mini_CFG",
+  "mujoco_version": "3.16.0",
+  "mesh_sha256": {
+    "meshes/base_link.STL": "3fb6fc5cb4ad4c1bbb8635c2ddb3173926d5a23bb21a3444e1a6da4c601b7ff3",
+    "meshes/Left_hip_pitch_Link.STL": "e5e37f45bd2e5ced61149f3648182271f644265f0f3e6d7384e8979532ab6174",
+    "meshes/Left_hip_roll_Link.STL": "20d8c50f42bea911bcff9bf3e6c68cfe28213bb6abe45feb5b734d8247a26974",
+    "meshes/Left_hip_yaw_Link.STL": "24c9c72961dc7b0a4634a9f4d7fa45011053363b6e8a643b5fe2a8fc362d61f6",
+    "meshes/Left_knee_Link.STL": "74b162ba3938391cf986abe41ce37022a844ad8ee7731d9941aaa5ca6891ab02",
+    "meshes/Left_ankle_pitch_Link.STL": "18e8cb61ed0091a903a216a2c8c60a2443627c2590e6e17aac590603c506576e",
+    "meshes/Left_ankle_roll_Link.STL": "e5f1776f1b3050681e98ed8baf37be6c1a3005eb1abcbb8031c54cfd91e7aa94",
+    "meshes/left_ankle_base_Link.STL": "87df8844b45ad84ee67e574444e4739f7ab4778eeda84263d6a1d37633e7622d",
+    "meshes/left_link1_down_Link.STL": "eb7610666531cce6bd85767309710be2e17baf42c05d8d01b6c85b6056593964",
+    "meshes/Left_link2_down_Link.STL": "fb85db75c39fcbb39eb24a9773fc8c79c2e8a1d3007fd532359a8fee7dd74c53",
+    "meshes/Left_drive1_Link.STL": "8116a97eb6d609e5d8b66c2bff1aac98c080764cdd35ac86cadf07db9383db44",
+    "meshes/Left_link1_up_Link.STL": "753dcb3eb139535346e7f3ef28e41b2b5135462f30a30c91330f2e420a0d60fb",
+    "meshes/Left_drive2_Link.STL": "e5a30c7decd604e90b18f8f256c9f4141f7aa3deb2d34260c222ecdedea63581",
+    "meshes/Left_link2_up_Link.STL": "f70d4d441b83fd21b181038f7c4197aa640a79117c002ceef6617eb737f96202",
+    "meshes/Right_hip_pitch_Link.STL": "4121489e36935889d010f7d637bee79216463808651e010e31003dbb563af01f",
+    "meshes/Right_hip_roll_Link.STL": "c6652f0869914ae26eb7f116699c56ae607d12a7669054def9392362f6d8aa93",
+    "meshes/Right_hip_yaw_Link.STL": "ccc82d5c851d6db585e5f67fbbcd9207bde5349f40d8ef971c3ef0be0b803d3c",
+    "meshes/Right_knee_Link.STL": "30696f1f34902b9c8fc8ba5b2f417eaa8ce4645143550ace86415b8b3584cef4",
+    "meshes/Right_ankle_pitch_Link.STL": "737351abd5851f60adad9ebd8c680e8a32106755253ae96445354e2e680b0f83",
+    "meshes/Right_ankle_roll_Link.STL": "963a8344003c309677841c0e45f659b6fc20d630f53cc7821bf8c11996561f52",
+    "meshes/Right_ankle_base_Link.STL": "e7c173563931bc77034f0e4241569c4db7a100acd050e7e0164633a47759574d",
+    "meshes/Right_link1_down_Link.STL": "cabee880398cd180d31ea1c0de12621781466ad6121e990e5f0e7b4a98a1a93b",
+    "meshes/Right_link2_down_Link.STL": "1ae85415f1006924c986834c8909cc33349822e144fe5169015ad5651f66a529",
+    "meshes/Right_drive1_Link.STL": "4f27ce420c9fd93a7a7c73d2caedabc596e63e8024b07ec61fa9ce6765c4495a",
+    "meshes/Right_link1_up_Link.STL": "0afcb6f1784a5beb3827b44c3ca5ef0086bcdf82d0c338090a9409ed6fa114df",
+    "meshes/Right_link2_up_Link.STL": "42558ccf625260e8758de7034d898ca359ce38a5a44ff41655fb82f222b61943",
+    "meshes/waist_yaw_Link.STL": "89985c47a6425de99c0d8daf168e493920d5cd46e388cfa0aa04e3e0a788bf8a",
+    "meshes/IMU_Link.STL": "64aab6dfcb3b13c1a9e2bdf3e19750eb29df1ae73a958ffb301094dfa22ea26b",
+    "meshes/E1R_Link.STL": "79c6666b6f14c1fb99539edf1fb1c9b7abfa424a612f9560bb836ce271d5c0c4",
+    "meshes/Left_shoulder_pitch_Link.STL": "729ae43b0757a8638a59738a4e1007f8765e9cebdde1dad43e2a29172990f9b8",
+    "meshes/Left_shoulder_roll_Link.STL": "75772f03920d4ded05db7c3210a0eaea5d7b08dee310d29d57ab8c960dabcb0f",
+    "meshes/Left_shoulder_yaw_Link.STL": "9d09b3f5750ec8d80866a9170b0dfaa21c1eba43f8a9aac32008e657005ef358",
+    "meshes/Left_elbow_Link.STL": "0d0995eff69e726cf0a91f5149c1a1243f10dc66a29e3228244192acb74d5a17",
+    "meshes/Left_wrist_roll_Link.STL": "4ba3bd1fe924c07f9ed6f64694bca37f10ac892d1540a2e4496ae208896f71d8",
+    "meshes/Left_wrist_yaw_Link.STL": "13f3f67baff4e44b517a5d6ba71400fe40beaf388b5caf79d388fbec4dd72b2a",
+    "meshes/Right_shoulder_pitch_Link.STL": "020fb5f95c133f4ce59cff11169a2655a8d6c7e44424ef6455993f36e7c630f3",
+    "meshes/Right_shoulder_roll_Link.STL": "ca4b47924b0c986b79d7fefbfebb3c6736380ebab48c8148d7f89ed90aea3730",
+    "meshes/Right_shoulder_yaw_Link.STL": "d4a97da2d0888d670dfdd799d45fc9ea2e5089854de40653a8d4ad3fff31ee5c",
+    "meshes/Right_elbow_Link.STL": "ca349ce98b16c7fcba6b8b88d1d4daca48e9734d615b7443a09450ce26374680",
+    "meshes/Right_wrist_roll_Link.STL": "8e5777fd6ce5132de1309dd8be170f6fe128a92e03bab9eb420be64aa993c29b",
+    "meshes/Right_wrist_yaw__Link.STL": "0febff8cd62161b2b9599a464a650d234259b8f5d340833920f94fdf026f0774",
+    "meshes/Neck_yaw_Link.STL": "119c4cf8585fc597bcfda12a3cc88f49247a0e5d11710d718abcdeb15abee23a",
+    "meshes/Neck_pitch_Link.STL": "e1ae47c2758712f013a3b9e457ccab2eb9523474469bba5968b1ba2b9ee9bb18",
+    "meshes/Camera_Link.STL": "152bbfaad07c32dd8a7a3fe414986c9c2b4a43353b912a8d410f190312cda1ab"
+  },
+  "parameter_overrides": {
+    "waist_velocity_limit": {
+      "source_config_value": 120.0,
+      "effective_value": 11.519,
+      "effective_source": "URDF joint limit velocity"
+    },
+    "action_scale": {
+      "value": 0.5,
+      "source": "user-specified uniform joint action scale"
+    },
+    "nonfoot_sliding_friction": {
+      "value": 1.0,
+      "source": "user-requested alignment with mjlab G1 non-foot contacts"
+    }
+  },
+  "conversion": {
+    "fixed_links": "preserved",
+    "visual_meshes": "preserved",
+    "freejoint": "floating_base",
+    "cylinders": "capsules with original radius/axis half-length",
+    "actuators": "created by get_khan_mini_cfg from profile.json",
+    "velocity_limits": "recorded only; not enforced by builtin position servos",
+    "contacts": "self-collision masks retained; feet condim=3, other contacts condim=1"
+  },
+  "output_sha256": {
+    "robot.xml": "30d9558776da92d35b38b055480949fb0de7a4a3d3799b2f3a766e65524f66da",
+    "source.urdf": "927cf814485ce2e2fea77aed95dd4b858e60763b785693c2f3f4b23f9940be33",
+    "profile.json": "624763b3160f6c6117eb85a5452aecb330f422e33988cda517a22570555a72b4"
+  }
+}

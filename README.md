@@ -55,6 +55,48 @@ uv sync --group dev
 env -u PYTHONPATH uv run pytest tests -q
 ```
 
+For a small CUDA training check on the existing LAFAN1 data:
+
+```bash
+env -u PYTHONPATH uv run python scripts/smoke_train.py
+```
+
+This runs 32 environments for 16 steps, performs five world-model / actor / critic updates,
+checks finite metrics and changed parameters, and reloads the saved checkpoint. Results are
+saved to `logs/smoke_lafan1/summary.json`; use `--run-name` for another run. See
+[`docs/LOCAL_SETUP.md`](docs/LOCAL_SETUP.md) for the local setup and validation record and
+[`docs/LAFAN1_DATA.md`](docs/LAFAN1_DATA.md) for the NPZ schema and full dataset audit.
+
+### Khan_mini robot asset
+
+The local Khan_mini URDF is converted to `assets/robots/khan_mini/` with its original
+27 joints, visual meshes, inertias and `Khan_mini_CFG` actuator settings. Preview it
+in mjlab with:
+
+```bash
+env -u PYTHONPATH uv run python scripts/preview_khan_mini.py --viewer native --steps 0
+```
+
+See [`docs/KHAN_MINI.md`](docs/KHAN_MINI.md) for rebuilding, headless GPU checks,
+the Python entity API and the remaining training adaptation work.
+
+The retargeted Khan LAFAN1 joblib pack can be converted with
+`uv run python scripts/data/convert_khan_pkl.py` and independently checked with
+`uv run python scripts/data/validate_khan_dataset.py`. The generated 27-joint,
+45-body NPZ data and validation results are described in
+[`docs/KHAN_LAFAN_DATA.md`](docs/KHAN_LAFAN_DATA.md).
+
+Replay the converted reference directly in mjlab, with foot-ground clearance
+shown in the viewer (Space to play/pause, arrow keys to inspect frames):
+
+```bash
+env -u PYTHONPATH uv run python scripts/replay_khan_npz.py \
+  --npz data/npz/khan_mini/lafan1/walk1_subject1.npz --viewer native --geometry both --loop
+```
+
+See [`docs/KHAN_REPLAY.md`](docs/KHAN_REPLAY.md) for headless MP4 export and the
+full-dataset ground audit. Replay is kinematic and preserves the original heights.
+
 ### Data
 
 Neither dataset is redistributed here.
