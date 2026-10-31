@@ -78,7 +78,7 @@ env -u PYTHONPATH uv run python scripts/preview_khan_mini.py --viewer native --s
 ```
 
 See [`docs/KHAN_MINI.md`](docs/KHAN_MINI.md) for rebuilding, headless GPU checks,
-the Python entity API and the remaining training adaptation work.
+the Python entity API and the asset configuration.
 
 The retargeted Khan LAFAN1 joblib pack can be converted with
 `uv run python scripts/data/convert_khan_pkl.py` and independently checked with
@@ -96,6 +96,28 @@ env -u PYTHONPATH uv run python scripts/replay_khan_npz.py \
 
 See [`docs/KHAN_REPLAY.md`](docs/KHAN_REPLAY.md) for headless MP4 export and the
 full-dataset ground audit. Replay is kinematic and preserves the original heights.
+
+Khan training keeps G1's proprioception, rewards, randomization and optimization
+defaults, with robot dimensions selected by `--robot khan_mini`. The Khan server
+launcher additionally enables the 9-dimensional anchor-relative goal observation:
+
+```bash
+env -u PYTHONPATH uv run sm-train --robot khan_mini --env.anchor-obs --run-name khan_lafan1_anchor
+env -u PYTHONPATH uv run python scripts/smoke_train_khan.py
+```
+
+The second command preserves the full production networks, batch sizes, H=32,
+UTD=0.4 and compilation, while running 32 environments for 50 steps. Activation
+recomputation is disabled by default. This original execution path exceeds the
+local 12 GB GPU even at one environment; the earlier passing run explicitly used
+`--activation-checkpoint`. See [`docs/KHAN_MEMORY.md`](docs/KHAN_MEMORY.md) for the
+measurements and [`docs/KHAN_TRAINING.md`](docs/KHAN_TRAINING.md) for configuration.
+
+For the original single-GPU optimization settings with anchor observations on a server, use
+`bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_anchor`.
+See [`docs/KHAN_SERVER_TRAINING.md`](docs/KHAN_SERVER_TRAINING.md) for deployment,
+dry-run, a 50-step verification and checkpoint resume. Goal width is 649 (640 reference
+features plus anchor position 3 and orientation 6); activation recomputation is off.
 
 ### Data
 

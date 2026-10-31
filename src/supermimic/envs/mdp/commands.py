@@ -54,6 +54,8 @@ class MultiClipMotionCommand(CommandTerm):
         self.library = MotionLibrary(
             cfg.npz_files, cfg.body_names, default_joint_pos, device=self.device, bin_frames=cfg.bin_frames,
             compact=cfg.compact_library, store_dtype=torch.float16 if cfg.library_fp16 else torch.float32,
+            robot_name=cfg.robot_name, root_body_name=cfg.root_body_name,
+            joint_names=self.robot.joint_names,
         )
         print(f"[INFO] {self.library.summary()}")
         lib = self.library
@@ -69,7 +71,7 @@ class MultiClipMotionCommand(CommandTerm):
         # Return-based reset sampling state.
         self.bin_return = torch.full((lib.num_bins,), cfg.g_max, device=self.device)
         self.bin_memory = torch.full((lib.num_bins,), 1.0 / lib.num_bins, device=self.device)
-        self.max_ep_steps = min(int(math.ceil(env.cfg.episode_length_s / env.step_dt)) + 2, cfg.max_logged_steps)
+        self.max_ep_steps = min(math.ceil(env.cfg.episode_length_s / env.step_dt) + 2, cfg.max_logged_steps)
         # Evaluation hook: when >= 0, the next reset of that env starts exactly at this global frame.
         self.forced_frame = torch.full((n,), -1, dtype=torch.long, device=self.device)
         self.ep_rewards = torch.zeros(n, self.max_ep_steps, device=self.device)
@@ -401,6 +403,7 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     root_body_name: str = "pelvis"
     body_names: tuple[str, ...]
     entity_name: str = "robot"
+    robot_name: str = "g1"
     future_frames: int = 10
     bin_frames: int = 50
     pose_range: dict[str, tuple[float, float]] = field(default_factory=dict)

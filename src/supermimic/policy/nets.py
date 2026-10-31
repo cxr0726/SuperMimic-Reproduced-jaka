@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from supermimic.world_model.dynamics import MLP
-from supermimic.world_model.heads import OBS_TERMS
+from supermimic.world_model.heads import observation_terms
 
 GOAL_DIM = 680
 LATENT_DIM = 32
@@ -27,6 +27,7 @@ class PolicyCfg:
     goal_term_scale: tuple[float, ...] = (1.0, 5.0, 1.0, 2.0, 1.0, 1.0)
     decoder_last_gain: float = 0.01
     goal_dim: int = GOAL_DIM  # 680 (+9 with anchor_obs)
+    num_joints: int = ACT_DIM
 
 
 @dataclass
@@ -36,15 +37,15 @@ class CriticCfg:
 
 def _obs_scale_vector(cfg: PolicyCfg) -> torch.Tensor:
     parts = []
-    for (name, d), s in zip(OBS_TERMS, cfg.obs_term_scale):
+    for (_, d), s in zip(observation_terms(cfg.num_joints), cfg.obs_term_scale):
         parts.append(torch.full((cfg.history * d,), 1.0 / s))
     return torch.cat(parts)  # term-major layout matches the flattened history
 
 
 def _goal_scale_vector(cfg: PolicyCfg, goal_dim: int) -> torch.Tensor:
-    sizes = (29, 29, 3, 3, 3, 1)
+    sizes = (cfg.num_joints, cfg.num_joints, 3, 3, 3, 1)
     per_frame = torch.cat([torch.full((n,), 1.0 / s) for n, s in zip(sizes, cfg.goal_term_scale)])
-    k, extra = divmod(goal_dim, 68)
+    k, extra = divmod(goal_dim, 2 * cfg.num_joints + 10)
     return torch.cat([per_frame.repeat(k), torch.ones(extra)])
 
 
@@ -60,9 +61,10 @@ class MotionEncoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, cfg: PolicyCfg, obs_dim: int = 930):
+    def __init__(self, cfg: PolicyCfg, obs_dim: int | None = None):
         super().__init__()
-        self.mlp = MLP(cfg.latent_dim + obs_dim, cfg.decoder_hidden, ACT_DIM, last_gain=cfg.decoder_last_gain)
+        obs_dim = cfg.history * (3 * cfg.num_joints + 6) if obs_dim is None else obs_dim
+        self.mlp = MLP(cfg.latent_dim + obs_dim, cfg.decoder_hidden, cfg.num_joints, last_gain=cfg.decoder_last_gain)
         self.register_buffer("scale", _obs_scale_vector(cfg))
 
     def forward(self, z: torch.Tensor, obs_hist: torch.Tensor) -> torch.Tensor:
@@ -85,9 +87,11 @@ class Policy(nn.Module):
 class Critic(nn.Module):
     """V(canonical state 71, goal 680, xi 33, root error 4) -> scalar (one per interface)."""
 
-    def __init__(self, cfg: CriticCfg, feat_dim: int = 71, goal_dim: int | None = None, xi_dim: int = 33, pcfg: PolicyCfg | None = None):
+    def __init__(self, cfg: CriticCfg, feat_dim: int | None = None, goal_dim: int | None = None, xi_dim: int | None = None, pcfg: PolicyCfg | None = None):
         super().__init__()
         pcfg = pcfg or PolicyCfg()
+        feat_dim = 13 + 2 * pcfg.num_joints if feat_dim is None else feat_dim
+        xi_dim = pcfg.num_joints + 4 if xi_dim is None else xi_dim
         goal_dim = goal_dim or pcfg.goal_dim
         self.mlp = MLP(feat_dim + goal_dim + xi_dim + 4, cfg.hidden, 1)
         self.register_buffer("goal_scale", _goal_scale_vector(pcfg, goal_dim))

@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 from supermimic.world_model.dynamics import MLP, DynamicsMLP
 from supermimic.world_model.heads import AnalyticHeads, ReferenceFrame
@@ -41,8 +41,10 @@ class WorldModel(nn.Module):
     def __init__(self, cfg: WorldModelCfg, heads: AnalyticHeads, device):
         super().__init__()
         self.cfg = cfg
-        self.spec = StateSpec(cfg.state_spec, device)
-        self.dynamics = DynamicsMLP(hidden=cfg.hidden)
+        self.spec = StateSpec(cfg.state_spec, device, num_joints=heads.num_joints)
+        self.dynamics = DynamicsMLP(feat_dim=self.spec.feat_dim, act_dim=self.spec.num_joints,
+                                    xi_dim=self.spec.xi_dim, hidden=cfg.hidden,
+                                    out_dim=self.spec.delta_dim)
         self.term_head = TerminationHead(cfg.term_hidden, cfg.height_threshold, cfg.tilt_threshold)
         self.heads = heads  # analytic observation / reward / FK (no parameters)
         self.to(device)

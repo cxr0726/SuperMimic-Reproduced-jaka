@@ -1,5 +1,8 @@
 """State representation for the world model (plan D1–D3).
 
+The dimensions below describe the default 29-joint G1; the same layout and
+per-quantity scales apply to any single-free-root model, including 27-joint Khan.
+
 Simulator state  s = [root_pos(3), root_quat wxyz(4), joint_pos(29), root_lin_vel_w(3),
                       root_ang_vel_b(3), joint_vel(29)]            (71, MuJoCo layout, origin-free)
 
@@ -41,6 +44,8 @@ STATE_DIM = 71
 FEAT_DIM = 71
 DELTA_DIM = 70
 NJ = 29
+DEFAULT_XI_OFFSET = (0.75,) + (0.0,) * NJ + (0.0,) * 3
+DEFAULT_XI_SCALE = (0.45,) + (0.01,) * NJ + (0.05,) * 3
 
 
 @dataclass
@@ -54,26 +59,51 @@ class StateSpecCfg:
     in_scale: tuple[float, ...] = (1.0, 1.0, 1.0, 2.0, 1.0, 5.0)
     explicit_integration: bool = True
     # xi normalisation: (offset, scale) for friction, encoder bias, com offset.
-    xi_offset: tuple[float, ...] = field(default_factory=lambda: (0.75,) + (0.0,) * 29 + (0.0,) * 3)
-    xi_scale: tuple[float, ...] = field(default_factory=lambda: (0.45,) + (0.01,) * 29 + (0.05,) * 3)
+    xi_offset: tuple[float, ...] = field(default_factory=lambda: DEFAULT_XI_OFFSET)
+    xi_scale: tuple[float, ...] = field(default_factory=lambda: DEFAULT_XI_SCALE)
 
 
 class StateSpec:
-    def __init__(self, cfg: StateSpecCfg, device, dtype=torch.float32):
+    def __init__(self, cfg: StateSpecCfg, device, dtype=torch.float32, num_joints: int = NJ):
         self.cfg = cfg
         self.dt = cfg.dt
-        rep = lambda scales, sizes: torch.cat([torch.full((n,), float(s)) for s, n in zip(scales, sizes)])  # noqa: E731
-        self.err_scale = rep(cfg.err_scale, (3, 3, 3, 3, NJ, NJ)).to(device=device, dtype=dtype)
-        self.out_scale = rep(cfg.out_scale, (3, 3, NJ, 3, 3, NJ)).to(device=device, dtype=dtype)
-        self.in_scale = rep(cfg.in_scale, (1, 6, 3, 3, NJ, NJ)).to(device=device, dtype=dtype)
-        self.xi_offset = torch.tensor(cfg.xi_offset, device=device, dtype=dtype)
-        self.xi_scale = torch.tensor(cfg.xi_scale, device=device, dtype=dtype)
+        if num_joints < 1:
+            raise ValueError("num_joints must be positive")
+        self.num_joints = int(num_joints)
+        self.nq = 7 + self.num_joints
+        self.nv = 6 + self.num_joints
+        self.state_dim = self.feat_dim = self.nq + self.nv
+        self.delta_dim = 12 + 2 * self.num_joints
+        self.xi_dim = self.num_joints + 4
+        nj = self.num_joints
+        rep = lambda scales, sizes: torch.cat([torch.full((n,), float(s)) for s, n in zip(scales, sizes)])
+        self.err_scale = rep(cfg.err_scale, (3, 3, 3, 3, nj, nj)).to(device=device, dtype=dtype)
+        self.out_scale = rep(cfg.out_scale, (3, 3, nj, 3, 3, nj)).to(device=device, dtype=dtype)
+        self.in_scale = rep(cfg.in_scale, (1, 6, 3, 3, nj, nj)).to(device=device, dtype=dtype)
+        # Expand the existing per-quantity defaults to this robot's joint count.
+        # An explicitly customised vector must already have the correct width.
+        offset = ((0.75,) + (0.0,) * nj + (0.0,) * 3
+                  if cfg.xi_offset == DEFAULT_XI_OFFSET else cfg.xi_offset)
+        scale = ((0.45,) + (0.01,) * nj + (0.05,) * 3
+                 if cfg.xi_scale == DEFAULT_XI_SCALE else cfg.xi_scale)
+        if len(offset) != self.xi_dim or len(scale) != self.xi_dim:
+            raise ValueError(f"xi normalisation needs {self.xi_dim} values for {nj} joints")
+        self.xi_offset = torch.tensor(offset, device=device, dtype=dtype)
+        self.xi_scale = torch.tensor(scale, device=device, dtype=dtype)
+        if not torch.isfinite(self.xi_offset).all() or not torch.isfinite(self.xi_scale).all() or (self.xi_scale <= 0).any():
+            raise ValueError("xi normalisation must be finite with positive scales")
 
     # ------------------------------------------------------------------ split / features
 
     @staticmethod
     def split(s: torch.Tensor):
-        return s[..., 0:3], s[..., 3:7], s[..., 7:36], s[..., 36:39], s[..., 39:42], s[..., 42:71]
+        """Split a free-root humanoid state while preserving the G1 static API."""
+        if s.shape[-1] < 15 or (s.shape[-1] - 13) % 2:
+            raise ValueError(f"Invalid humanoid state width: {s.shape[-1]}")
+        nj = (s.shape[-1] - 13) // 2
+        nq = 7 + nj
+        return (s[..., 0:3], s[..., 3:7], s[..., 7:nq], s[..., nq:nq + 3],
+                s[..., nq + 3:nq + 6], s[..., nq + 6:])
 
     def canonical(self, s: torch.Tensor) -> torch.Tensor:
         """Heading-invariant, scaled network input features (…, 71)."""
@@ -93,7 +123,10 @@ class StateSpec:
     def integrate(self, s: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
         """Apply the (unscaled) network output ``delta`` (…, 70) to state ``s`` (…, 71)."""
         d = delta * self.out_scale
-        dv_h, dw_b, dqd, dp_h, dth_b, dq = d[..., 0:3], d[..., 3:6], d[..., 6:35], d[..., 35:38], d[..., 38:41], d[..., 41:70]
+        nj = self.num_joints
+        dv_h, dw_b, dqd, dp_h, dth_b, dq = (d[..., 0:3], d[..., 3:6], d[..., 6:6 + nj],
+                                           d[..., 6 + nj:9 + nj], d[..., 9 + nj:12 + nj],
+                                           d[..., 12 + nj:12 + 2 * nj])
         p, q, qj, v, w, qd = self.split(s)
         q = quat_normalize(q)
         hq = heading_quat(q)

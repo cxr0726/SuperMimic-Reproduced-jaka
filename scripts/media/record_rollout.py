@@ -18,19 +18,23 @@ import tyro
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
-from supermimic.envs.state_io import NQ, StateIO
+from supermimic.envs.state_io import StateIO
 from supermimic.eval.benchmark import load_policy_from_checkpoint
+from supermimic.robots.registry import get_robot_spec
 
 
 @torch.no_grad()
-def main(ckpt: Path, clips: list[str], npz_dir: Path = Path("data/npz/bones_seed"), out: Path = Path("media/rollouts.npz"), device: str = "cuda:0") -> None:
+def main(ckpt: Path, clips: list[str], npz_dir: Path | None = None, out: Path = Path("media/rollouts.npz"), device: str = "cuda:0") -> None:
+    policy, cfg = load_policy_from_checkpoint(ckpt, device)
+    robot_spec = get_robot_spec(cfg.get("robot", "g1"))
+    npz_dir = npz_dir or robot_spec.default_npz_dir
     files = [str(f) for f in discover_npz(npz_dir, names=clips)]
     missing = set(clips) - {Path(f).stem for f in files}
     assert not missing, f"clips not found in {npz_dir}: {sorted(missing)}"
-    policy, cfg = load_policy_from_checkpoint(ckpt, device)
     n = len(files)
     args = SuperMimicEnvCfgArgs(
         npz_files=files, num_envs=n, future_frames=cfg["env"]["future_frames"], episode_length_s=1.0e5,
+        robot=robot_spec.name, history_length=policy.cfg.history,
         action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False, sampling_mode="start",
         record_transitions=False, seed=0, anchor_obs=cfg["env"].get("anchor_obs", False),
     )
@@ -50,7 +54,7 @@ def main(ckpt: Path, clips: list[str], npz_dir: Path = Path("data/npz/bones_seed
         steps = torch.zeros(n, dtype=torch.long, device=device)
 
         def snapshot() -> None:
-            rob.append(io.read()[:, :NQ].cpu().numpy())
+            rob.append(io.read()[:, :io.nq].cpu().numpy())
             ref.append(lib.ref_qpos_qvel(cmd.frame)[0].cpu().numpy())
 
         snapshot()
@@ -74,7 +78,8 @@ def main(ckpt: Path, clips: list[str], npz_dir: Path = Path("data/npz/bones_seed
             ref_qpos[i, lengths[i]:] = ref_qpos[i, lengths[i] - 1]
         out.parent.mkdir(parents=True, exist_ok=True)
         norm_return = (rew_sum / (max_r * steps.clamp(min=1))).cpu().numpy()
-        np.savez_compressed(out, names=np.array(names), robot_qpos=robot_qpos[:, :T], ref_qpos=ref_qpos[:, :T], lengths=lengths, norm_return=norm_return)
+        np.savez_compressed(out, names=np.array(names), robot_qpos=robot_qpos[:, :T], ref_qpos=ref_qpos[:, :T], lengths=lengths, norm_return=norm_return,
+                            robot=np.array(robot_spec.name), fps=np.array(1.0 / env.step_dt))
         for i, nm in enumerate(names):
             print(f"{nm:48s} steps {int(lengths[i]):5d}/{lib.clips[i].length}  return {float(norm_return[i]):.3f}")
         print("saved", out)

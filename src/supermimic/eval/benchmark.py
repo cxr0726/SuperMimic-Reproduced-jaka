@@ -17,6 +17,7 @@ import torch
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.policy.nets import Policy, PolicyCfg
+from supermimic.robots.registry import RobotName, get_robot_spec
 
 
 @dataclass
@@ -32,21 +33,37 @@ class ClipResult:
 
 def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, dict]:
     ck = torch.load(path, map_location=device, weights_only=False)
-    pc = ck["config"]["policy"]
+    cfg = ck["config"]
+    robot = get_robot_spec(cfg.get("robot", "g1"))
+    pc = dict(cfg["policy"])
+    if pc.get("num_joints", robot.num_joints) != robot.num_joints:
+        raise ValueError(f"Checkpoint policy joint count differs from robot {robot.name}")
+    pc["num_joints"] = robot.num_joints
+    expected_goal = cfg["env"]["future_frames"] * robot.goal_feature_dim + (9 if cfg["env"].get("anchor_obs", False) else 0)
+    if pc.get("goal_dim", expected_goal) != expected_goal:
+        raise ValueError(f"Checkpoint goal dimension differs from robot {robot.name} and future-frame settings")
+    pc["goal_dim"] = expected_goal
     pcfg = PolicyCfg(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in pc.items()})
     policy = Policy(pcfg).to(device)
     policy.load_state_dict(ck["policy"])
     policy.eval()
-    return policy, ck["config"]
+    return policy, cfg
 
 
 @torch.no_grad()
-def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False) -> list[ClipResult]:
+def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, robot: RobotName = "g1", history_length: int | None = None) -> list[ClipResult]:
+    robot_spec = get_robot_spec(robot)
+    if policy.cfg.num_joints != robot_spec.num_joints:
+        raise ValueError(f"Policy joint count differs from benchmark robot {robot}")
+    if not npz_files:
+        raise ValueError("run_benchmark needs at least one motion clip")
     num_envs = min(num_envs or 1024, len(npz_files))
     args = SuperMimicEnvCfgArgs(
         npz_files=npz_files,
+        robot=robot,
         num_envs=num_envs,
         future_frames=future_frames,
+        history_length=policy.cfg.history if history_length is None else history_length,
         episode_length_s=1.0e5,  # clip end decides
         action_noise_std=0.0,
         obs_noise=False,

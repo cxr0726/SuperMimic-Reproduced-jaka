@@ -110,8 +110,8 @@ env -u PYTHONPATH uv run python scripts/data/audit_khan_ground.py \
 BuiltinPositionActuator、0.9 软限位、视觉/碰撞分组、足底接触规则及动作处理类型基本对齐。
 机器人自身的关节数、几何、增益、初态和动作缩放仍按 Khan 配置。
 
-完整训练端仍有 G1 的机器人选择、pelvis/torso 名称、29 关节、FK 及状态/观测维度假设，
-尚未接通 Khan。接地标定、Khan 训练端迁移仍需后续处理。
+完整训练端已支持 `--robot khan_mini`，机器人名称、FK、状态、观测与网络边界随模型解析，
+见 [KHAN_TRAINING.md](KHAN_TRAINING.md)。本节上述接地偏差仍保留，训练不会自动抬高参考数据。
 
 ## Git 内容
 

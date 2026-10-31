@@ -5,18 +5,33 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+from torch.utils.checkpoint import checkpoint, set_checkpoint_early_stop
 
 from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.imagination.compiled import REWARD_TERM_NAMES, ImagStep
 from supermimic.policy.nets import Policy
-from supermimic.world_model.heads import ReferenceFrame, analytic_observation, anchor_relative_obs, flatten_history_term_major
+from supermimic.world_model.heads import (
+    ReferenceFrame,
+    analytic_observation,
+    anchor_relative_obs,
+    flatten_history_term_major,
+)
 from supermimic.world_model.wm_trainer import reference_at
 from supermimic.world_model.world_model import WorldModel
 
 # Paper Table A.1 sensor noise (uniform half-widths) in the 93-d observation order.
 OBS_NOISE_HALF = torch.tensor([0.01] * 29 + [0.5] * 29 + [0.2] * 3 + [0.05] * 3 + [0.0] * 29)
 ANCHOR_NOISE_HALF = torch.tensor([0.25] * 3 + [0.05] * 6)
+
+
+def observation_noise_half(num_joints: int, *, device=None, dtype=torch.float32) -> torch.Tensor:
+    """Paper sensor noise in [joint_pos, joint_vel, ang_vel, gravity, action] order."""
+    return torch.tensor(
+        [0.01] * num_joints + [0.5] * num_joints + [0.2] * 3
+        + [0.05] * 3 + [0.0] * num_joints,
+        device=device, dtype=dtype,
+    )
 
 
 @dataclass
@@ -42,12 +57,13 @@ def imagine(
     obs_noise: bool = True,
     step_fn: ImagStep | None = None,
     anchor_obs: bool = False,
+    activation_checkpoint: bool = False,
 ) -> ImagRollout:
     device = start.state.device
     n = start.state.shape[0]
     q0 = lib.default_joint_pos
     step_fn = step_fn or ImagStep(wm, q0)
-    noise_half = OBS_NOISE_HALF.to(device)
+    noise_half = observation_noise_half(q0.numel(), device=device, dtype=start.state.dtype)
     anchor_noise_half = ANCHOR_NOISE_HALF.to(device)
     ai = wm.heads.anchor_index
 
@@ -97,8 +113,20 @@ def imagine(
 
     for t in range(horizon):
         obs_flat = flatten_history_term_major(torch.stack(hist, 0))
-        a = policy(obs_flat, goals[-1])
-        s_next, r, term_vec, logits, obs_clean, anchor_pose = step_fn(s, a, a_prev, start.xi, ref)
+        if activation_checkpoint:
+            # Recompute deterministic activations during backward; the complete batch,
+            # objective and update schedule are unchanged. Sensor noise stays outside.
+            # TorchScript quaternion helpers wrap the checkpoint early-stop signal
+            # as RuntimeError. Complete recomputation preserves eager compatibility.
+            with set_checkpoint_early_stop(False):
+                a = checkpoint(policy, obs_flat, goals[-1], use_reentrant=False, preserve_rng_state=True)
+                s_next, r, term_vec, logits, obs_clean, anchor_pose = checkpoint(
+                    step_fn, s, a, a_prev, start.xi, ref,
+                    use_reentrant=False, preserve_rng_state=True,
+                )
+        else:
+            a = policy(obs_flat, goals[-1])
+            s_next, r, term_vec, logits, obs_clean, anchor_pose = step_fn(s, a, a_prev, start.xi, ref)
         d = torch.sigmoid(logits)
         c = c * (1.0 - d)
         term_sum += term_vec.detach().mean(-1)

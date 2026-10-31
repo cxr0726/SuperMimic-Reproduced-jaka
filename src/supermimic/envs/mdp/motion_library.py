@@ -14,7 +14,10 @@ Two storage modes:
   joint_vel(29)]`` in fp16/fp32 (284 B/frame in fp32); tracked-body states and goal
   features are computed on the fly with the differentiable FK (plan 1.3).
 
-Goal features (per frame, 68-d, plan D5):
+The widths above describe G1 (29 joints). For N joints the reference state has
+13+2N columns and each goal frame has 10+2N columns (Khan: 67 and 64).
+
+Goal features (per frame, 68-d for G1, plan D5):
   [joint_pos - q0 (29), joint_vel (29), projected gravity of the ref root (3),
    ref root angular velocity in the root frame (3),
    ref root linear velocity in the ref heading frame (3), ref root height (1)]
@@ -72,6 +75,66 @@ def goal_features(ref: RefState, default_joint_pos: torch.Tensor) -> torch.Tenso
     return torch.cat([ref.joint_pos - default_joint_pos, ref.joint_vel, grav, ang_b, lin_h, height], dim=-1)
 
 
+def read_npz_reference(
+    path: str | Path, *, robot_name: str = "g1", root_body_name: str = "pelvis",
+    joint_names: tuple[str, ...] | list[str] | None = None, body_names: tuple[str, ...] = (),
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Validate one named 50 Hz motion and return its reference and tracked bodies.
+
+    Shared by the runtime loader and compact-cache builder so a cache cannot
+    bypass the robot layout checks applied to ordinary NPZ training input.
+    """
+    from supermimic.robots.registry import get_robot_spec
+
+    spec = get_robot_spec(robot_name)
+    expected_joints = tuple(spec.joint_names if joint_names is None else joint_names)
+    if expected_joints != tuple(spec.joint_names) or root_body_name != spec.root_body:
+        raise ValueError(f"Requested joint/root layout differs from {robot_name}")
+    with np.load(path, allow_pickle=False) as data:
+        required = ("fps", "joint_names", "body_names", "joint_pos", "joint_vel",
+                    "body_pos_w", "body_quat_w", "body_lin_vel_w", "body_ang_vel_w")
+        if any(key not in data for key in required):
+            raise ValueError(f"{path}: missing required motion fields")
+        fps = np.asarray(data["fps"])
+        if fps.size != 1 or not np.isfinite(fps).all() or not np.isclose(float(fps.reshape(-1)[0]), 50):
+            raise ValueError(f"{path}: training requires 50 Hz motion data")
+        if tuple(str(name) for name in data["joint_names"]) != expected_joints:
+            raise ValueError(f"{path}: joint_names differ from the selected {robot_name} model")
+        if "robot" in data and str(np.asarray(data["robot"]).reshape(-1)[0]) != robot_name:
+            raise ValueError(f"{path}: robot metadata differs from the selected model")
+        names = [str(name) for name in data["body_names"]]
+        if len(set(names)) != len(names):
+            raise ValueError(f"{path}: duplicate body names")
+        if any(name not in names for name in (*body_names, root_body_name)):
+            raise ValueError(f"{path}: missing tracked or root body")
+        # Resolve every file independently; body columns may have different orders.
+        body_idx = np.array([names.index(name) for name in body_names], dtype=np.int64)
+        root_idx = names.index(root_body_name)
+        joint_pos, joint_vel = data["joint_pos"], data["joint_vel"]
+        n = int(joint_pos.shape[0])
+        if n < 1:
+            raise ValueError(f"{path}: empty motion")
+        bp, bq = data["body_pos_w"], data["body_quat_w"]
+        blv, bav = data["body_lin_vel_w"], data["body_ang_vel_w"]
+        for key, value, shape in (
+            ("joint_pos", joint_pos, (n, spec.num_joints)),
+            ("joint_vel", joint_vel, (n, spec.num_joints)),
+            ("body_pos_w", bp, (n, len(names), 3)),
+            ("body_quat_w", bq, (n, len(names), 4)),
+            ("body_lin_vel_w", blv, (n, len(names), 3)),
+            ("body_ang_vel_w", bav, (n, len(names), 3)),
+        ):
+            if value.shape != shape or not np.isfinite(value).all():
+                raise ValueError(f"{path}: {key} must be finite with shape {shape}")
+        if not np.allclose(np.linalg.norm(bq, axis=-1), 1, atol=1e-4, rtol=0):
+            raise ValueError(f"{path}: body_quat_w must contain unit WXYZ quaternions")
+        ref = np.concatenate([bp[:, root_idx], bq[:, root_idx], joint_pos, blv[:, root_idx],
+                              bav[:, root_idx], joint_vel], axis=1).astype(np.float32)
+        bodies = {"pos": bp[:, body_idx], "quat": bq[:, body_idx],
+                  "lin": blv[:, body_idx], "ang": bav[:, body_idx]}
+    return ref, bodies
+
+
 class MotionLibrary:
     def __init__(
         self,
@@ -83,11 +146,21 @@ class MotionLibrary:
         bin_frames: int = 50,
         compact: bool = False,
         store_dtype: torch.dtype = torch.float16,
+        robot_name: str = "g1",
+        root_body_name: str = "pelvis",
+        joint_names: tuple[str, ...] | list[str] | None = None,
     ):
+        from supermimic.robots.registry import get_robot_spec
+
+        robot_spec = get_robot_spec(robot_name)
         self.device = torch.device(device)
         self.dtype = dtype
+        self.robot_name = robot_name
+        self.root_body_name = root_body_name
         self.body_names = tuple(body_names)
         self.bin_frames = int(bin_frames)
+        if self.bin_frames < 1:
+            raise ValueError("bin_frames must be positive")
         self.compact = compact
         if len(npz_files) == 0:
             raise ValueError("MotionLibrary needs at least one clip")
@@ -96,37 +169,58 @@ class MotionLibrary:
         else:
             q0 = torch.as_tensor(np.asarray(default_joint_pos), dtype=dtype, device=self.device).reshape(-1)
         self.default_joint_pos = q0
+        self.num_joints = int(q0.numel())
+        self.ref_dim = 13 + 2 * self.num_joints
+        self.goal_feat_dim = 10 + 2 * self.num_joints
+        self.joint_names = tuple(robot_spec.joint_names if joint_names is None else joint_names)
+        if self.num_joints != robot_spec.num_joints or self.joint_names != tuple(robot_spec.joint_names):
+            raise ValueError(f"Joint layout differs from the selected {robot_name} model")
+        if root_body_name != robot_spec.root_body:
+            raise ValueError(f"Root body {root_body_name!r} differs from {robot_name}: {robot_spec.root_body!r}")
+        self.fps = 50.0  # The training environment advances one reference frame every 0.02 s.
 
         clips: list[ClipInfo] = []
         start = 0
-        body_idx = root_idx = None
         ref_chunks: list[np.ndarray] = []
         body_chunks = {"pos": [], "quat": [], "lin": [], "ang": []}
         # A single packed cache (build_library.py) can stand in for the npz list (compact mode only).
         if len(npz_files) == 1 and str(npz_files[0]).endswith(".pt"):
-            assert compact, "packed .pt libraries are compact-only"
+            if not compact:
+                raise ValueError("packed .pt libraries are compact-only")
             pack = torch.load(npz_files[0], map_location="cpu", weights_only=False)
+            packed_ref = pack["ref"]
+            if packed_ref.ndim != 2 or packed_ref.shape[1] != self.ref_dim:
+                raise ValueError(f"Packed reference must have {self.ref_dim} columns for {robot_name}")
+            # Historical G1 caches predate metadata. Other robots must identify their layout.
+            if robot_name != "g1" and any(key not in pack for key in ("robot", "joint_names", "root_body_name", "fps")):
+                raise ValueError("Non-G1 packed libraries need robot/joint_names/root_body_name/fps metadata")
+            if pack.get("robot", "g1") != robot_name:
+                raise ValueError("Packed library robot differs from the selected model")
+            if tuple(pack.get("joint_names", self.joint_names)) != self.joint_names:
+                raise ValueError("Packed library joint_names differ from the selected model")
+            if pack.get("root_body_name", root_body_name) != root_body_name or not np.isclose(float(pack.get("fps", 50)), 50):
+                raise ValueError("Packed library root body or fps differs from training configuration")
             self._ref = pack["ref"].to(device=self.device, dtype=store_dtype)
+            if not (len(pack["names"]) == len(pack["starts"]) == len(pack["lengths"])):
+                raise ValueError("Packed clip metadata lengths differ")
             clips = [ClipInfo(n, int(st), int(ln)) for n, st, ln in zip(pack["names"], pack["starts"], pack["lengths"])]
             start = int(self._ref.shape[0])
+            expected_start = 0
+            for clip in clips:
+                if clip.start != expected_start or clip.length < 1:
+                    raise ValueError("Packed clips must be positive and contiguous")
+                expected_start = clip.end
+            if expected_start != start or not clips:
+                raise ValueError("Packed clips do not cover the reference frames")
             ref_chunks = None
         for f in (npz_files if ref_chunks is not None else []):
-            with np.load(f) as d:
-                if body_idx is None:
-                    names = [str(n) for n in d["body_names"]]
-                    body_idx = np.array([names.index(n) for n in self.body_names])
-                    root_idx = names.index("pelvis")
-                n = int(d["joint_pos"].shape[0])
-                bp, bq, blv, bav = d["body_pos_w"], d["body_quat_w"], d["body_lin_vel_w"], d["body_ang_vel_w"]
-                ref = np.concatenate(
-                    [bp[:, root_idx], bq[:, root_idx], d["joint_pos"], blv[:, root_idx], bav[:, root_idx], d["joint_vel"]], axis=1
-                ).astype(np.float32)
-                ref_chunks.append(ref)
-                if not compact:
-                    body_chunks["pos"].append(bp[:, body_idx])
-                    body_chunks["quat"].append(bq[:, body_idx])
-                    body_chunks["lin"].append(blv[:, body_idx])
-                    body_chunks["ang"].append(bav[:, body_idx])
+            ref, bodies = read_npz_reference(f, robot_name=robot_name, root_body_name=root_body_name,
+                                            joint_names=self.joint_names, body_names=self.body_names)
+            n = len(ref)
+            ref_chunks.append(ref)
+            if not compact:
+                for key, chunks in body_chunks.items():
+                    chunks.append(bodies[key])
             clips.append(ClipInfo(Path(f).stem, start, n))
             start += n
         self.clips = clips
@@ -135,11 +229,11 @@ class MotionLibrary:
 
         if ref_chunks is not None:
             ref_np = np.concatenate(ref_chunks, 0)
-            assert ref_np.shape[1] == REF_DIM
+            assert ref_np.shape[1] == self.ref_dim
             self._ref = torch.as_tensor(ref_np, device=self.device, dtype=store_dtype if compact else dtype)
             del ref_np, ref_chunks
         if not compact:
-            t = lambda arrs: torch.as_tensor(np.concatenate(arrs, 0), dtype=dtype, device=self.device)  # noqa: E731
+            t = lambda arrs: torch.as_tensor(np.concatenate(arrs, 0), dtype=dtype, device=self.device)
             self.body_pos_w = t(body_chunks["pos"])
             self.body_quat_w = t(body_chunks["quat"])
             self.body_lin_vel_w = t(body_chunks["lin"])
@@ -147,10 +241,9 @@ class MotionLibrary:
             del body_chunks
             self.goal_feat = goal_features(self._split(self._ref), q0)
         else:
-            from supermimic.data.motion_convert import load_g1_model
             from supermimic.kinematics.g1_fk import G1Kinematics
 
-            self._fk = G1Kinematics(load_g1_model(), device=self.device, dtype=dtype)
+            self._fk = G1Kinematics(robot_spec.load_model(), device=self.device, dtype=dtype)
             self._tracked_idx = self._fk.body_indices(self.body_names)
 
         self.clip_start = torch.tensor([c.start for c in clips], device=self.device, dtype=torch.long)
@@ -171,12 +264,16 @@ class MotionLibrary:
 
     @staticmethod
     def _split(r: torch.Tensor) -> RefState:
-        return RefState(r[..., 0:3], r[..., 3:7], r[..., 7:36], r[..., 36:39], r[..., 39:42], r[..., 42:71])
+        num_joints = (r.shape[-1] - 13) // 2
+        j = 7 + num_joints
+        return RefState(r[..., 0:3], r[..., 3:7], r[..., 7:j], r[..., j:j + 3],
+                        r[..., j + 3:j + 6], r[..., j + 6:])
 
     def ref(self, frame: torch.Tensor) -> RefState:
         return self._split(self._ref[frame].to(self.dtype))
 
     def ref71(self, frame: torch.Tensor) -> torch.Tensor:
+        """Stored reference state (legacy method name; width is robot dependent)."""
         return self._ref[frame].to(self.dtype)
 
     def bodies(self, frame: torch.Tensor) -> RefBodies:
@@ -200,19 +297,19 @@ class MotionLibrary:
 
     @property
     def joint_pos(self) -> torch.Tensor:
-        return self._ref[:, 7:36].to(self.dtype)
+        return self._ref[:, 7:7 + self.num_joints].to(self.dtype)
 
     @property
     def root_lin_vel_w(self) -> torch.Tensor:
-        return self._ref[:, 36:39].to(self.dtype)
+        return self._ref[:, 7 + self.num_joints:10 + self.num_joints].to(self.dtype)
 
     @property
     def root_ang_vel_w(self) -> torch.Tensor:
-        return self._ref[:, 39:42].to(self.dtype)
+        return self._ref[:, 10 + self.num_joints:13 + self.num_joints].to(self.dtype)
 
     @property
     def joint_vel(self) -> torch.Tensor:
-        return self._ref[:, 42:71].to(self.dtype)
+        return self._ref[:, 13 + self.num_joints:].to(self.dtype)
 
     # ------------------------------------------------------------------ queries
 
@@ -229,9 +326,9 @@ class MotionLibrary:
         offs = torch.arange(k, device=self.device)
         idx = torch.minimum(frame[:, None] + offs[None, :], last[:, None])  # (N,k)
         if not self.compact:
-            return self.goal_feat[idx].reshape(frame.shape[0], k * GOAL_FEAT_DIM)
+            return self.goal_feat[idx].reshape(frame.shape[0], k * self.goal_feat_dim)
         feat = goal_features(self.ref(idx.reshape(-1)), self.default_joint_pos)
-        return feat.reshape(frame.shape[0], k * GOAL_FEAT_DIM)
+        return feat.reshape(frame.shape[0], k * self.goal_feat_dim)
 
     def ref_qpos_qvel(self, frame: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """MuJoCo-layout reference state: qpos (N,36) and qvel (N,35; root ang vel in body frame)."""
@@ -242,7 +339,7 @@ class MotionLibrary:
         return qpos, qvel
 
     def summary(self) -> str:
-        hours = self.num_frames / 50.0 / 3600.0
+        hours = self.num_frames / self.fps / 3600.0
         mem = self._ref.numel() * self._ref.element_size() / 1e9
         if not self.compact:
             mem += sum(t.numel() * t.element_size() for t in (self.body_pos_w, self.body_quat_w, self.body_lin_vel_w, self.body_ang_vel_w, self.goal_feat)) / 1e9

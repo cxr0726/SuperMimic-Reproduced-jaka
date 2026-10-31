@@ -20,7 +20,12 @@ import tyro
 
 def make_tpose_clip(out: Path, seconds: float = 20.0, fps: int = 50) -> Path:
     """Write a 50 Hz T-pose npz (standing still) via the converter's FK."""
-    from supermimic.data.motion_convert import G1_JOINT_NAMES, forward_kinematics, load_g1_model, ResampledMotion
+    from supermimic.data.motion_convert import (
+        G1_JOINT_NAMES,
+        ResampledMotion,
+        forward_kinematics,
+        load_g1_model,
+    )
 
     T = int(seconds * fps)
     q = np.zeros((T, len(G1_JOINT_NAMES)))
@@ -60,6 +65,8 @@ def main(ckpt: Path, speeds: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0), num_envs:
     from supermimic.eval.benchmark import load_policy_from_checkpoint
 
     policy, cfg = load_policy_from_checkpoint(ckpt, device)
+    if cfg.get("robot", "g1") != "g1":
+        raise ValueError("eval_push.py uses a G1-specific synthetic T-pose; Khan is not supported")
     tmp = Path(tempfile.mkdtemp()) / "tpose.npz"
     make_tpose_clip(tmp)
     args = SuperMimicEnvCfgArgs(npz_files=[str(tmp)], num_envs=num_envs, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False, sampling_mode="start", record_transitions=False, episode_length_s=1e5, future_frames=cfg["env"]["future_frames"], anchor_obs=cfg["env"].get("anchor_obs", False), seed=0)
@@ -82,7 +89,7 @@ def main(ckpt: Path, speeds: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0), num_envs:
                 robot.write_root_link_velocity_to_sim(v)
                 pushed = True
             act = policy(obs["policy"], obs["goal"])
-            obs, rew, term, tout, _ = env.step(act)
+            obs, _rew, term, _tout, _ = env.step(act)
             fallen |= term
             if pushed:
                 err = torch.norm(cmd.root_pos_w - cmd.robot_root_pos_w, dim=-1)

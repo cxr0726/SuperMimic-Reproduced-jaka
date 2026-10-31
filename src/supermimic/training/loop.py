@@ -11,14 +11,18 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from supermimic.config import TrainConfig
-from supermimic.data.motion_convert import load_g1_model
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
-from supermimic.envs.tracking_env_cfg import ANCHOR_BODY, ROOT_BODY, TRACKED_BODIES
 from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.policy.nets import Critic, Policy
-from supermimic.training.distributed import allreduce_mean, broadcast_params, finalize, init_distributed, world_size
+from supermimic.robots.registry import get_robot_spec
+from supermimic.training.distributed import (
+    allreduce_mean,
+    broadcast_params,
+    finalize,
+    init_distributed,
+)
 from supermimic.training.schedule import cosine_lr
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.wm_trainer import WorldModelTrainer
@@ -28,8 +32,16 @@ from supermimic.world_model.world_model import WorldModel
 class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
-        cfg.policy.goal_dim = cfg.env.future_frames * 68 + (9 if cfg.env.anchor_obs else 0)
+        self.robot_spec = robot_spec = get_robot_spec(cfg.robot)
+        if cfg.data.npz_dir is None:
+            cfg.data.npz_dir = robot_spec.default_npz_dir
+        cfg.policy.num_joints = robot_spec.num_joints
+        cfg.policy.goal_dim = cfg.env.future_frames * robot_spec.goal_feature_dim + (9 if cfg.env.anchor_obs else 0)
         cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
+        cfg.policy_trainer.future_frames = cfg.env.future_frames
+        cfg.policy_trainer.history = cfg.policy.history
+        if cfg.data.library is not None:
+            cfg.env.compact_library = True
         self.rank, local_rank, self.world = init_distributed()
         self.is_main = self.rank == 0
         if self.world > 1:
@@ -48,7 +60,6 @@ class Trainer:
 
         if cfg.data.library is not None:
             files = [cfg.data.library]
-            cfg.env.compact_library = True
         else:
             files = discover_npz(cfg.data.npz_dir, limit=cfg.data.limit, names=cfg.data.clips, manifest=cfg.data.manifest)
         if not files:
@@ -56,8 +67,10 @@ class Trainer:
         self.env = make_env(
             SuperMimicEnvCfgArgs(
                 npz_files=[str(f) for f in files],
+                robot=cfg.robot,
                 num_envs=cfg.env.num_envs,
                 future_frames=cfg.env.future_frames,
+                history_length=cfg.policy.history,
                 episode_length_s=cfg.env.episode_length_s,
                 action_noise_std=cfg.env.action_noise_std,
                 obs_noise=cfg.env.obs_noise,
@@ -78,8 +91,8 @@ class Trainer:
         self.buffer = self.recorder.buffer
         robot = env.scene["robot"]
 
-        fk = G1Kinematics(load_g1_model(), device=self.device)
-        heads = AnalyticHeads(fk, TRACKED_BODIES, ANCHOR_BODY, ROOT_BODY, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
+        fk = G1Kinematics(robot_spec.load_model(), device=self.device)
+        heads = AnalyticHeads(fk, robot_spec.tracked_bodies, robot_spec.anchor_body, robot_spec.root_body, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
         self.wm = WorldModel(cfg.world_model, heads, self.device)
         self.policy = Policy(cfg.policy).to(self.device)
         self.critic = Critic(cfg.critic, pcfg=cfg.policy).to(self.device)
@@ -87,7 +100,7 @@ class Trainer:
             broadcast_params(m)
         self.wm_trainer = WorldModelTrainer(self.wm, self.lib, cfg.wm_trainer)
         self.policy_trainer = PolicyTrainer(self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer)
-        n_params = lambda m: sum(p.numel() for p in m.parameters())  # noqa: E731
+        n_params = lambda m: sum(p.numel() for p in m.parameters())
         if self.is_main:
             print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
 
@@ -126,6 +139,28 @@ class Trainer:
 
     def load(self, path: Path) -> None:
         ck = torch.load(path, map_location=self.device, weights_only=False)
+        saved_robot = ck["config"].get("robot", "g1")
+        if saved_robot != self.cfg.robot:
+            raise ValueError(f"Checkpoint robot {saved_robot!r} differs from {self.cfg.robot!r}")
+        saved_anchor = ck["config"].get("env", {}).get("anchor_obs", False)
+        if saved_anchor != self.cfg.env.anchor_obs:
+            raise ValueError(
+                f"Checkpoint anchor_obs={saved_anchor} differs from requested "
+                f"anchor_obs={self.cfg.env.anchor_obs}; use matching settings or start a new run"
+            )
+        saved_env = ck["config"].get("env", {})
+        saved_policy = ck["config"].get("policy", {})
+        per_frame = get_robot_spec(self.cfg.robot).goal_feature_dim
+        saved_future = saved_env.get("future_frames", 10)
+        saved_layout = (saved_future, saved_policy.get("history", 10),
+                        saved_policy.get("goal_dim", saved_future * per_frame + (9 if saved_anchor else 0)))
+        current_layout = (self.cfg.env.future_frames, self.cfg.policy.history,
+                          self.cfg.env.future_frames * per_frame + (9 if self.cfg.env.anchor_obs else 0))
+        if saved_layout != current_layout:
+            raise ValueError(
+                f"Checkpoint goal/observation layout differs: saved {saved_layout}, requested {current_layout}; "
+                "use matching settings or start a new run"
+            )
         self.wm.load_state_dict(ck["wm"])
         self.policy.load_state_dict(ck["policy"])
         self.critic.load_state_dict(ck["critic"])
@@ -157,12 +192,17 @@ class Trainer:
         finished_returns: list[float] = []
         finished_lens: list[float] = []
         last_log = time.time()
+        stop_iteration = sch.total_iterations
+        if sch.stop_after_iterations is not None:
+            if sch.stop_after_iterations < 1:
+                raise ValueError("stop_after_iterations must be positive")
+            stop_iteration = min(stop_iteration, self.iteration + sch.stop_after_iterations)
 
-        while self.iteration < sch.total_iterations:
+        while self.iteration < stop_iteration:
             # ---------------- (1) collect one vectorised env step
             t0 = time.perf_counter()
             action = self.act(obs)
-            obs, rew, term, tout, extras = env.step(action)
+            obs, rew, term, tout, _extras = env.step(action)
             self.ep_reward_sum += rew
             self.ep_len += 1
             done = term | tout
@@ -212,7 +252,7 @@ class Trainer:
                     tot = allreduce_mean(float(sum(finished_returns))) * self.world
                     cnt = allreduce_mean(float(len(finished_returns))) * self.world
                     finished_returns = [tot / cnt] if cnt > 0 else []
-                    n_finished = int(round(cnt))
+                    n_finished = round(cnt)
                 else:
                     n_finished = len(finished_returns)
                 if not self.is_main:

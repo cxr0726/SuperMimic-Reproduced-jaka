@@ -70,8 +70,7 @@ def get_khan_mini_action_cfg(asset_dir: str | Path | None = None, noise_std: flo
     """Use SuperMimic's joint-target action interface with Khan's stored scale.
 
     q_target = q_home + action_scale * (action + execution_noise).
-    This factory is ready for a future Khan tracking environment; the existing
-    sm-train environment still selects G1.
+    The training environment selects the same interface via the robot registry.
     """
     from supermimic.envs.actions import NoisyJointPositionActionCfg
 

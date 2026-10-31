@@ -1,4 +1,4 @@
-"""Per-environment simulation context xi (plan: 33-d = foot friction 1 + encoder bias 29 + torso COM offset 3)."""
+"""Per-world context xi: foot friction, joint encoder bias and anchor COM offset."""
 
 from __future__ import annotations
 
@@ -12,7 +12,9 @@ class SimContext:
     def __init__(self, env, foot_geom_regex: str, com_body_name: str = "torso_link", entity_name: str = "robot"):
         self.env = env
         self.robot = env.scene[entity_name]
-        local_ids, names = self.robot.find_geoms(foot_geom_regex)
+        self.num_joints = int(self.robot.data.encoder_bias.shape[-1])
+        self.xi_dim = 1 + self.num_joints + 3
+        local_ids, _names = self.robot.find_geoms(foot_geom_regex)
         if len(local_ids) == 0:
             raise ValueError(f"no geoms match {foot_geom_regex}")
         self.foot_geom_global = int(self.robot.indexing.geom_ids[local_ids[0]].item())
@@ -36,5 +38,5 @@ class SimContext:
             com = (ipos[self.com_body_global] - self.com_nominal).expand(n, 3)
         bias = self.robot.data.encoder_bias
         xi = torch.cat([friction.reshape(n, 1), bias, com], dim=-1)
-        assert xi.shape == (n, XI_DIM)
+        assert xi.shape == (n, self.xi_dim)
         return xi.clone()

@@ -18,21 +18,33 @@ import numpy as np
 import tyro
 from PIL import Image, ImageDraw, ImageFont
 
-from mjlab.asset_zoo.robots.unitree_g1.g1_constants import G1_XML
+from supermimic.robots.registry import RobotName, get_robot_spec
 
 GHOST_RGBA = "0.25 0.50 1.0 0.22"
 
 
 def two_robot_xml(mjcf: Path, root_body: str) -> str:
     xml = mjcf.read_text()
-    xml = re.sub(r'meshdir="([^"]*)"', lambda m: f'meshdir="{(mjcf.parent / m.group(1)).resolve()}"', xml, count=1)
+    if re.search(r'meshdir="([^"]*)"', xml):
+        xml = re.sub(r'meshdir="([^"]*)"', lambda m: f'meshdir="{(mjcf.parent / m.group(1)).resolve()}"', xml, count=1)
+    else:
+        xml = re.sub(r"<compiler\b([^>]*)/>", rf'<compiler\1 meshdir="{mjcf.parent.resolve()}"/>', xml, count=1)
     # strip anything that is not needed for drawing (actuators / sensors / keyframes keep working but are unused)
     body = xml[xml.index(f'<body name="{root_body}"') : xml.rindex("</worldbody>")]
     ghost = re.sub(r' name="([^"]+)"', r' name="ref_\1"', body)
-    # keep only the visual mesh geoms of the ghost, visual-only and translucent
-    ghost = re.sub(r"<geom\b[^>]*/>", lambda m: "" if "mesh=" not in m.group(0) else m.group(0), ghost)
-    ghost = re.sub(r' (contype|conaffinity|group|material|rgba|class)="[^"]*"', "", ghost)
-    ghost = ghost.replace("<geom ", f'<geom type="mesh" contype="0" conaffinity="0" group="1" rgba="{GHOST_RGBA}" ')
+    # Keep visuals, including Khan's small box visual, without changing joint types.
+    def ghost_geom(match):
+        tag = match.group(0)
+        if re.search(r'group="3"|class="(?:collision|foot_capsule)"', tag):
+            return ""
+        if "mesh=" not in tag and not re.search(r'group="2"|class="visual"', tag):
+            return ""
+        explicit_type = re.search(r' type="([^"]*)"', tag)
+        geom_type = explicit_type.group(1) if explicit_type else ("mesh" if "mesh=" in tag else "sphere")
+        tag = re.sub(r' (contype|conaffinity|group|material|rgba|class|type)="[^"]*"', "", tag)
+        return tag.replace("<geom ", f'<geom type="{geom_type}" contype="0" conaffinity="0" group="1" rgba="{GHOST_RGBA}" ')
+
+    ghost = re.sub(r"<geom\b[^>]*/>", ghost_geom, ghost)
     ghost = re.sub(r"<site[^>]*/>", "", ghost)
     ghost = re.sub(r"<freejoint[^>]*/>", '<freejoint name="ref_root"/>', ghost, count=1)
     scene = """
@@ -49,13 +61,27 @@ def two_robot_xml(mjcf: Path, root_body: str) -> str:
     xml = xml.replace("<asset>", "<asset>" + assets, 1)
     xml = xml.replace("<mujoco", '<mujoco', 1)
     visual = '<visual><global offwidth="1920" offheight="1080"/><quality shadowsize="4096" offsamples="8"/><map znear="0.01"/><headlight ambient="0.25 0.25 0.25" diffuse="0.35 0.35 0.35" specular="0.15 0.15 0.15"/></visual>\n'
-    xml = re.sub(r"<visual>.*?</visual>", "", xml, flags=re.S)
+    xml = re.sub(r"<visual>.*?</visual>", "", xml, flags=re.DOTALL)
     xml = xml.replace("<asset>", visual + "  <asset>", 1)
     # actuators/sensors/keyframes reference names that still exist; keep the file valid by removing them anyway
-    xml = re.sub(r"<actuator>.*?</actuator>", "", xml, flags=re.S)
-    xml = re.sub(r"<sensor>.*?</sensor>", "", xml, flags=re.S)
-    xml = re.sub(r"<keyframe>.*?</keyframe>", "", xml, flags=re.S)
+    xml = re.sub(r"<actuator>.*?</actuator>", "", xml, flags=re.DOTALL)
+    xml = re.sub(r"<sensor>.*?</sensor>", "", xml, flags=re.DOTALL)
+    xml = re.sub(r"<keyframe>.*?</keyframe>", "", xml, flags=re.DOTALL)
     return xml
+
+
+def load_rollout_model(robot: RobotName = "g1") -> mujoco.MjModel:
+    """Two display-only robot trees, chosen from trajectory metadata."""
+    spec = get_robot_spec(robot)
+    if robot == "g1":
+        from mjlab.asset_zoo.robots.unitree_g1.g1_constants import G1_XML
+
+        mjcf = Path(G1_XML)
+    else:
+        from supermimic.robots.khan_mini import DEFAULT_ASSET_DIR
+
+        mjcf = DEFAULT_ASSET_DIR / "robot.xml"
+    return mujoco.MjModel.from_xml_string(two_robot_xml(mjcf, spec.root_body))
 
 
 def draw_label(img: np.ndarray, text: str, sub: str, font, font_small) -> np.ndarray:
@@ -81,7 +107,13 @@ def main(traj: Path, out_dir: Path, fps: int = 25, seconds: float | None = None,
          concat: Path | None = None, segments: list[str] | None = None, titles: list[str] | None = None) -> None:
     """``segments``: per-clip time windows as ``name:start:end`` (seconds); ``titles``: ``name=Display title`` overrides."""
 
-    model = mujoco.MjModel.from_xml_string(two_robot_xml(Path(G1_XML), "pelvis"))
+    with np.load(traj, allow_pickle=False) as archive:
+        d = {key: archive[key] for key in archive.files}
+    robot = str(np.asarray(d.get("robot", "g1")).item())
+    source_fps = float(np.asarray(d.get("fps", 50.0)).item())
+    if not np.isfinite(source_fps) or source_fps <= 0 or fps <= 0:
+        raise ValueError("Source and output frame rates must be finite and positive")
+    model = load_rollout_model(robot)
     data = mujoco.MjData(model)
     renderer = mujoco.Renderer(model, height, width)
     opt = mujoco.MjvOption()
@@ -98,12 +130,11 @@ def main(traj: Path, out_dir: Path, fps: int = 25, seconds: float | None = None,
     except OSError:
         font = font_small = ImageFont.load_default()
 
-    d = dict(np.load(traj))
     names = [str(n) for n in d["names"]]
     nq_robot = d["robot_qpos"].shape[-1]
     assert model.nq == 2 * nq_robot, (model.nq, nq_robot)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stride = max(1, int(round(50 / fps)))
+    stride = max(1, round(source_fps / fps))
     outputs = []
     seg = {x.split(":")[0]: (float(x.split(":")[1]), float(x.split(":")[2])) for x in (segments or [])}
     ttl = {x.split("=", 1)[0]: x.split("=", 1)[1] for x in (titles or [])}
@@ -111,8 +142,8 @@ def main(traj: Path, out_dir: Path, fps: int = 25, seconds: float | None = None,
     for name in order:
         i = names.index(name)
         T = int(d["lengths"][i])
-        t0, t1 = seg.get(name, (0.0, seconds if seconds is not None else T / 50))
-        a, b = int(t0 * 50), min(T, int(t1 * 50) + 1)
+        t0, t1 = seg.get(name, (0.0, seconds if seconds is not None else T / source_fps))
+        a, b = int(t0 * source_fps), min(T, int(t1 * source_fps) + 1)
         qr, qf = d["robot_qpos"][i, a:b], d["ref_qpos"][i, a:b]
         T = b - a
         out = out_dir / f"{name}.mp4"
@@ -132,16 +163,17 @@ def main(traj: Path, out_dir: Path, fps: int = 25, seconds: float | None = None,
             renderer.update_scene(data, cam, opt)
             img = renderer.render()
             if label:
-                img = draw_label(img, ttl.get(name, pretty(name)), f"normalized return {float(d['norm_return'][i]):.2f}   t = {(a + t)/50:4.1f} s", font, font_small)
+                img = draw_label(img, ttl.get(name, pretty(name)), f"normalized return {float(d['norm_return'][i]):.2f}   t = {(a + t)/source_fps:4.1f} s", font, font_small)
             ff.stdin.write(np.ascontiguousarray(img).tobytes())
         ff.stdin.close(); ff.wait()
         outputs.append(out)
-        print("wrote", out, f"{T/50:.1f} s")
+        print("wrote", out, f"{T/source_fps:.1f} s")
     if concat and outputs:
         lst = out_dir / "concat.txt"
         lst.write_text("".join(f"file '{p.resolve()}'\n" for p in outputs))
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(concat)], check=True)
         print("wrote", concat)
+    renderer.close()
 
 
 if __name__ == "__main__":

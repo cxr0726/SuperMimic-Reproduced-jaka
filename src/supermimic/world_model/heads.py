@@ -1,7 +1,7 @@
 """Analytic heads of the world model (plan D4): observation, reward, termination.
 
-Everything here is a pure differentiable function of the 71-d simulator state
-``s = [qpos(36) | qvel(35)]`` (root position expressed relative to the env origin,
+Everything here is a pure differentiable function of the simulator state
+``s = [qpos | qvel]`` (71-d for G1, 67-d for Khan; root relative to the env origin,
 see ``StateIO``), the previous clean action, the sim context ``xi`` and the
 reference frame, so the same code serves the simulator-side tests and the
 imagined rollouts.
@@ -16,26 +16,34 @@ import torch
 from supermimic.envs.mdp.rewards import TrackingRewardCfg, tracking_reward_terms
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.kinematics.rotations import projected_gravity, quat_apply_inverse
+from supermimic.world_model.state_spec import StateSpec
 
 OBS_DIM = 93
 # Term layout of the ``policy`` observation group (order matters: term-major history).
 OBS_TERMS = (("joint_pos", 29), ("joint_vel", 29), ("base_ang_vel", 3), ("projected_gravity", 3), ("actions", 29))
 
 
+def observation_terms(num_joints: int = 29) -> tuple[tuple[str, int], ...]:
+    """Paper Table A.1 term layout, parameterised only by robot joint count."""
+    return (("joint_pos", num_joints), ("joint_vel", num_joints), ("base_ang_vel", 3),
+            ("projected_gravity", 3), ("actions", num_joints))
+
+
 def split_state(s: torch.Tensor):
-    """-> root_pos (…,3), root_quat (…,4), joint_pos (…,29), root_lin_vel_w (…,3), root_ang_vel_b (…,3), joint_vel (…,29)."""
-    return s[..., 0:3], s[..., 3:7], s[..., 7:36], s[..., 36:39], s[..., 39:42], s[..., 42:71]
+    """-> root pose, joint positions, root velocities, joint velocities."""
+    return StateSpec.split(s)
 
 
 def analytic_observation(
     s: torch.Tensor, prev_action: torch.Tensor, xi: torch.Tensor, default_joint_pos: torch.Tensor
 ) -> torch.Tensor:
-    """Noise-free 93-d proprioceptive observation (paper Table A.1) from state + context.
+    """Noise-free proprioception (paper Table A.1, width 3*num_joints+6).
 
-    xi[..., 1:30] is the encoder bias: observed joint positions are ``q + bias - q0``.
+    The joint-sized slice of xi after friction is the encoder bias:
+    observed joint positions are ``q + bias - q0``.
     """
     _, root_quat, q, _, ang_b, qd = split_state(s)
-    bias = xi[..., 1:30]
+    bias = xi[..., 1:1 + default_joint_pos.shape[-1]]
     return torch.cat([q + bias - default_joint_pos, qd, ang_b, projected_gravity(root_quat), prev_action], dim=-1)
 
 
@@ -54,12 +62,21 @@ def anchor_relative_obs(robot_anchor_pos: torch.Tensor, robot_anchor_quat: torch
 ANCHOR_OBS_DIM = 9
 
 
-def flatten_history_term_major(hist: torch.Tensor) -> torch.Tensor:
-    """(H, N, 93) oldest→newest  ->  (N, 930) in mjlab's term-major layout [A_t0..A_tH-1, B_t0..]."""
-    H, N, _ = hist.shape
+def flatten_history_term_major(hist: torch.Tensor, num_joints: int | None = None) -> torch.Tensor:
+    """Flatten oldest→newest history in mjlab's term-major layout.
+
+    G1 uses (H, N, 93) -> (N, H*93); Khan uses (H, N, 87) -> (N, H*87).
+    """
+    H, N, width = hist.shape
+    if num_joints is None:
+        if width < 9 or (width - 6) % 3:
+            raise ValueError(f"Invalid proprioceptive observation width: {width}")
+        num_joints = (width - 6) // 3
+    if width != 3 * num_joints + 6:
+        raise ValueError(f"Observation width {width} does not match {num_joints} joints")
     chunks = []
     start = 0
-    for _, d in OBS_TERMS:
+    for _, d in observation_terms(num_joints):
         chunks.append(hist[:, :, start : start + d].permute(1, 0, 2).reshape(N, H * d))
         start += d
     return torch.cat(chunks, dim=-1)
@@ -91,6 +108,9 @@ class AnalyticHeads:
         reward_cfg: TrackingRewardCfg | None = None,
     ):
         self.fk = fk
+        self.num_joints = fk.nq - 7
+        if default_joint_pos.shape != (self.num_joints,) or soft_limits.shape != (self.num_joints, 2):
+            raise ValueError("Joint defaults and soft limits must match the FK model")
         self.tracked_idx = fk.body_indices(tracked_body_names)
         self.anchor_index = tracked_body_names.index(anchor_body_name)
         self.root_fk_index = fk.body_index(root_body_name)
@@ -99,7 +119,7 @@ class AnalyticHeads:
         self.reward_cfg = reward_cfg or TrackingRewardCfg()
 
     def robot_bodies(self, s: torch.Tensor) -> dict[str, torch.Tensor]:
-        out = self.fk(s[..., :36], s[..., 36:])
+        out = self.fk(s[..., :self.fk.nq], s[..., self.fk.nq:])
         idx = self.tracked_idx
         return {
             "pos": out["pos"][..., idx, :],
@@ -125,7 +145,7 @@ class AnalyticHeads:
             anchor_index=self.anchor_index,
             action=action,
             prev_action=prev_action,
-            joint_pos=s_next[..., 7:36],
+            joint_pos=s_next[..., 7:self.fk.nq],
             soft_limits=self.soft_limits,
             cfg=self.reward_cfg,
         )
@@ -146,7 +166,12 @@ class AnalyticHeads:
     def root_error_features(s: torch.Tensor, ref: ReferenceFrame) -> torch.Tensor:
         """Critic-only privileged drift features (plan D10): root position error in the reference
         heading frame (3) and yaw error (1). (N, 4)"""
-        from supermimic.kinematics.rotations import heading_yaw, quat_apply_inverse, wrap_to_pi, yaw_quat
+        from supermimic.kinematics.rotations import (
+            heading_yaw,
+            quat_apply_inverse,
+            wrap_to_pi,
+            yaw_quat,
+        )
 
         dp = quat_apply_inverse(yaw_quat(ref.root_quat_w), s[..., 0:3] - ref.root_pos_w)
         dyaw = wrap_to_pi(heading_yaw(s[..., 3:7]) - heading_yaw(ref.root_quat_w))

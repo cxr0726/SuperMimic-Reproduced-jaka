@@ -7,13 +7,14 @@ from pathlib import Path
 
 from supermimic.imagination.policy_trainer import PolicyTrainerCfg
 from supermimic.policy.nets import CriticCfg, PolicyCfg
+from supermimic.robots.registry import RobotName
 from supermimic.world_model.wm_trainer import WMTrainerCfg
 from supermimic.world_model.world_model import WorldModelCfg
 
 
 @dataclass
 class DataCfg:
-    npz_dir: Path = Path("data/npz/lafan1")
+    npz_dir: Path | None = None  # None selects the robot's default dataset directory
     clips: list[str] | None = None  # None = all npz in npz_dir
     limit: int | None = None
     manifest: Path | None = None  # csv with name,keep (filter_bones_seed.py output)
@@ -46,6 +47,7 @@ class ScheduleCfg:
     log_interval: int = 50  # iterations
     checkpoint_interval: int = 4000  # iterations
     max_hours: float | None = None
+    stop_after_iterations: int | None = None  # execution limit; does not shorten the LR schedule
 
 
 @dataclass
@@ -54,6 +56,7 @@ class TrainConfig:
     log_root: Path = Path("logs")
     seed: int = 0
     device: str = "cuda:0"
+    robot: RobotName = "g1"
     data: DataCfg = field(default_factory=DataCfg)
     env: EnvCfg = field(default_factory=EnvCfg)
     world_model: WorldModelCfg = field(default_factory=WorldModelCfg)

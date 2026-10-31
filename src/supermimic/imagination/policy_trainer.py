@@ -35,6 +35,7 @@ class PolicyTrainerCfg:
     obs_noise: bool = True
     compile: str | None = "default"
     anchor_obs: bool = False  # None | "default" | "reduce-overhead" | "max-autotune-no-cudagraphs"
+    activation_checkpoint: bool = False  # recompute activations; preserve the full effective batch
 
 
 class PolicyTrainer:
@@ -65,7 +66,7 @@ class PolicyTrainer:
         # ---- actor: BPTT through the frozen world model ------------------------------------
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
-        ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs)
+        ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs, activation_checkpoint=cfg.activation_checkpoint)
         feat, goals, e_root = self._critic_inputs(ro)
         if cfg.use_critic:
             v_H = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1])

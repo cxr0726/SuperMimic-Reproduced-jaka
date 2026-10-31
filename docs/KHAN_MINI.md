@@ -155,7 +155,7 @@ action_cfg = get_khan_mini_action_cfg()  # 全关节 0.5，默认执行噪声 st
 ## 与当前仓库 G1 的对齐情况
 
 这里的 G1 指当前 `tracking_env_cfg.py` 实际导入的 mjlab G1，而非 Isaac Lab 配置。
-**模型资产与执行器/动作接口已对齐，机器人参数不相同，完整训练路径尚未切换到 Khan。**
+**模型资产与执行器/动作接口已对齐；训练可通过 `--robot khan_mini` 选择 Khan，默认仍为 G1。**
 
 | 项目 | Khan_mini | 当前 G1 |
 |---|---|---|
@@ -171,8 +171,8 @@ action_cfg = get_khan_mini_action_cfg()  # 全关节 0.5，默认执行噪声 st
 | 足底摩擦 | (0.6, 0.005, 0.0001) | 相同 |
 | 非足底摩擦 | (1.0, 0.005, 0.0001) | 相同 |
 | 显式碰撞排除对 | 0 | 4 |
-| 动作 / 状态 / goal / 历史观测维度 | 27 / 67 / 640 / 870 | 29 / 71 / 680 / 930 |
-| sm-train 实际选用 | 尚未接入 | 当前固定为 G1 |
+| 动作 / 状态 / 参考goal / 历史观测维度 | 27 / 67 / 640 / 870 | 29 / 71 / 680 / 930 |
+| sm-train 机器人选择 | `--robot khan_mini` | 默认 `--robot g1` |
 
 G1 显式排除 pelvis 与左右 hip_roll，以及左右 elbow 与 wrist_pitch 共四对碰撞。
 两种模型都保留 MuJoCo 默认的同 body、焊接体和直接父子过滤，因此开启自碰撞不表示
@@ -193,6 +193,8 @@ env -u PYTHONPATH uv run python scripts/render_khan_collisions.py
 输出在 `logs/khan_mini_collision/`。碰撞渲染使用独立 CPU 模型，只改变显示颜色与透明度，
 不改变 MJCF 或实际接触配置；淡色外观轮廓仅用于定位，不表示新增碰撞体。
 
-后续训练仍需适配动作重定向、状态与观测维度、FK 和训练配置。Khan_mini 的维度是
-state=67、每帧 goal=64、10 帧 goal=640、10 帧本体观测=870、action=27；当前 G1
-训练路径的 71/680/930/29 维及 G1 LAFAN1 NPZ 不可直接用于 Khan_mini。
+训练已按机器人解析状态、观测、策略、世界模型、FK 与 replay 尺寸。Khan_mini 的维度是
+state=67、每帧 goal=64、10 帧 goal=640、10 帧本体观测=870、action=27、context=31。
+当前Khan服务器脚本开启anchor额外9维，完整goal为649；上表640仅为参考窗口部分。
+G1 的 NPZ 与检查点不能混用于 Khan；加载时会检查模型、关节名称和顺序。
+正式参数与初步训练测试见 [KHAN_TRAINING.md](KHAN_TRAINING.md)。

@@ -23,6 +23,7 @@ from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
 from supermimic.eval.benchmark import load_policy_from_checkpoint
+from supermimic.robots.registry import get_robot_spec
 
 
 class _DictPolicy:
@@ -38,7 +39,7 @@ class _DictPolicy:
 
 def main(
     ckpt: Path,
-    npz_dir: Path = Path("data/npz/lafan1"),
+    npz_dir: Path | None = None,
     clips: list[str] | None = None,
     num_envs: int = 1,
     device: str = "cuda:0",
@@ -46,12 +47,16 @@ def main(
     ghost: bool = True,
     sampling: Literal["start", "uniform"] = "start",
 ) -> None:
-    files = [str(f) for f in discover_npz(npz_dir, names=clips)]
     policy, cfg = load_policy_from_checkpoint(ckpt, device)
+    robot = get_robot_spec(cfg.get("robot", "g1"))
+    npz_dir = npz_dir or robot.default_npz_dir
+    files = [str(f) for f in discover_npz(npz_dir, names=clips)]
     args = SuperMimicEnvCfgArgs(
         npz_files=files,
+        robot=robot.name,
         num_envs=num_envs,
         future_frames=cfg["env"]["future_frames"],
+        history_length=policy.cfg.history,
         episode_length_s=1.0e5,
         action_noise_std=0.0,
         obs_noise=False,
