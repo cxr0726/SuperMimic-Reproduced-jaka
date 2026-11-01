@@ -1,10 +1,10 @@
-# Khan 服务器训练：原优化参数、base anchor与颈部跟踪
+# Khan 服务器训练：Isaac观测布局、SuperMimic尺度与原优化参数
 
 本文件对应 `scripts/training/train_khan_server.sh`。脚本采用原仓库的单GPU LAFAN
-网络隐藏层与优化配置，选择 Khan 模型/动作；默认4096并行环境，开启额外anchor观测。
+网络隐藏层与优化配置，选择Khan模型/动作；默认4096并行环境，采用 `isaac_khan` 观测。
 不启用激活重计算、AMP、微批或梯度累积，不缩小训练batch和想象H。
 
-脚本复用 `TrainConfig` 默认值，只传机器人、路径、环境数和anchor开关，不再把每个默认值重复写进命令。
+脚本复用 `TrainConfig` 的优化默认值，显式传入机器人、路径、环境数及Isaac观测布局和5/5帧数。
 网络隐藏层、学习率、batch、H及UTD不变；当前Khan另有明确的机器人适配：
 
 - 15个tracked bodies，末尾新增 `Neck_pitch_Link`；root/anchor均为 `base_link`。
@@ -12,10 +12,18 @@
 - 新增颈部位置/速度跟踪，权重0.5/0.1、尺度0.3 rad/1 rad/s；仿真与WM解析奖励同源。
 - 最大单步奖励0.112，训练/eval/record使用动态归一化，采样 `Gmax=11.2`；G1仍为0.1/10。
 - 腰部box全尺寸0.15×0.14×0.30 m；质量、惯量及执行器参数不变。
+- goal为5帧参考位移/高度/关节角，共155维，真实环境与想象训练均不加噪声；
+  prop为未来姿态30＋5帧传感器历史435，共465维，保留本体和未来朝向噪声。
 
-goal仍是640+9=649，本体870、decoder902、critic751、state67、action27、context31均不变。
-额外9维现在用base坐标系表达。**形状相同不表示旧策略语义兼容，必须新run。**
+decoder输入为497、critic输入为467；state67、action27、context31保持不变。
+actor本体角速度/关节速度有效scale为0.5/0.2，恢复原SuperMimic值；prop噪声保留此前范围，参考goal保持干净。
+critic除原canonical state/context/root error外，接收干净command155、未来朝向30和5帧参考速度/重力180。
+新增180维按帧排列，每帧为qd27、重力3、root系角速度3、heading系线速度3，网络入口乘数为0.2/1/0.5/1。
+原末尾9维anchor goal由prop前部5帧未来姿态替代。**此前649/870、287维critic或version-3带goal噪声的检查点均不兼容，必须新run。**
+观测公式、噪声及与Isaac PPO的差异见 [KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。
 完整奖励公式及对齐范围见 [KHAN_TRAINING.md](KHAN_TRAINING.md)。
+世界模型动力学输入为canonical state67＋实际执行动作27＋标准化context31，共125维；
+状态输入除数为1/1/1/2/1/5，动作在MLP入口不再乘0.5，详见该训练文档的世界模型输入段。
 
 ## 35/250与参考仓库的来源
 
@@ -52,8 +60,8 @@ goal仍是640+9=649，本体870、decoder902、critic751、state67、action27、
 
 ## 需要同步到服务器的文件
 
-部署前同步包含本轮15-body/base-anchor/neck-reward/contract实现的源码和资产版本。
-若使用Git，确认服务器已检出包含这些改动的版本；仅有先前14-body版本不能代表当前训练配置。
+部署前同步包含 `isaac_khan` 布局、SuperMimic actor尺度、467维critic及Khan version-4 contract的源码和当前机器人资产。
+若使用Git，确认服务器已检出包含这些改动的版本；先前14-body或15-body的649/870观测版本不能代表当前训练配置。
 也可同步工作区或重新生成部署包。
 必须包含 `src/`、`scripts/`、`assets/robots/khan_mini/`、`pyproject.toml`、`uv.lock`、
 `README.md` 和 `.python-version`。
@@ -72,7 +80,7 @@ bash scripts/setup/setup_server_env.sh --project-dir "$PWD"
 
 # 只检查路径、打印完整命令，不启动CUDA/训练，不创建训练日志
 bash scripts/training/train_khan_server.sh \
-  --num-envs 1024 --run-name khan_lafan1_base_neck_1024 --dry-run
+  --num-envs 1024 --run-name khan_lafan1_clean_goal_1024 --dry-run
 ```
 
 安装细节见 [SERVER_SETUP.md](SERVER_SETUP.md)。脚本从自身路径定位项目，换项目目录无需改源码。
@@ -87,16 +95,16 @@ bash scripts/training/train_khan_server.sh \
 
 ```bash
 bash scripts/training/train_khan_server.sh \
-  --num-envs 1024 --run-name khan_lafan1_base_neck_1024 --stop-after-iterations 50
+  --num-envs 1024 --run-name khan_lafan1_clean_goal_1024 --stop-after-iterations 50
 ```
 
 成功后日志应显示 `it 50 ... updates 4`，并保存
-`logs/khan_lafan1_base_neck_1024/ckpt_latest.pt`。然后从该检查点继续到正式320000步：
+`logs/khan_lafan1_clean_goal_1024/ckpt_latest.pt`。然后从该检查点继续到正式320000步：
 
 ```bash
 bash scripts/training/train_khan_server.sh \
-  --num-envs 1024 --run-name khan_lafan1_base_neck_1024 \
-  --resume logs/khan_lafan1_base_neck_1024/ckpt_latest.pt
+  --num-envs 1024 --run-name khan_lafan1_clean_goal_1024 \
+  --resume logs/khan_lafan1_clean_goal_1024/ckpt_latest.pt
 ```
 
 恢复时重新预热40步填充新进程replay，沿用已有模型/Adam状态/全局迭代和采样器统计。
@@ -104,16 +112,16 @@ bash scripts/training/train_khan_server.sh \
 也可直接从头完整运行：
 
 ```bash
-bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_base_neck_full
+bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_clean_goal_full
 ```
 
 这是前台命令，不会替用户自动启动后台任务。控制台可直接查看，TensorBoard位于
 `logs/<run-name>/tb`，解析后的完整配置位于 `logs/<run-name>/config.json`。
 已有检查点时脚本要求明确 `--resume` 或新run-name，避免静默覆盖。
 当前检查点记录 `robot_contract`，加载前检查root/anchor/COM/body、关节、动作缩放、奖励配置、
-模型/profile SHA，以及anchor开关和goal/history布局。旧无contract的Khan检查点会被拒绝，
-包括此前同为649维的40k/200k模型；当前配置必须新run。
-`--no-anchor-obs` 只关闭新配置的额外9维，不能把旧检查点变成兼容模型。
+模型/profile SHA，以及version-4观测schema和goal/history布局。旧无contract及旧观测contract的Khan
+检查点会被拒绝，包括此前649维goal的40k/100k/200k模型；当前配置必须新run。
+服务器脚本拒绝旧 `--anchor-obs`/`--no-anchor-obs` 开关；新布局固定包含未来anchor姿态，不使用旧9维扩展。
 旧策略通过独立导出的旧源码/资产运行器评估，见
 [KHAN_LEGACY_BENCHMARK.md](KHAN_LEGACY_BENCHMARK.md)。该入口不切换当前训练配置。
 40k抗推录像所用的另一份18 cm宽腰盒快照见
@@ -134,8 +142,8 @@ bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan
 | WM、actor、critic LR | 单GPU均2e-4 |
 | gamma / lambda | 0.99 / 0.95 |
 | 训练长度 / LR衰减 | 320000步 / 250000步余弦衰减到0.03× |
-| obs/reset/域随机化/执行噪声 | 按原配置开启 |
-| anchor observation / 激活重计算 | 默认开启，base frame / 关闭 |
+| obs/reset/域随机化/执行噪声 | prop观测噪声开启、参考goal干净；其余沿用本库 |
+| 观测 / 激活重计算 | isaac_khan，未来/历史5/5 / 关闭 |
 | torch.compile | default |
 
 `--stop-after-iterations` 只限制当前进程执行步数，不缩短学习率衰减时间基准。
@@ -146,12 +154,29 @@ bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan
 
 启动脚本的CPU测试会解析生成命令并与真实 `TrainConfig` 对照，确认语法和全部正式参数。
 还测试了路径含空格、dry-run不执行解释器、恢复与短测、缺失环境/资产/数据、检查点覆盖保护。
-新实现的检查范围包括15-body FK、10项仿真/解析奖励、649维base-anchor观测、waist COM上下文、
+历史15-body实现的检查范围包括FK、10项仿真/解析奖励、649维base-anchor观测、waist COM上下文、
 动态回报上界及contract拒绝路径。此前132项测试及12 GB训练记录属于旧配置的历史验证，
 不能作为本轮新配置的正式训练或收敛记录。
 本轮40k的90条件抗推结果使用冻结旧语义，也不能替代新配置服务器训练。
 
-当前15-body/base-anchor实现已通过151项回归测试，并完成8环境、50控制步训练smoke：
+上一版15-body/base-anchor、649/870观测实现通过151项回归测试，并完成8环境、50控制步训练smoke：
 保留正式网络、batch、H及优化参数，执行40次WM、4次actor、80次critic更新，
 参数与日志有限，checkpoint和优化器恢复通过。该本机12 GB测试明确开启了可选激活重计算；
 正式服务器脚本仍默认关闭，不能用这个smoke推断4096环境的显存需求或训练收敛效果。
+
+上一轮155/465观测、Isaac原scale、287维critic通过165项全量测试，另完成8环境50步训练smoke，
+正式网络、batch2048/4096、H32和UTD0.4均保留；40次WM、4次actor、80次critic优化及恢复检查通过。
+本机12 GB测试显式开启激活重计算，正式服务器入口仍关闭。这不替代当前467维critic/SuperMimic scale验证。命令和结果见
+[KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。
+
+上一版SuperMimic scale、467维critic、goal仍加噪的版本通过 **167项全量测试**，并完成8环境50步正式网络/batch的
+训练smoke，包含40次WM、4次actor、80次critic更新，以及模型/优化器/采样器恢复检查；
+实际观测、参数和TB标量有限。该本机12 GB测试显式开启激活重计算，服务器脚本默认仍关闭。
+结果在 `logs/khan_sm_scale_critic467_smoke/summary.json`，完整说明见上述观测文档的对应历史验证段。
+这不替代当前version-4干净goal版本的验证。
+
+当前version-4干净goal版本另通过 **168项全量测试** 和8环境50步正式参数训练smoke：
+动力学输入125、goal155、prop465、decoder497、critic467和15个跟踪body确认；
+40次WM、4次actor、80次critic更新及模型/优化器/采样器恢复通过，参数与实际TB有限。
+本机测试显式开启激活重计算，正式服务器入口仍关闭；结果在
+`logs/khan_clean_goal_smoke/summary.json`。默认run名 `khan_lafan1_clean_goal` 的4096环境dry-run也通过。

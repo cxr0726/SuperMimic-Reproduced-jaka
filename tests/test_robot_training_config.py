@@ -7,7 +7,7 @@ import pytest
 import torch
 from mjlab.asset_zoo.robots import G1_ACTION_SCALE
 
-from supermimic.config import TrainConfig
+from supermimic.config import TrainConfig, resolve_training_observations
 from supermimic.envs.tracking_env_cfg import (
     ANCHOR_BODY,
     FOOT_GEOM_REGEX,
@@ -27,7 +27,9 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
                "domain_randomization": randomized, "obs_noise": randomized,
                "reset_noise": randomized}
     g1 = make_env_cfg(SuperMimicEnvCfgArgs(**options))
-    khan = make_env_cfg(SuperMimicEnvCfgArgs(**options, robot="khan_mini"))
+    # Explicit paper mode retains the previous robot-neutral observation path.
+    khan = make_env_cfg(SuperMimicEnvCfgArgs(**options, robot="khan_mini",
+                                           observation_layout="supermimic"))
     assert tuple(khan.observations) == tuple(g1.observations) == ("policy", "goal")
     for name in khan.observations:
         assert asdict(khan.observations[name]) == asdict(g1.observations[name])
@@ -144,9 +146,12 @@ def test_robot_bindings_and_g1_compatibility_defaults():
 
 def test_production_optimizer_and_network_defaults_unchanged():
     cfg = TrainConfig(robot="khan_mini")
+    resolve_training_observations(cfg)
     assert cfg.world_model.hidden == (2048, 2048, 2048)
     assert cfg.policy.encoder_hidden == cfg.policy.decoder_hidden == (2048, 1024, 512, 256)
-    assert cfg.policy.latent_dim == 32 and cfg.policy.history == 10
+    assert cfg.policy.latent_dim == 32 and cfg.policy.history == 5
+    assert cfg.env.future_frames == cfg.policy.future_frames == cfg.policy_trainer.history == 5
+    assert cfg.policy.goal_dim == 155 and cfg.policy.observation_layout == "isaac_khan"
     assert cfg.critic.hidden == (256, 128)
     assert (cfg.wm_trainer.window, cfg.wm_trainer.batch_size, cfg.wm_trainer.batches_per_update) == (8, 2048, 10)
     assert (cfg.policy_trainer.horizon, cfg.policy_trainer.batch_size) == (32, 4096)

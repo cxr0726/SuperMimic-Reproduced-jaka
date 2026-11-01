@@ -5,12 +5,13 @@
 在项目根目录执行，默认读取已有全部36条 Khan LAFAN1 NPZ：
 
 ```bash
-env -u PYTHONPATH uv run sm-train --robot khan_mini --env.anchor-obs \
-  --run-name khan_lafan1_base_neck
+env -u PYTHONPATH uv run sm-train --robot khan_mini \
+  --run-name khan_lafan1_clean_goal
 ```
 
-当前配置为 **15个跟踪body、base anchor、独立腰部COM随机化、直接颈部位置/速度奖励**。
-它改变了此前14-body/waist-anchor训练的语义，必须使用新run，不能直接续训旧Khan检查点。
+当前配置为 **15个跟踪body、base anchor、独立腰部COM随机化、直接颈部位置/速度奖励**，
+并默认使用 `isaac_khan` 观测：5帧参考、5帧本体历史。此前14-body版本和上一版15-body的
+649维goal/870维本体观测检查点均不能直接续训，须使用新run。
 服务器命令、50步验证及同语义恢复见 [KHAN_SERVER_TRAINING.md](KHAN_SERVER_TRAINING.md)。
 
 `--robot` 默认仍为 `g1`。G1默认数据目录是 `data/npz/lafan1`，Khan是
@@ -27,29 +28,56 @@ env -u PYTHONPATH uv run sm-train --robot khan_mini --env.anchor-obs \
 - 原14个G1对应部位末尾追加 `Neck_pitch_Link`，共15个；该body的位姿和线/角速度进入原body跟踪奖励。
 - 27个关节均保留执行器，动作缩放均为0.5；PD、转子惯量及力矩限制沿用Khan配置。
 
-| 张量或网络接口 | G1，29关节 | 当前Khan，27关节 |
+| 张量或网络接口 | G1，29关节，原默认 | 当前Khan，27关节 |
 |---|---:|---:|
 | qpos / qvel | 36 / 35 | 34 / 33 |
 | state / canonical feature | 71 | 67 |
 | dynamics delta | 70 | 66 |
 | action | 29 | 27 |
-| 单帧本体观测 / 10帧历史 | 93 / 930 | 87 / 870 |
-| 每帧参考goal / 未来10帧 | 68 / 680 | 64 / 640 |
-| 开启anchor后的完整goal | 689 | 649 |
+| 每帧本体观测 / 历史帧数 | 93 / 10 | 87 / 5 |
+| 参考窗口 | 未来10帧 | 当前参考帧至t+4，共5帧 |
+| goal | 680；可选anchor后689 | 155 |
+| policy prop输入 | 930 | 465＝未来姿态30＋历史435 |
 | context ξ | 33 | 31 |
 | tracked bodies | 14 | 15 |
-| 开启anchor后的decoder / critic输入 | 962 / 797 | 902 / 751 |
+| decoder输入（含latent32） | 962 | 497 |
+| critic输入 | 788；可选anchor后797 | **467** |
 
-Khan本体历史顺序与原实现相同，均为10帧term-major布局：关节位置270维、关节速度270维、
-基座角速度30维、投影重力30维、上次clean action270维，合计870。
+Khan的goal按项拼接 `[5×root_pos_diff, 5×root_z, 5×joint_pos]`，维度为15+5+135。
+位移在**当前参考base完整姿态**下表达，首帧位移为0；root_z是世界高度，关节角是参考绝对角。
 
-每个未来参考帧为关节位置27、关节速度27、重力3、角速度3、heading线速度3、高度1，共64维。
-额外anchor仅在整个640维窗口末尾追加一次：当前参考base在机器人base坐标系下的位置3维与姿态6维。
-**不是未来10帧各追加9维**。anchor位置噪声仍为±0.25 m、姿态6D分量噪声±0.05。
-从旧waist anchor改为base时，原640维参考内容与所有接口宽度不变，但末尾9维坐标语义改变。
+policy prop顺序为 `[5帧未来anchor姿态, 5帧历史重力, 5帧历史角速度, 5帧历史q,
+5帧历史qd, 5帧历史action]`，维度为30+15+15+135+135+135。未来姿态是参考base相对当前机器人base的
+旋转矩阵前两列，按行展平；只对传感器项累积历史，历史按最旧到最新排列。
+角速度乘0.5、关节速度乘0.2，与原SuperMimic的有效scale一致；噪声在缩放前加入，网络不重复缩放。
+`isaac_khan` 标识特征布局；155维参考goal已按G1默认方式改为始终不加噪声，
+不受真实/想象的 `obs_noise` 开关影响。prop仍有本体噪声及未来朝向±0.05，
+其中gravity±0.07仍与上游±0.05不同，详见下面链接中的源码核查。
+critic输入为canonical state67＋干净参考command155＋干净未来anchor朝向30＋5帧参考速度/重力180＋context31＋root error4，
+共467维；新增180维每帧为参考qd27、重力3、root系角速度3、heading系线速度3，critic入口分别乘0.2/1/0.5/1。
+保留SuperMimic结构，没有迁移Isaac完整body位姿特权观测；是否改善收敛需训练对照。
+想象历史从replay状态/动作重建后重新采样噪声，reset回填共享首次噪声；不重放真实环境原噪声取值。
 
-服务器及smoke入口默认开启anchor；通用 `TrainConfig` 和G1默认仍关闭。
-直接调用 `sm-train` 需明确传 `--env.anchor-obs`；关闭时goal为640维。
+`auto` 会为Khan选择 `isaac_khan`，为G1保留 `supermimic`。Isaac布局严格要求future/history=5/5，
+原 `--env.anchor-obs` 额外9维不能与其叠加。G1的10帧历史、10帧参考及可选anchor路径保持不变。
+公式、噪声表、历史填充和与Isaac训练框架的区别见 [KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。
+
+## 世界模型输入与scale
+
+动力学MLP输入为 **125维＝canonical state67＋动作27＋标准化context31**，不包含actor的goal、
+prop、观测历史或额外传感器白噪声。67维canonical state依次为root高度1、去yaw姿态6、heading系线速度3、
+root系角速度3、关节绝对位置27、关节速度27；对应输入除数为`1,1,1,2,1,5`，
+即角速度实际乘0.5、关节速度乘0.2，其余乘1。
+
+训练动作使用replay保存的 `a_exec=a+Gaussian(std=0.1)`，在模型入口不再乘机器人动作scale=0.5；
+控制端的0.5用于PD目标映射 `q_target=q_default+0.5*a_exec`。context沿用固定标准化：
+足摩擦`(mu-0.75)/0.45`、27维encoder bias除0.01、3维腰部COM偏移除0.05。
+物理状态和下一步状态目标直接来自qpos/qvel，不混入actor观测白噪声。
+
+想象时模型接收clean策略动作，沿用原G1不额外重采执行Gaussian的名义rollout；
+预测state经解析观测生成后，prop才单独加入观测噪声，参考goal始终干净。
+termination head单独接收高度误差/0.25、倾斜误差/0.8及两者绝对值，共4维；
+原状态输出增量scale、损失scale、显式积分与网络隐藏层均未修改。
 
 ## 奖励与归一化
 
@@ -84,8 +112,15 @@ r_neck_vel = dt * 0.1 * exp(-mean((qd_neck - qd_ref_neck)^2) / 1.0^2)
 normalized_return = sum(rewards) / (max_step_reward * executed_steps)
 ```
 
-回报采样器 `Gmax` 同比由10变为11.2，保持相对回报尺度；softmax温度25以及50%均匀、
-40%困难度、10%记忆混合比例不变。新旧Khan的奖励项和body集合不同，不能直接按回报数值比较策略优劣。
+`train_ret` 是上述逐回合归一化回报的均值，理论上仍不超过 **1.0**，不是1.12；
+分母随正奖励总上界一起增加。这里没有将结果clamp到[0,1]，处罚足够大时可以为负，
+浮点误差也可能导致极小的越界。奖励及actor/critic实际优化仍使用原始dt缩放奖励，没有整体除以0.112。
+
+采样器保存折扣return-to-go，与日志的按步平均归一化是两件事。gamma=0.99时，
+`Gmax=0.112/(1-0.99)=11.2`（G1仍为10），困难度分布为
+`softmax(-25 * bin_return / 11.2)`；初始化的bin return也使用11.2。
+温度25以及50%均匀、40%困难度、10%记忆混合比例保持原值。
+新旧Khan的奖励项和body集合不同，不能直接按回报数值比较策略优劣。
 
 root高度/倾斜终止仍作用于 `base_link`，阈值分别为相对参考高度偏差0.25 m及投影重力z分量差0.8，
 后者不是0.8 rad；clip-end和time-out处理不变。改变anchor也会改变全局anchor奖励及body重锚坐标，
@@ -128,7 +163,7 @@ env -u PYTHONPATH uv run python scripts/smoke_train_khan.py
 
 此前14-body配置在本机12 GB RTX 4070 SUPER上，原始执行路径即使降到1个环境仍在首次actor反传OOM；
 通过的32环境50步测试显式开启了可选激活重计算。历史记录见 [KHAN_MEMORY.md](KHAN_MEMORY.md)，
-不能视为本轮15-body配置的显存实测。当前正式入口仍默认关闭重计算。
+不能视为当前155/465观测版本的显存实测。当前正式入口仍默认关闭重计算。
 若明确选择该资源优化，smoke加 `--activation-checkpoint`，直接训练加
 `--policy-trainer.activation-checkpoint`；它重算完整batch中间激活，没有缩网络、batch或H。
 
@@ -136,18 +171,21 @@ env -u PYTHONPATH uv run python scripts/smoke_train_khan.py
 
 新检查点保存 `robot_contract`：root、anchor、COM body、tracked bodies、关节顺序、动作缩放、
 奖励配置，以及Khan `robot.xml` / `profile.json` 的SHA-256。恢复和评估在加载权重前验证这些语义。
-contract格式version=1；profile的 `training_semantics_version=2` 是另一项资产语义标记。
+Khan contract格式version=4，额外记录干净goal、observation layout、未来偏移、拼接顺序、坐标系、prop噪声尺度及critic参考扩展；
+G1 contract仍为version=1。profile的 `training_semantics_version=2` 是另一项资产语义标记。
 
-**旧Khan检查点缺少contract会被拒绝，即使goal同样是649维也不能直接加载。**
-不要通过补字段、关闭anchor或跳过校验把旧14-body/waist策略当成新配置策略。
+**旧Khan检查点缺少contract或采用旧观测contract都会被拒绝。**
+此前649/870输入与当前155/465输入不同；上轮同为155/465但采用Isaac scale、287维critic，
+或version-3带goal噪声的检查点也不兼容。
+不要通过补字段、关闭anchor或跳过校验强行加载。
 当前配置必须新run；以后仅能恢复相同contract的检查点。历史G1无contract检查点仍按原规则兼容。
 
 ```bash
 env -u PYTHONPATH uv run python scripts/play.py \
-  --ckpt logs/khan_lafan1_base_neck/ckpt_latest.pt --clips walk1_subject1
+  --ckpt logs/khan_lafan1_clean_goal/ckpt_latest.pt --clips walk1_subject1
 
 env -u PYTHONPATH uv run python scripts/eval_benchmark.py \
-  --ckpt logs/khan_lafan1_base_neck/ckpt_latest.pt --num-envs 36
+  --ckpt logs/khan_lafan1_clean_goal/ckpt_latest.pt --num-envs 36
 ```
 
 旧策略的36段全库benchmark及隔离运行命令见
@@ -161,10 +199,10 @@ env -u PYTHONPATH uv run python scripts/eval_benchmark.py \
 ```bash
 env -u PYTHONPATH uv run python scripts/data/build_library.py \
   --robot khan_mini --npz-dir data/npz/khan_mini/lafan1 \
-  --out data/library/khan_base_neck_compact.pt
+  --out data/library/khan_isaac_obs_compact.pt
 
-env -u PYTHONPATH uv run sm-train --robot khan_mini --env.anchor-obs \
-  --run-name khan_base_neck_compact --data.library data/library/khan_base_neck_compact.pt
+env -u PYTHONPATH uv run sm-train --robot khan_mini \
+  --run-name khan_isaac_obs_compact --data.library data/library/khan_isaac_obs_compact.pt
 ```
 
 ## 接地与验证边界
@@ -173,11 +211,11 @@ env -u PYTHONPATH uv run sm-train --robot khan_mini --env.anchor-obs \
 最深约92.90 mm；参考高度仍保留，相关风险与重播见 [KHAN_REPLAY.md](KHAN_REPLAY.md)。
 新增头部跟踪、颈奖励及anchor修改不等于完成了接地修复。
 
-本轮完整回归 `pytest tests -q` 为 **151 passed**，包含15-body FK、10项仿真/解析奖励、
+**历史验证（上一版649维goal/870维本体输入）：** `pytest tests -q` 为151 passed，包含15-body FK、10项仿真/解析奖励、
 base-anchor观测、waist COM及contract拒绝路径。结果保存于
 `logs/khan_waist_collision_adjustment/training_v2_tests.log`。
 
-新配置另完成正式网络与优化参数的50步训练验证：
+该历史版本另完成正式网络与优化参数的50步训练验证；以下是当时命令记录，不是当前默认观测的测试结果：
 
 ```bash
 env -u PYTHONPATH uv run python scripts/smoke_train_khan.py \
@@ -189,4 +227,20 @@ env -u PYTHONPATH uv run python scripts/smoke_train_khan.py \
 WM batch2048、policy batch4096、H32及所有正式网络和学习率计划均保留；
 为本机12 GB显存显式开启激活重计算，默认训练仍关闭。该次Torch峰值allocated约2.77 GiB、
 reserved约3.41 GiB，不能据此推断默认关闭重计算或4096环境时的显存。
-数值一致性测试与短训练不构成长片动作稳定性的证明。
+上一轮155/465观测、Isaac原scale的版本通过165项全量测试，以及critic287维的8环境50步正式网络/batch训练smoke。
+同样完成40次WM、4次actor、80次critic优化，模型参数与实际TB标量有限，恢复检查通过；
+本机12 GB测试显式开启激活重计算，正式默认仍关闭。命令、日志和一次Warp警告的复验说明见
+[KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。这些历史结果不替代当前467维critic/SuperMimic scale验证；
+数值一致性和短训练均不构成长片动作稳定性的证明。
+
+上一版SuperMimic scale、467维critic、goal仍加噪的版本通过 **167项全量测试**，并完成8环境50控制步训练smoke：
+goal155、prop465、decoder497、critic467实测匹配，40次WM、4次actor、80次critic更新与
+模型/优化器/采样器恢复通过；实际参数和TB标量均有限。保留正式隐藏层、batch、H和UTD；
+本机12 GB测试显式开启激活重计算，服务器默认关闭。历史命令、结果及8条警告的说明见
+[KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)中的对应历史验证段；它不替代当前干净goal版本的验证。
+
+当前version-4干净goal版本通过 **168项全量测试**，并完成8环境、50控制步训练smoke。
+动力学输入125、goal155、prop465、decoder497、critic467和15-body均实测匹配；
+正式网络、batch2048/4096、H32、UTD0.4及学习率计划保持，完成40次WM、4次actor、80次critic优化。
+参数与实际TB标量有限，模型/优化器/采样器清空后恢复通过。本机12 GB测试显式开启激活重计算，
+服务器默认关闭。结果为 `logs/khan_clean_goal_smoke/summary.json`，完整命令和边界见上述观测文档的当前验证段。

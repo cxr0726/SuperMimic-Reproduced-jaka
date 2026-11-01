@@ -5,8 +5,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 NUM_ENVS=4096
-RUN_NAME=khan_lafan1_anchor
-ANCHOR_OBS=1
+RUN_NAME=khan_lafan1_clean_goal
 DATA_DIR="$PROJECT_DIR/data/npz/khan_mini/lafan1"
 RESUME=''
 STOP_AFTER=''
@@ -18,16 +17,16 @@ Usage: bash scripts/training/train_khan_server.sh [options]
 
 Single GPU, Khan_mini, original single-GPU LAFAN training parameters.
 Networks, optimization, H=32, UTD=0.4, randomization and LR schedule reuse
-the repository defaults. Anchor observations are enabled; activation
+the repository defaults. Khan uses the Isaac observation layout: 5 reference
+frames, 5 history frames, clean goal 155 and policy input 465. Activation
 recomputation remains disabled. No dataset is downloaded.
 
 Options:
   --num-envs N                Parallel robot environments (default: 4096)
-  --run-name NAME             Directory under project logs/ (default: khan_lafan1_anchor)
+  --run-name NAME             Directory under project logs/ (default: khan_lafan1_clean_goal)
   --data-dir PATH             Converted Khan NPZ directory (default: project data/npz/khan_mini/lafan1)
   --resume PATH               Restore a Khan checkpoint with the same data/configuration
   --stop-after-iterations N   Optional execution limit; retains the 320k LR schedule
-  --no-anchor-obs             Disable the extra 9 anchor goal dimensions for an ablation
   --dry-run                  Validate paths and print the command without importing CUDA or training
   -h, --help                 Show help
 
@@ -47,7 +46,7 @@ while (($#)); do
         --data-dir) need_value "$@"; DATA_DIR="$2"; shift 2 ;;
         --resume) need_value "$@"; RESUME="$2"; shift 2 ;;
         --stop-after-iterations) need_value "$@"; STOP_AFTER="$2"; shift 2 ;;
-        --no-anchor-obs) ANCHOR_OBS=0; shift ;;
+        --no-anchor-obs|--anchor-obs) die 'The Isaac layout already includes 5-frame anchor orientation in policy observations; remove the old anchor flag' ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown option: $1 (use --help)" ;;
@@ -96,22 +95,14 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-1}"
 cd -- "$PROJECT_DIR"
 
-# TrainConfig owns the original network/optimization defaults. Only robot/data,
-# environment count and the requested anchor observation differ here.
+# TrainConfig owns the original network/optimization defaults. Observation
+# windows and input layout are explicitly matched to Khan's Isaac policy.
 command=(
     "$VENV_PYTHON" -u -m supermimic.scripts.train
     --robot khan_mini --run-name "$RUN_NAME" --log-root "$PROJECT_DIR/logs"
     --data.npz-dir "$DATA_DIR" --env.num-envs "$NUM_ENVS"
+    --env.observation-layout isaac_khan --env.future-frames 5 --policy.history 5
 )
-if ((ANCHOR_OBS)); then
-    command+=(--env.anchor-obs)
-    GOAL_DIM=649
-    ANCHOR_LABEL=ON
-else
-    command+=(--env.no-anchor-obs)
-    GOAL_DIM=640
-    ANCHOR_LABEL=OFF
-fi
 if [[ -n "$STOP_AFTER" ]]; then
     command+=(--schedule.stop-after-iterations "$STOP_AFTER")
 fi
@@ -120,8 +111,7 @@ if [[ -n "$RESUME" ]]; then
 fi
 printf '[INFO] Khan clips: %d; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "${#NPZ_FILES[@]}" "$NUM_ENVS"
-printf '[INFO] Anchor observations: %s; goal: %s dimensions; activation recomputation: OFF\n' \
-    "$ANCHOR_LABEL" "$GOAL_DIM"
+printf '[INFO] Khan observations: future/history 5/5; clean goal 155; policy 465; activation recomputation: OFF\n'
 printf '[COMMAND]'
 printf ' %q' "${command[@]}"
 printf '\n'

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import tyro
 
-from supermimic.config import TrainConfig
+from supermimic.config import TrainConfig, resolve_training_observations
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/training/train_khan_server.sh"
@@ -53,48 +53,49 @@ def parse_config(output):
 
 
 @pytest.mark.parametrize("num_envs", [4096, 1024])
-def test_dry_run_adds_anchor_without_overriding_original_optimization(project, num_envs):
+def test_dry_run_selects_isaac_observations_without_overriding_original_optimization(project, num_envs):
     root, _ = project
     result = run_launcher(project, "--dry-run", "--num-envs", str(num_envs))
     assert result.returncode == 0, result.stderr
     cfg = parse_config(result.stdout)
     assert cfg.robot == "khan_mini" and cfg.env.num_envs == num_envs
     assert cfg.data.npz_dir == root / "data/npz/khan_mini/lafan1"
-    assert cfg.run_name == "khan_lafan1_anchor" and cfg.log_root == root / "logs"
+    assert cfg.run_name == "khan_lafan1_clean_goal" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is cfg.data.library is None
-    baseline = TrainConfig()
+    baseline = TrainConfig(robot="khan_mini")
+    resolve_training_observations(cfg)
+    resolve_training_observations(baseline)
     for name in ("world_model", "wm_trainer", "policy", "critic", "policy_trainer", "schedule"):
         assert asdict(getattr(cfg, name)) == asdict(getattr(baseline, name)), name
     current_env, original_env = asdict(cfg.env), asdict(baseline.env)
     current_env.pop("num_envs")
     original_env.pop("num_envs")
-    assert current_env.pop("anchor_obs") is True
+    assert current_env.pop("anchor_obs") is False
     assert original_env.pop("anchor_obs") is False
     assert current_env == original_env
     assert not cfg.policy_trainer.activation_checkpoint
     assert cfg.policy_trainer.batch_size == 4096 and cfg.policy_trainer.horizon == 32
     assert cfg.schedule.updates_per_env_step == 0.4
     assert cfg.schedule.stop_after_iterations is None
-    assert "Anchor observations: ON; goal: 649 dimensions" in result.stdout
+    assert cfg.env.future_frames == cfg.policy.history == 5
+    assert cfg.env.observation_layout == cfg.policy.observation_layout == "isaac_khan"
+    assert cfg.policy.goal_dim == 155
+    assert "future/history 5/5; clean goal 155; policy 465" in result.stdout
     # Optimization values are owned by TrainConfig, rather than copied into Bash.
     command_line = next(line for line in result.stdout.splitlines() if line.startswith("[COMMAND]"))
     flags = shlex.split(command_line.removeprefix("[COMMAND]"))[4:]
     assert not any(flag.startswith(("--world-model.", "--wm-trainer.", "--policy.",
                                     "--policy-trainer.", "--critic.", "--schedule."))
+                   and flag != "--policy.history"
                    for flag in flags)
     assert not (root / "logs").exists()
 
 
-def test_anchor_ablation_restores_original_observation_configuration(project):
+def test_legacy_anchor_flags_rejected_in_isaac_launcher(project):
     root, _ = project
     result = run_launcher(project, "--dry-run", "--no-anchor-obs")
-    assert result.returncode == 0, result.stderr
-    cfg = parse_config(result.stdout)
-    baseline = TrainConfig()
-    assert not cfg.env.anchor_obs
-    for name in ("world_model", "wm_trainer", "policy", "critic", "policy_trainer", "schedule"):
-        assert asdict(getattr(cfg, name)) == asdict(getattr(baseline, name)), name
-    assert "Anchor observations: OFF; goal: 640 dimensions" in result.stdout
+    assert result.returncode != 0
+    assert "remove the old anchor flag" in result.stderr
     assert not (root / "logs").exists()
 
 
@@ -134,7 +135,7 @@ def test_missing_data_and_existing_checkpoint_rejected(project):
     empty.mkdir()
     result = run_launcher(project, "--dry-run", "--data-dir", str(empty))
     assert result.returncode != 0 and "No converted Khan NPZ" in result.stderr
-    run = root / "logs/khan_lafan1_anchor"
+    run = root / "logs/khan_lafan1_clean_goal"
     run.mkdir(parents=True)
     (run / "ckpt_latest.pt").touch()
     result = run_launcher(project, "--dry-run")

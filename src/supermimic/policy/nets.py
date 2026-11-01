@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 from torch import nn
 
+from supermimic.observation_layout import policy_observation_dimension
 from supermimic.world_model.dynamics import MLP
 from supermimic.world_model.heads import observation_terms
 
@@ -20,13 +22,15 @@ class PolicyCfg:
     encoder_hidden: tuple[int, ...] = (2048, 1024, 512, 256)
     decoder_hidden: tuple[int, ...] = (2048, 1024, 512, 256)
     latent_dim: int = LATENT_DIM
-    history: int = 10
-    # Fixed per-term observation scales (divide): joint_pos, joint_vel, base_ang_vel, projected_gravity, actions.
+    history: int | None = 10  # None is resolved by the training configuration
+    observation_layout: Literal["supermimic", "isaac_khan"] = "supermimic"
+    future_frames: int = 10
+    # SuperMimic scales (divide): q, qd, ang, gravity, action. Khan inputs are pre-scaled.
     obs_term_scale: tuple[float, ...] = (1.0, 5.0, 2.0, 1.0, 1.0)
-    # Fixed goal feature scales: joint_pos 29, joint_vel 29, grav 3, ang_vel_b 3, lin_vel_h 3, height 1.
+    # SuperMimic goal scales: q, qd, gravity, ang, lin, height; Isaac uses identity.
     goal_term_scale: tuple[float, ...] = (1.0, 5.0, 1.0, 2.0, 1.0, 1.0)
     decoder_last_gain: float = 0.01
-    goal_dim: int = GOAL_DIM  # 680 (+9 with anchor_obs)
+    goal_dim: int = GOAL_DIM  # G1:680 (+9 anchor); Khan Isaac:155
     num_joints: int = ACT_DIM
 
 
@@ -35,7 +39,21 @@ class CriticCfg:
     hidden: tuple[int, ...] = (256, 128)
 
 
+def critic_goal_dimension(cfg: PolicyCfg) -> int:
+    """Clean command, future orientation and reference velocity features for Khan."""
+    if cfg.observation_layout == "isaac_khan":
+        # Per reference frame: orientation6 + qd(J) + gravity3 + ang_b3 + lin_h3.
+        return cfg.goal_dim + cfg.future_frames * (6 + cfg.num_joints + 9)
+    return cfg.goal_dim
+
+
 def _obs_scale_vector(cfg: PolicyCfg) -> torch.Tensor:
+    if cfg.history is None:
+        raise ValueError("Resolve the policy observation history before constructing a network")
+    if cfg.observation_layout == "isaac_khan":
+        return torch.ones(policy_observation_dimension(
+            cfg.observation_layout, cfg.num_joints, cfg.history, cfg.future_frames,
+        ))
     parts = []
     for (_, d), s in zip(observation_terms(cfg.num_joints), cfg.obs_term_scale):
         parts.append(torch.full((cfg.history * d,), 1.0 / s))
@@ -43,10 +61,32 @@ def _obs_scale_vector(cfg: PolicyCfg) -> torch.Tensor:
 
 
 def _goal_scale_vector(cfg: PolicyCfg, goal_dim: int) -> torch.Tensor:
+    if cfg.observation_layout == "isaac_khan":
+        return torch.ones(goal_dim)
     sizes = (cfg.num_joints, cfg.num_joints, 3, 3, 3, 1)
     per_frame = torch.cat([torch.full((n,), 1.0 / s) for n, s in zip(sizes, cfg.goal_term_scale)])
     k, extra = divmod(goal_dim, 2 * cfg.num_joints + 10)
     return torch.cat([per_frame.repeat(k), torch.ones(extra)])
+
+
+def _critic_goal_scale_vector(cfg: PolicyCfg, goal_dim: int) -> torch.Tensor:
+    """Scale critic-only reference velocities without changing the actor goal.
+
+    Khan stores [command, orientation, extra_frames]. Each extra frame contains
+    [joint velocity, projected gravity, angular velocity in root, linear velocity
+    in heading], with the original SuperMimic goal divisors [5, 1, 2, 1].
+    """
+    if cfg.observation_layout != "isaac_khan":
+        return _goal_scale_vector(cfg, goal_dim)
+    expected = critic_goal_dimension(cfg)
+    if goal_dim != expected:
+        raise ValueError(f"Khan critic reference needs {expected} values, received {goal_dim}")
+    prefix_width = cfg.goal_dim + 6 * cfg.future_frames
+    extra_frame = torch.cat([
+        torch.full((cfg.num_joints,), 1.0 / 5.0), torch.ones(3),
+        torch.full((3,), 1.0 / 2.0), torch.ones(3),
+    ])
+    return torch.cat([torch.ones(prefix_width), extra_frame.repeat(cfg.future_frames)])
 
 
 class MotionEncoder(nn.Module):
@@ -63,7 +103,11 @@ class MotionEncoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, cfg: PolicyCfg, obs_dim: int | None = None):
         super().__init__()
-        obs_dim = cfg.history * (3 * cfg.num_joints + 6) if obs_dim is None else obs_dim
+        if cfg.history is None:
+            raise ValueError("Resolve the policy observation history before constructing a network")
+        obs_dim = policy_observation_dimension(
+            cfg.observation_layout, cfg.num_joints, cfg.history, cfg.future_frames,
+        ) if obs_dim is None else obs_dim
         self.mlp = MLP(cfg.latent_dim + obs_dim, cfg.decoder_hidden, cfg.num_joints, last_gain=cfg.decoder_last_gain)
         self.register_buffer("scale", _obs_scale_vector(cfg))
 
@@ -85,16 +129,16 @@ class Policy(nn.Module):
 
 
 class Critic(nn.Module):
-    """V(canonical state 71, goal 680, xi 33, root error 4) -> scalar (one per interface)."""
+    """V(state, privileged reference, xi, root error); G1 input788, Khan input467."""
 
     def __init__(self, cfg: CriticCfg, feat_dim: int | None = None, goal_dim: int | None = None, xi_dim: int | None = None, pcfg: PolicyCfg | None = None):
         super().__init__()
         pcfg = pcfg or PolicyCfg()
         feat_dim = 13 + 2 * pcfg.num_joints if feat_dim is None else feat_dim
         xi_dim = pcfg.num_joints + 4 if xi_dim is None else xi_dim
-        goal_dim = goal_dim or pcfg.goal_dim
+        goal_dim = critic_goal_dimension(pcfg) if goal_dim is None else goal_dim
         self.mlp = MLP(feat_dim + goal_dim + xi_dim + 4, cfg.hidden, 1)
-        self.register_buffer("goal_scale", _goal_scale_vector(pcfg, goal_dim))
+        self.register_buffer("goal_scale", _critic_goal_scale_vector(pcfg, goal_dim))
 
     def forward(self, feat: torch.Tensor, goal: torch.Tensor, xi_norm: torch.Tensor, e_root: torch.Tensor) -> torch.Tensor:
         return self.mlp(torch.cat([feat, goal * self.goal_scale, xi_norm, e_root], dim=-1)).squeeze(-1)

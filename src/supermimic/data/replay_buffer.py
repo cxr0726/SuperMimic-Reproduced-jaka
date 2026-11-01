@@ -34,6 +34,7 @@ class StartBatch:
     prev_action: torch.Tensor  # (n, A) clean action of the previous step (0 at episode start)
     hist_states: torch.Tensor  # (hist, n, S) states s_{t-hist+1..t} (backfilled at episode start)
     hist_actions: torch.Tensor  # (hist, n, A) clean actions a_{t-hist..t-1} aligned with hist_states' obs
+    history_valid: torch.Tensor | None = None  # (hist,n); False denotes reset backfill
 
 
 class ReplayBuffer:
@@ -41,7 +42,7 @@ class ReplayBuffer:
         self.E, self.T = num_envs, capacity
         self.device = torch.device(device)
         E, T = num_envs, capacity
-        f = lambda *shape: torch.zeros(E, T, *shape, device=self.device)  # noqa: E731
+        f = lambda *shape: torch.zeros(E, T, *shape, device=self.device)
         self.s = f(state_dim)
         self.a = f(act_dim)
         self.a_exec = f(act_dim)
@@ -164,4 +165,5 @@ class ReplayBuffer:
             prev_action=hist_actions[-1],
             hist_states=hist_states,
             hist_actions=hist_actions,
+            history_valid=same_ep,
         )

@@ -23,8 +23,13 @@ OBS_DIM = 93
 OBS_TERMS = (("joint_pos", 29), ("joint_vel", 29), ("base_ang_vel", 3), ("projected_gravity", 3), ("actions", 29))
 
 
-def observation_terms(num_joints: int = 29) -> tuple[tuple[str, int], ...]:
+def observation_terms(
+    num_joints: int = 29, observation_layout: str = "supermimic",
+) -> tuple[tuple[str, int], ...]:
     """Paper Table A.1 term layout, parameterised only by robot joint count."""
+    if observation_layout == "isaac_khan":
+        return (("projected_gravity", 3), ("base_ang_vel", 3), ("joint_pos", num_joints),
+                ("joint_vel", num_joints), ("actions", num_joints))
     return (("joint_pos", num_joints), ("joint_vel", num_joints), ("base_ang_vel", 3),
             ("projected_gravity", 3), ("actions", num_joints))
 
@@ -35,7 +40,8 @@ def split_state(s: torch.Tensor):
 
 
 def analytic_observation(
-    s: torch.Tensor, prev_action: torch.Tensor, xi: torch.Tensor, default_joint_pos: torch.Tensor
+    s: torch.Tensor, prev_action: torch.Tensor, xi: torch.Tensor, default_joint_pos: torch.Tensor,
+    observation_layout: str = "supermimic",
 ) -> torch.Tensor:
     """Noise-free proprioception (paper Table A.1, width 3*num_joints+6).
 
@@ -44,6 +50,9 @@ def analytic_observation(
     """
     _, root_quat, q, _, ang_b, qd = split_state(s)
     bias = xi[..., 1:1 + default_joint_pos.shape[-1]]
+    if observation_layout == "isaac_khan":
+        return torch.cat([projected_gravity(root_quat), 0.5 * ang_b,
+                          q + bias - default_joint_pos, 0.2 * qd, prev_action], dim=-1)
     return torch.cat([q + bias - default_joint_pos, qd, ang_b, projected_gravity(root_quat), prev_action], dim=-1)
 
 
@@ -62,7 +71,9 @@ def anchor_relative_obs(robot_anchor_pos: torch.Tensor, robot_anchor_quat: torch
 ANCHOR_OBS_DIM = 9
 
 
-def flatten_history_term_major(hist: torch.Tensor, num_joints: int | None = None) -> torch.Tensor:
+def flatten_history_term_major(
+    hist: torch.Tensor, num_joints: int | None = None, observation_layout: str = "supermimic",
+) -> torch.Tensor:
     """Flatten oldest→newest history in mjlab's term-major layout.
 
     G1 uses (H, N, 93) -> (N, H*93); Khan uses (H, N, 87) -> (N, H*87).
@@ -76,7 +87,7 @@ def flatten_history_term_major(hist: torch.Tensor, num_joints: int | None = None
         raise ValueError(f"Observation width {width} does not match {num_joints} joints")
     chunks = []
     start = 0
-    for _, d in observation_terms(num_joints):
+    for _, d in observation_terms(num_joints, observation_layout):
         chunks.append(hist[:, :, start : start + d].permute(1, 0, 2).reshape(N, H * d))
         start += d
     return torch.cat(chunks, dim=-1)

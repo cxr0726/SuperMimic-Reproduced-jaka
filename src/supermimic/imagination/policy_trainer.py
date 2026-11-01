@@ -36,6 +36,7 @@ class PolicyTrainerCfg:
     compile: str | None = "default"
     anchor_obs: bool = False  # None | "default" | "reduce-overhead" | "max-autotune-no-cudagraphs"
     activation_checkpoint: bool = False  # recompute activations; preserve the full effective batch
+    observation_layout: str = "supermimic"
 
 
 class PolicyTrainer:
@@ -45,7 +46,8 @@ class PolicyTrainer:
         self.critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
         from supermimic.imagination.compiled import ImagStep
 
-        self.step_fn = ImagStep(wm, lib.default_joint_pos, compile_mode=cfg.compile)
+        self.step_fn = ImagStep(wm, lib.default_joint_pos, compile_mode=cfg.compile,
+                               observation_layout=cfg.observation_layout)
 
     def set_lr(self, lr: float) -> None:
         for g in self.opt.param_groups:
@@ -56,7 +58,8 @@ class PolicyTrainer:
     def _critic_inputs(self, ro: ImagRollout):
         H1, n, _ = ro.states.shape
         feat = self.wm.spec.canonical(ro.states.reshape(H1 * n, -1)).reshape(H1, n, -1)
-        return feat, ro.goals, ro.e_root
+        goals = ro.critic_goals if ro.critic_goals is not None else ro.goals
+        return feat, goals, ro.e_root
 
     def update(self, buffer: ReplayBuffer, xi_norm_fn=None) -> dict[str, float]:
         cfg = self.cfg

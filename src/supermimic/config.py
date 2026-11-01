@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from supermimic.imagination.policy_trainer import PolicyTrainerCfg
+from supermimic.observation_layout import (
+    goal_dimension,
+    resolve_observation_layout,
+    resolve_observation_sizes,
+)
 from supermimic.policy.nets import CriticCfg, PolicyCfg
 from supermimic.robots.registry import RobotName
 from supermimic.world_model.wm_trainer import WMTrainerCfg
@@ -31,7 +37,8 @@ class EnvCfg:
     domain_randomization: bool = True
     sampling_mode: str = "return"
     replay_capacity: int = 1000
-    future_frames: int = 10
+    future_frames: int | None = None  # robot/layout default: G1=10, Khan Isaac=5
+    observation_layout: Literal["auto", "supermimic", "isaac_khan"] = "auto"
     compact_library: bool = False
     anchor_obs: bool = False
 
@@ -61,8 +68,39 @@ class TrainConfig:
     env: EnvCfg = field(default_factory=EnvCfg)
     world_model: WorldModelCfg = field(default_factory=WorldModelCfg)
     wm_trainer: WMTrainerCfg = field(default_factory=WMTrainerCfg)
-    policy: PolicyCfg = field(default_factory=PolicyCfg)
+    policy: PolicyCfg = field(default_factory=lambda: PolicyCfg(history=None))
     critic: CriticCfg = field(default_factory=CriticCfg)
     policy_trainer: PolicyTrainerCfg = field(default_factory=PolicyTrainerCfg)
     schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
     resume: Path | None = None
+
+
+def resolve_training_observations(cfg: TrainConfig) -> None:
+    """Resolve robot defaults before constructing networks or saving configuration.
+
+    None denotes an unspecified window, so an explicit incompatible Isaac window
+    is rejected rather than silently replaced. Network hidden layers and all
+    optimization settings remain independent of the observation layout.
+    """
+    from supermimic.robots.registry import get_robot_spec
+
+    robot = get_robot_spec(cfg.robot)
+    layout = resolve_observation_layout(cfg.robot, cfg.env.observation_layout)
+    future, history = resolve_observation_sizes(
+        layout, cfg.env.future_frames, cfg.policy.history, cfg.env.anchor_obs,
+    )
+    cfg.env.observation_layout = layout
+    cfg.env.future_frames = future
+    cfg.policy.observation_layout = layout
+    cfg.policy.future_frames = future
+    cfg.policy.history = history
+    cfg.policy.num_joints = robot.num_joints
+    cfg.policy.goal_dim = goal_dimension(layout, robot.num_joints, future, cfg.env.anchor_obs)
+    if layout == "isaac_khan":
+        # The environment and analytic observations already apply Isaac's scales.
+        cfg.policy.obs_term_scale = (1.0,) * 6
+        cfg.policy.goal_term_scale = (1.0,) * 3
+    cfg.policy_trainer.observation_layout = layout
+    cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
+    cfg.policy_trainer.future_frames = future
+    cfg.policy_trainer.history = history

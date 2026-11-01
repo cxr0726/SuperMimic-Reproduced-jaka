@@ -155,6 +155,12 @@ action_cfg = get_khan_mini_action_cfg()  # 全关节 0.5，默认执行噪声 st
 
 以下31项测试及初态预览来自较早的资产版本；当前腰宽、15-body/base-anchor及颈部奖励的
 验证由本轮对应配置、FK、奖励和contract测试覆盖，历史数字不代表新语义的完整测试总数。
+上一轮155/465观测、Isaac原scale、287维critic通过165项全量测试及8环境50步正式网络训练smoke，详见
+[KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。
+上一版SuperMimic scale、467维critic、goal仍加噪的版本通过167项全量测试及8环境50步训练smoke；
+这些观测改动没有重建或修改本节机器人资产。
+当前version-4干净goal版本通过168项全量测试及8环境50步正式网络/batch训练smoke，
+15个跟踪body与模型接口确认；验证记录同见上述观测文档，不构成长片收敛或接地修复的证明。
 
 - 4 个 CUDA 环境完成 200 个控制步（每环境 4 秒），qpos/qvel/qacc、观测及奖励均有限。
 - 960×720 的完整初态图已渲染并检查；原生 mjlab 窗口实际打开并完成 100 次暂停刷新后关闭。
@@ -189,7 +195,7 @@ action_cfg = get_khan_mini_action_cfg()  # 全关节 0.5，默认执行噪声 st
 | 足底摩擦 | (0.6, 0.005, 0.0001) | 相同 |
 | 非足底摩擦 | (1.0, 0.005, 0.0001) | 相同 |
 | 显式碰撞排除对 | 0 | 4 |
-| 动作 / 状态 / 参考goal / 历史观测维度 | 27 / 67 / 640 / 870 | 29 / 71 / 680 / 930 |
+| 动作 / 状态 / goal / policy prop维度 | 27 / 67 / 155 / 465 | 29 / 71 / 680 / 930 |
 | tracked bodies / anchor / COM body | 15 / base / waist | 14 / torso / torso |
 | 奖励 / 最大单步奖励 | 原8项+颈部位置/速度两项 / 0.112 | 原8项 / 0.1 |
 | sm-train 机器人选择 | `--robot khan_mini` | 默认 `--robot g1` |
@@ -214,11 +220,14 @@ env -u PYTHONPATH uv run python scripts/render_khan_collisions.py
 输出在 `logs/khan_mini_collision/`。碰撞渲染使用独立 CPU 模型，只改变显示颜色与透明度，
 不改变 MJCF 或实际接触配置；淡色外观轮廓仅用于定位，不表示新增碰撞体。
 
-训练已按机器人解析状态、观测、策略、世界模型、FK 与 replay 尺寸。Khan_mini 的维度是
-state=67、每帧 goal=64、10 帧 goal=640、10 帧本体观测=870、action=27、context=31。
-当前Khan服务器脚本开启anchor额外9维，完整goal为649；上表640仅为参考窗口部分。
-anchor当前使用base frame；COM随机化仍显式绑定waist。新增头部body及颈奖励不改变这些网络接口宽度。
-新检查点保存含root/anchor/COM/body/reward及模型/profile SHA的 `robot_contract`；
-旧无contract Khan检查点不能在当前训练或eval入口静默加载，必须用新run或冻结旧配置的评估运行器。
-G1的NPZ与检查点不能混用于Khan。已有45-body NPZ无需因加入头部跟踪而重新转换。
-正式参数与初步训练测试见 [KHAN_TRAINING.md](KHAN_TRAINING.md)。
+训练已按机器人解析状态、观测、策略、世界模型、FK与replay尺寸。Khan当前默认 `isaac_khan`：
+state=67、5帧参考goal=155、policy prop=465（未来姿态30＋5帧传感器历史435）、action=27、context=31。
+actor本体角速度/关节速度有效scale为0.5/0.2；critic为467维，其中365维是干净参考特征。
+155维actor参考goal也在真实环境和想象训练中保持干净；prop本体/未来朝向噪声仍保留。
+anchor使用base frame；COM随机化仍显式绑定waist。观测改变没有更改上述MJCF、惯量或执行器。
+Khan version-4 `robot_contract` 保存root/anchor/COM/body/reward、模型/profile SHA、actor尺度及critic参考schema；
+旧14-body、649/870输入、Isaac原scale/287维critic或version-3带goal噪声的Khan检查点不能直接用于当前训练或eval，
+应使用新run或相应冻结旧版评估器。
+G1的NPZ与检查点不能混用于Khan。已有45-body NPZ无需因本次观测调整而重新转换。
+正式参数见 [KHAN_TRAINING.md](KHAN_TRAINING.md)，Isaac观测的公式和差异见
+[KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。

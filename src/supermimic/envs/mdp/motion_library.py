@@ -330,6 +330,17 @@ class MotionLibrary:
         feat = goal_features(self.ref(idx.reshape(-1)), self.default_joint_pos)
         return feat.reshape(frame.shape[0], k * self.goal_feat_dim)
 
+    def reference_window(self, frame: torch.Tensor, k: int) -> RefState:
+        """Reference state at t..t+k-1, clamped within each clip, shape (N,K,*).
+
+        Full and compact libraries share this path. Absolute reference joint
+        positions and root poses are needed by the Khan Isaac observation layout.
+        """
+        last = self.last_frame_of(frame)
+        offsets = torch.arange(k, device=self.device)
+        indices = torch.minimum(frame[:, None] + offsets, last[:, None])
+        return self.ref(indices)
+
     def ref_qpos_qvel(self, frame: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """MuJoCo-layout reference state: qpos (N,36) and qvel (N,35; root ang vel in body frame)."""
         r = self.ref(frame)

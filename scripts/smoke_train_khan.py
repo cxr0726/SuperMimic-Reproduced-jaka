@@ -1,6 +1,6 @@
 """Verify Khan training with the repository's full production hyperparameters.
 
-Robot/data selection, anchor observations, world count and execution limit
+Robot/data selection, Isaac observation layout, world count and execution limit
 differ from the original G1 defaults. Optimization settings remain unchanged. Optional activation recomputation
 is disabled by default, matching the original execution. The 320k LR schedule, network
 widths, batch sizes, compilation, warmup, horizon and UTD are preserved.
@@ -19,7 +19,8 @@ from pathlib import Path
 import torch
 from smoke_train import package_versions, read_metrics, verify_optimizer, verify_parameters
 
-from supermimic.config import TrainConfig
+from supermimic.config import TrainConfig, resolve_training_observations
+from supermimic.observation_layout import policy_observation_dimension
 from supermimic.training.loop import Trainer
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,21 +85,25 @@ def verify_checkpoint_restore(trainer, models, checkpoint: Path) -> dict:
 def verify_production_config(cfg: TrainConfig) -> dict:
     """Fail if a smoke-only simplification leaks into an optimization setting."""
     formal = TrainConfig()
+    resolve_training_observations(cfg)
+    resolve_training_observations(formal)
     for name in ("world_model", "wm_trainer", "critic"):
         assert asdict(getattr(cfg, name)) == asdict(getattr(formal, name)), name
     trainer = asdict(cfg.policy_trainer)
     original_trainer = asdict(formal.policy_trainer)
     trainer.pop("activation_checkpoint")
     original_trainer.pop("activation_checkpoint")
-    trainer.pop("anchor_obs")
-    original_trainer.pop("anchor_obs")
+    for key in ("anchor_obs", "observation_layout", "history", "future_frames"):
+        trainer.pop(key)
+        original_trainer.pop(key)
     assert trainer == original_trainer, "policy optimization parameters changed"
     policy = asdict(cfg.policy)
     original = asdict(formal.policy)
-    for key in ("num_joints", "goal_dim"):
+    for key in ("num_joints", "goal_dim", "observation_layout", "history", "future_frames",
+                "obs_term_scale", "goal_term_scale"):
         policy.pop(key)
         original.pop(key)
-    assert policy == original, "policy architecture or normalization changed"
+    assert policy == original, "policy hidden architecture changed"
     schedule = asdict(cfg.schedule)
     reference_schedule = asdict(formal.schedule)
     schedule.pop("stop_after_iterations")
@@ -108,12 +113,16 @@ def verify_production_config(cfg: TrainConfig) -> dict:
     reference_env = asdict(formal.env)
     env.pop("num_envs")
     reference_env.pop("num_envs")
-    env.pop("anchor_obs")
-    reference_env.pop("anchor_obs")
+    for key in ("anchor_obs", "observation_layout", "future_frames"):
+        env.pop(key)
+        reference_env.pop(key)
     assert env == reference_env, "observation/reward/randomization settings changed"
     return {
         "matches_train_config_optimization_defaults": True,
         "anchor_obs": cfg.env.anchor_obs,
+        "observation_layout": cfg.env.observation_layout,
+        "future_frames": cfg.env.future_frames,
+        "history": cfg.policy.history,
         "execution_overrides": {"num_envs": cfg.env.num_envs,
                                 "stop_after_iterations": cfg.schedule.stop_after_iterations,
                                 "activation_checkpoint": cfg.policy_trainer.activation_checkpoint},
@@ -142,8 +151,9 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data/npz/khan_mini/lafan1")
     parser.add_argument("--num-envs", type=int, default=32)
     parser.add_argument("--steps", type=int, default=50)
-    parser.add_argument("--anchor-obs", action=argparse.BooleanOptionalAction, default=True,
-                        help="Append anchor-relative position/rotation to the goal (default: enabled for Khan)")
+    parser.add_argument("--observation-layout", choices=("isaac_khan", "supermimic"), default="isaac_khan")
+    parser.add_argument("--anchor-obs", action=argparse.BooleanOptionalAction, default=False,
+                        help="Optional 9D goal pose for supermimic layout only; incompatible with isaac_khan")
     parser.add_argument("--activation-checkpoint", action=argparse.BooleanOptionalAction, default=False,
                         help="Optional activation recomputation; disabled to match the original training")
     args = parser.parse_args()
@@ -159,6 +169,7 @@ def main() -> None:
     cfg = TrainConfig(robot="khan_mini", run_name=args.run_name, log_root=args.log_root.resolve())
     cfg.data.npz_dir = args.data_dir.resolve()
     cfg.env.num_envs = args.num_envs
+    cfg.env.observation_layout = args.observation_layout
     cfg.env.anchor_obs = args.anchor_obs
     cfg.policy_trainer.anchor_obs = args.anchor_obs
     cfg.schedule.stop_after_iterations = args.steps
@@ -192,7 +203,15 @@ def main() -> None:
         report["dimensions"] = {
             "state": trainer.buffer.s.shape[-1], "action": cfg.policy.num_joints,
             "context": trainer.wm.spec.xi_dim, "goal": cfg.policy.goal_dim,
-            "observation_history": cfg.policy.history * (3 * cfg.policy.num_joints + 6),
+            "world_model_input": trainer.wm.dynamics.mlp.net[0].in_features,
+            "proprioceptive_history": cfg.policy.history * (3 * cfg.policy.num_joints + 6),
+            "policy_observation": policy_observation_dimension(
+                cfg.policy.observation_layout, cfg.policy.num_joints, cfg.policy.history,
+                cfg.policy.future_frames,
+            ),
+            "encoder_input": trainer.policy.encoders["motion"].mlp.net[0].in_features,
+            "decoder_input": trainer.policy.decoder.mlp.net[0].in_features,
+            "critic_input": trainer.critic.mlp.net[0].in_features,
             "tracked_bodies": len(trainer.robot_spec.tracked_bodies),
         }
         # Progress around expensive first compilation without changing training behavior.

@@ -30,7 +30,7 @@ NEEDS_CUDA_DATA = pytest.mark.skipif(
 )
 
 
-def test_khan_config_preserves_g1_observation_and_extends_neck_tracking_reward():
+def test_khan_config_uses_isaac_observation_and_extends_neck_tracking_reward():
     g1 = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused.npz"]))
     khan = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused.npz"], robot="khan_mini"))
     spec = get_robot_spec("khan_mini")
@@ -46,15 +46,12 @@ def test_khan_config_preserves_g1_observation_and_extends_neck_tracking_reward()
     assert khan.recorders["replay"].params["com_body_name"] == spec.com_body
     assert set(khan.actions["joint_pos"].scale.values()) == {0.5}
     assert len(khan.actions["joint_pos"].scale) == 27
-    for group_name in ("policy", "goal"):
-        actual, expected = khan.observations[group_name], g1.observations[group_name]
-        assert tuple(actual.terms) == tuple(expected.terms)
-        assert actual.history_length == expected.history_length
-        assert actual.enable_corruption == expected.enable_corruption
-        for name in actual.terms:
-            assert actual.terms[name].func is expected.terms[name].func
-            assert actual.terms[name].params == expected.terms[name].params
-            assert actual.terms[name].noise == expected.terms[name].noise
+    assert tuple(khan.observations["policy"].terms) == (
+        "motion_anchor_ori_b", "projected_gravity", "base_ang_vel", "joint_pos", "joint_vel", "actions"
+    )
+    assert tuple(khan.observations["goal"].terms) == ("command",)
+    assert khan.commands["motion"].future_frames == 5
+    assert g1.commands["motion"].future_frames == 10
     assert len(khan.rewards) == 10 and len(g1.rewards) == 8
     for name, original in g1.rewards.items():
         term = khan.rewards[name]
@@ -122,8 +119,8 @@ def test_khan_spaces_observation_reward_history_and_replay(setup_khan):
     obs, _ = env.reset()
     cmd = env.command_manager.get_term("motion")
     rec = env.recorder_manager.get_term("replay")
-    assert obs["policy"].shape == (8, 870)
-    assert obs["goal"].shape == (8, 640)
+    assert obs["policy"].shape == (8, 465)
+    assert obs["goal"].shape == (8, 155)
     assert env.action_manager.total_action_dim == 27
     assert io.read().shape == (8, 67) and rec.ctx.read().shape == (8, 31)
     assert tuple(robot.joint_names) == spec.joint_names
@@ -143,22 +140,27 @@ def test_khan_spaces_observation_reward_history_and_replay(setup_khan):
         _refresh(env, cmd)
         state, xi = io.read(), rec.ctx.read()
         current = analytic_observation(state, env.action_manager.action, xi,
-                                        robot.data.default_joint_pos[0])
+                                        robot.data.default_joint_pos[0], observation_layout="isaac_khan")
         hist.append(current.clone())
         age = torch.where(env.reset_buf, torch.zeros_like(age), age + 1)
         start = 0
-        for name, width in observation_terms(27):
-            block = obs["policy"][:, start * 10:(start + width) * 10].reshape(8, 10, width)
+        for name, width in observation_terms(27, observation_layout="isaac_khan"):
+            block = obs["policy"][:, 30 + start * 5:30 + (start + width) * 5].reshape(8, 5, width)
             torch.testing.assert_close(block[:, -1], current[:, start:start + width],
                                        rtol=0, atol=2e-5, msg=name)
             start += width
-        if len(hist) >= 10 and (age >= 10).any():
-            stable = age >= 10
-            full = flatten_history_term_major(torch.stack(hist[-10:]))
-            torch.testing.assert_close(full[stable], obs["policy"][stable], rtol=0, atol=2e-5)
+        if len(hist) >= 5 and (age >= 5).any():
+            stable = age >= 5
+            full = flatten_history_term_major(torch.stack(hist[-5:]), observation_layout="isaac_khan")
+            torch.testing.assert_close(full[stable], obs["policy"][stable, 30:], rtol=0, atol=2e-5)
             full_history_checks += int(stable.sum())
-        torch.testing.assert_close(obs["goal"], cmd.library.goal_window(cmd.frame, 10),
-                                   rtol=0, atol=1e-6)
+        from supermimic.observation_layout import isaac_anchor_orientation, isaac_goal_command
+
+        future = cmd.library.reference_window(cmd.frame, 5)
+        torch.testing.assert_close(obs["goal"], isaac_goal_command(
+            future.root_pos_w, future.root_quat_w, future.joint_pos), rtol=0, atol=1e-6)
+        torch.testing.assert_close(obs["policy"][:, :30], isaac_anchor_orientation(
+            cmd.robot_anchor_quat_w, future.root_quat_w), rtol=0, atol=2e-5)
         ref = reference_at(cmd.library, cmd.frame)
         ours = heads.reward(state, env.action_manager.action, env.action_manager.prev_action, ref)
         for name in env.cfg.rewards:
@@ -176,7 +178,7 @@ def test_khan_spaces_observation_reward_history_and_replay(setup_khan):
                                    rtol=0, atol=2e-5)
         assert torch.equal(features[:, 0].abs() > 0.25, sm_term.bad_root_height(env, "motion"))
         assert torch.equal(features[:, 1].abs() > 0.8, sm_term.bad_root_tilt(env, "motion"))
-    assert full_history_checks > 0, "No reset-free 10-frame observation segment was exercised"
+    assert full_history_checks > 0, "No reset-free 5-frame observation segment was exercised"
     assert max(worst_rewards.values()) < 2e-5, worst_rewards
     buf = rec.buffer
     assert buf.size >= env.num_envs * 20
@@ -187,9 +189,9 @@ def test_khan_spaces_observation_reward_history_and_replay(setup_khan):
     for value in (window.states, window.a_exec, window.a_clean, window.xi, window.reward):
         assert torch.isfinite(value).all()
     assert 0.05 < (window.a_exec - window.a_clean).std() < 0.2
-    starts = buf.sample_starts(32, hist=10)
-    assert starts.hist_states.shape == (10, 32, 67)
-    assert starts.hist_actions.shape == (10, 32, 27)
+    starts = buf.sample_starts(32, hist=5)
+    assert starts.hist_states.shape == (5, 32, 67)
+    assert starts.hist_actions.shape == (5, 32, 27)
     assert torch.equal(starts.hist_states[-1], starts.state)
     assert torch.isfinite(starts.hist_states).all()
 
@@ -291,6 +293,7 @@ def test_khan_anchor_goal_matches_reference_pose_in_robot_base_frame(obs_noise):
     """The actual mjlab goal appends one 3+6 anchor pose, with matching noise."""
     env = make_env(SuperMimicEnvCfgArgs(
         npz_files=[str(NPZ)], robot="khan_mini", num_envs=4,
+        observation_layout="supermimic",
         anchor_obs=True, obs_noise=obs_noise, reset_noise=False,
         domain_randomization=False, action_noise_std=0.0,
         sampling_mode="start", record_transitions=False, seed=29,

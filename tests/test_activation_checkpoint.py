@@ -19,7 +19,7 @@ from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 
 
-def _khan_training_components(tmp_path, anchor_obs):
+def _khan_training_components(tmp_path, anchor_obs, observation_layout="supermimic"):
     robot = get_robot_spec("khan_mini")
     profile = load_profile()
     model = robot.load_model()
@@ -44,9 +44,11 @@ def _khan_training_components(tmp_path, anchor_obs):
     # Exercise actual state/action BPTT rather than only the zero-initialized prior.
     with torch.no_grad():
         wm.dynamics.mlp.net[-1].weight.normal_(std=0.001)
+    history, future = (5, 5) if observation_layout == "isaac_khan" else (2, 2)
+    goal = 155 if observation_layout == "isaac_khan" else 2 * robot.goal_feature_dim + (9 if anchor_obs else 0)
     policy_cfg = PolicyCfg(encoder_hidden=(16,), decoder_hidden=(16,), latent_dim=4,
-                           history=2, num_joints=robot.num_joints,
-                           goal_dim=2 * robot.goal_feature_dim + (9 if anchor_obs else 0))
+                           history=history, future_frames=future, num_joints=robot.num_joints,
+                           goal_dim=goal, observation_layout=observation_layout)
     policy = Policy(policy_cfg)
     critic = Critic(CriticCfg(hidden=(8,)), pcfg=policy_cfg)
     buffer = ReplayBuffer(2, 32, robot.state_dim, robot.num_joints, robot.num_joints + 4, "cpu")
@@ -65,11 +67,14 @@ def _khan_training_components(tmp_path, anchor_obs):
     return wm, policy, critic, library, buffer
 
 
-@pytest.mark.parametrize("anchor_obs", [False, True])
-def test_activation_checkpoint_preserves_objective_gradients_optimizer_and_rng(tmp_path, anchor_obs):
+@pytest.mark.parametrize("observation_layout,anchor_obs", [
+    ("supermimic", False), ("supermimic", True), ("isaac_khan", False),
+])
+def test_activation_checkpoint_preserves_objective_gradients_optimizer_and_rng(tmp_path, observation_layout, anchor_obs):
     torch.manual_seed(123)
-    wm, policy, critic, library, buffer = _khan_training_components(tmp_path, anchor_obs)
-    cfg = PolicyTrainerCfg(horizon=3, batch_size=4, history=2, future_frames=2,
+    wm, policy, critic, library, buffer = _khan_training_components(tmp_path, anchor_obs, observation_layout)
+    cfg = PolicyTrainerCfg(horizon=3, batch_size=4, history=policy.cfg.history,
+                           future_frames=policy.cfg.future_frames, observation_layout=observation_layout,
                            critic_epochs=1, critic_minibatches=2, compile=None,
                            obs_noise=True, anchor_obs=anchor_obs)
     assert not cfg.activation_checkpoint

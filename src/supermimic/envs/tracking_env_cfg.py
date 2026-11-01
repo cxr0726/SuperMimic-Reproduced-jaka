@@ -1,8 +1,9 @@
 """SuperMimic tracking environment on mjlab (plan Phase 2.3).
 
 Differences from mjlab's BeyondMimic re-implementation (``mjlab.tasks.tracking``):
-  * observations: paper Table A.1 proprioception only (no anchor pose, no base lin vel),
-    10-frame history (term-major), plus a separate ``goal`` group with K future frames;
+  * observations: G1 uses paper Table A.1 with 10-frame proprioceptive history;
+    Khan uses the Isaac 155-d goal and 465-d proprioception, with five future
+    orientations and five sensor-history frames in term-major order;
   * action: ``NoisyJointPositionAction`` (clean action observed, noise only executed);
   * multi-clip command with return-based reset sampling and clip-end time-outs;
   * rewards: self-collision term removed, joint-limit weight -2; Khan additionally
@@ -38,6 +39,11 @@ from supermimic.envs.mdp import rewards as sm_rewards
 from supermimic.envs.mdp import terminations as sm_term
 from supermimic.envs.mdp.commands import MultiClipMotionCommandCfg
 from supermimic.envs.mdp.rewards import TrackingRewardCfg
+from supermimic.observation_layout import (
+    ObservationLayoutOption,
+    resolve_observation_layout,
+    resolve_observation_sizes,
+)
 from supermimic.robots.registry import G1_TRACKED_BODIES, RobotName, get_robot_spec
 
 
@@ -61,8 +67,8 @@ FOOT_GEOM_REGEX = r"^(left|right)_foot[1-7]_collision$"
 class SuperMimicEnvCfgArgs:
     npz_files: list[str]
     num_envs: int = 4096
-    future_frames: int = 10
-    history_length: int = 10
+    future_frames: int | None = None
+    history_length: int | None = None
     episode_length_s: float = 10.0
     action_noise_std: float = 0.1
     obs_noise: bool = True
@@ -80,11 +86,16 @@ class SuperMimicEnvCfgArgs:
     anchor_obs: bool = False  # add BeyondMimic anchor-relative pose (9) to the goal group (plan D5 alt.)
     debug_vis: bool = False  # draw the reference ghost in the viewer (scripts/play.py)
     robot: RobotName = "g1"
+    observation_layout: ObservationLayoutOption = "auto"
     extra_command_kwargs: dict = field(default_factory=dict)
 
 
 def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     robot_spec = get_robot_spec(a.robot)
+    a.observation_layout = resolve_observation_layout(a.robot, a.observation_layout)
+    a.future_frames, a.history_length = resolve_observation_sizes(
+        a.observation_layout, a.future_frames, a.history_length, a.anchor_obs,
+    )
     tracking_rewards = TrackingRewardCfg.for_joint_names(robot_spec.joint_names)
     # ---------------------------------------------------------------- observations
     noise = (lambda lo, hi: Unoise(n_min=lo, n_max=hi)) if a.obs_noise else (lambda lo, hi: None)
@@ -119,6 +130,41 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             enable_corruption=a.obs_noise,
         ),
     }
+
+    if a.observation_layout == "isaac_khan":
+        if robot_spec.anchor_body != robot_spec.root_body:
+            raise ValueError("isaac_khan requires the anchor to be the free-root base_link")
+        # Only sensor terms accumulate history. Future orientation is recomputed
+        # from the current robot pose and the current five-frame reference window.
+        sensor_terms = {
+            "projected_gravity": ObservationTermCfg(
+                func=base_mdp.projected_gravity, noise=noise(-0.07, 0.07)),
+            "base_ang_vel": ObservationTermCfg(
+                func=base_mdp.base_ang_vel, noise=noise(-0.2, 0.2), scale=0.5),
+            "joint_pos": ObservationTermCfg(
+                func=base_mdp.joint_pos_rel, params={"biased": True}, noise=noise(-0.01, 0.01)),
+            "joint_vel": ObservationTermCfg(
+                func=base_mdp.joint_vel_rel, noise=noise(-0.5, 0.5), scale=0.2),
+            "actions": ObservationTermCfg(func=base_mdp.last_action),
+        }
+        for term in sensor_terms.values():
+            term.history_length = a.history_length
+            term.flatten_history_dim = True
+        observations = {
+            "policy": ObservationGroupCfg(
+                terms={
+                    "motion_anchor_ori_b": ObservationTermCfg(
+                        func=sm_obs.isaac_motion_anchor_orientation,
+                        params={"command_name": "motion"}, noise=noise(-0.05, 0.05)),
+                    **sensor_terms,
+                }, concatenate_terms=True, enable_corruption=a.obs_noise,
+            ),
+            "goal": ObservationGroupCfg(
+                terms={"command": ObservationTermCfg(
+                    func=sm_obs.isaac_goal_command, params={"command_name": "motion"},
+                )}, concatenate_terms=True, enable_corruption=False,
+            ),
+        }
 
     # ---------------------------------------------------------------- actions
     actions = {

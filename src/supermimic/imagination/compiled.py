@@ -26,9 +26,11 @@ REWARD_TERM_NAMES = (
 
 
 class ImagStep:
-    def __init__(self, wm: WorldModel, default_joint_pos: torch.Tensor, compile_mode: str | None = None):
+    def __init__(self, wm: WorldModel, default_joint_pos: torch.Tensor,
+                 compile_mode: str | None = None, observation_layout: str = "supermimic"):
         self.wm = wm
         self.q0 = default_joint_pos
+        self.observation_layout = observation_layout
         cfg = wm.heads.reward_cfg
         self.term_names = (REWARD_TERM_NAMES
                            + (("motion_neck_pos",) if cfg.w_neck_pos else ())
@@ -47,7 +49,7 @@ class ImagStep:
         r = terms["total"]
         term_vec = torch.stack([terms[k] for k in self.term_names], dim=0)
         logits = self.wm.termination_logits(s_next, ref)
-        obs_clean = analytic_observation(s_next, a, xi, self.q0)
+        obs_clean = analytic_observation(s_next, a, xi, self.q0, self.observation_layout)
         ai = self.wm.heads.anchor_index
         anchor_pose = torch.cat([bodies["pos"][..., ai, :], bodies["quat"][..., ai, :]], dim=-1)  # (n, 7)
         return s_next, r, term_vec, logits, obs_clean, anchor_pose

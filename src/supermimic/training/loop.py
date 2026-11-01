@@ -10,11 +10,12 @@ from pathlib import Path
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from supermimic.config import TrainConfig
+from supermimic.config import TrainConfig, resolve_training_observations
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
 from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.kinematics.g1_fk import G1Kinematics
+from supermimic.observation_layout import goal_dimension
 from supermimic.policy.nets import Critic, Policy
 from supermimic.robots.contracts import robot_contract, validate_robot_contract
 from supermimic.robots.registry import get_robot_spec
@@ -36,11 +37,7 @@ class Trainer:
         self.robot_spec = robot_spec = get_robot_spec(cfg.robot)
         if cfg.data.npz_dir is None:
             cfg.data.npz_dir = robot_spec.default_npz_dir
-        cfg.policy.num_joints = robot_spec.num_joints
-        cfg.policy.goal_dim = cfg.env.future_frames * robot_spec.goal_feature_dim + (9 if cfg.env.anchor_obs else 0)
-        cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
-        cfg.policy_trainer.future_frames = cfg.env.future_frames
-        cfg.policy_trainer.history = cfg.policy.history
+        resolve_training_observations(cfg)
         if cfg.data.library is not None:
             cfg.env.compact_library = True
         self.rank, local_rank, self.world = init_distributed()
@@ -72,6 +69,7 @@ class Trainer:
                 num_envs=cfg.env.num_envs,
                 future_frames=cfg.env.future_frames,
                 history_length=cfg.policy.history,
+                observation_layout=cfg.env.observation_layout,
                 episode_length_s=cfg.env.episode_length_s,
                 action_noise_std=cfg.env.action_noise_std,
                 obs_noise=cfg.env.obs_noise,
@@ -134,7 +132,7 @@ class Trainer:
                 "bin_return": self.command.bin_return,
                 "bin_memory": self.command.bin_memory,
                 "config": asdict(self.cfg),
-                "robot_contract": robot_contract(self.cfg.robot),
+                "robot_contract": robot_contract(self.cfg.robot, self.cfg.env.observation_layout),
             },
             self.log_dir / name,
         )
@@ -152,18 +150,19 @@ class Trainer:
             )
         saved_env = ck["config"].get("env", {})
         saved_policy = ck["config"].get("policy", {})
-        per_frame = get_robot_spec(self.cfg.robot).goal_feature_dim
+        saved_profile = saved_env.get("observation_layout", "supermimic")
         saved_future = saved_env.get("future_frames", 10)
-        saved_layout = (saved_future, saved_policy.get("history", 10),
-                        saved_policy.get("goal_dim", saved_future * per_frame + (9 if saved_anchor else 0)))
-        current_layout = (self.cfg.env.future_frames, self.cfg.policy.history,
-                          self.cfg.env.future_frames * per_frame + (9 if self.cfg.env.anchor_obs else 0))
+        saved_layout = (saved_profile, saved_future, saved_policy.get("history", 10),
+                        saved_policy.get("goal_dim", goal_dimension(
+                            saved_profile, self.robot_spec.num_joints, saved_future, saved_anchor)))
+        current_layout = (self.cfg.env.observation_layout, self.cfg.env.future_frames,
+                          self.cfg.policy.history, self.cfg.policy.goal_dim)
         if saved_layout != current_layout:
             raise ValueError(
                 f"Checkpoint goal/observation layout differs: saved {saved_layout}, requested {current_layout}; "
                 "use matching settings or start a new run"
             )
-        validate_robot_contract(ck, self.cfg.robot)
+        validate_robot_contract(ck, self.cfg.robot, self.cfg.env.observation_layout)
         self.wm.load_state_dict(ck["wm"])
         self.policy.load_state_dict(ck["policy"])
         self.critic.load_state_dict(ck["critic"])

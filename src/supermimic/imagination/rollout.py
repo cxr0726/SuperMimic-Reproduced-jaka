@@ -10,6 +10,12 @@ from torch.utils.checkpoint import checkpoint, set_checkpoint_early_stop
 from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.imagination.compiled import REWARD_TERM_NAMES, ImagStep
+from supermimic.observation_layout import (
+    critic_reference_extras,
+    isaac_anchor_orientation,
+    isaac_goal_command,
+    resolve_observation_sizes,
+)
 from supermimic.policy.nets import Policy
 from supermimic.world_model.heads import (
     ReferenceFrame,
@@ -25,8 +31,17 @@ OBS_NOISE_HALF = torch.tensor([0.01] * 29 + [0.5] * 29 + [0.2] * 3 + [0.05] * 3 
 ANCHOR_NOISE_HALF = torch.tensor([0.25] * 3 + [0.05] * 6)
 
 
-def observation_noise_half(num_joints: int, *, device=None, dtype=torch.float32) -> torch.Tensor:
-    """Paper sensor noise in [joint_pos, joint_vel, ang_vel, gravity, action] order."""
+def observation_noise_half(
+    num_joints: int, *, device=None, dtype=torch.float32, observation_layout: str = "supermimic",
+) -> torch.Tensor:
+    """Sensor noise in the chosen layout's units (Khan observations are pre-scaled)."""
+    if observation_layout == "isaac_khan":
+        # Noise is added after analytic scaling here, equivalent to the
+        # environment's noise-before-scale pipeline: angular .2*.5, qd .5*.2.
+        return torch.tensor(
+            [0.07] * 3 + [0.1] * 3 + [0.01] * num_joints
+            + [0.1] * num_joints + [0.0] * num_joints, device=device, dtype=dtype,
+        )
     return torch.tensor(
         [0.01] * num_joints + [0.5] * num_joints + [0.2] * 3
         + [0.05] * 3 + [0.0] * num_joints,
@@ -45,6 +60,7 @@ class ImagRollout:
     e_root: torch.Tensor  # (H+1, n, 4)
     frames: torch.Tensor  # (H+1, n)
     reward_terms: dict  # mean of each reward term over the rollout (diagnostics)
+    critic_goals: torch.Tensor | None = None  # Khan: command155 + orientation30 + velocity/gravity180
 
 
 def imagine(
@@ -53,7 +69,7 @@ def imagine(
     lib: MotionLibrary,
     start: StartBatch,
     horizon: int,
-    future_frames: int = 10,
+    future_frames: int | None = None,
     obs_noise: bool = True,
     step_fn: ImagStep | None = None,
     anchor_obs: bool = False,
@@ -62,9 +78,17 @@ def imagine(
     device = start.state.device
     n = start.state.shape[0]
     q0 = lib.default_joint_pos
-    step_fn = step_fn or ImagStep(wm, q0)
+    layout = getattr(policy.cfg, "observation_layout", "supermimic")
+    if future_frames is None:
+        future_frames = getattr(policy.cfg, "future_frames", 10)
+    if layout == "isaac_khan":
+        resolve_observation_sizes(layout, future_frames, start.hist_states.shape[0], anchor_obs)
+    step_fn = step_fn or ImagStep(wm, q0, observation_layout=layout)
+    if getattr(step_fn, "observation_layout", layout) != layout:
+        raise ValueError("Imagined observation layout differs from the policy")
     term_names = getattr(step_fn, "term_names", REWARD_TERM_NAMES)
-    noise_half = observation_noise_half(q0.numel(), device=device, dtype=start.state.dtype)
+    noise_half = observation_noise_half(q0.numel(), device=device, dtype=start.state.dtype,
+                                        observation_layout=layout)
     anchor_noise_half = ANCHOR_NOISE_HALF.to(device)
     ai = wm.heads.anchor_index
 
@@ -73,17 +97,42 @@ def imagine(
             return o + (torch.rand_like(o) * 2 - 1) * noise_half
         return o
 
-    def make_goal(frame_t, ref_t, anchor_pose):
+    def make_inputs(frame_t, ref_t, anchor_pose):
+        if layout == "isaac_khan":
+            window = lib.reference_window(frame_t, future_frames)
+            g = isaac_goal_command(window.root_pos_w, window.root_quat_w, window.joint_pos)
+            orientation = isaac_anchor_orientation(anchor_pose[..., 3:7], window.root_quat_w)
+            # Moving future orientation from actor goal to proprioception must
+            # not remove it from value estimation. Like Isaac's privileged
+            # observations, this critic reference contains no sensor noise.
+            extras = critic_reference_extras(
+                window.joint_vel, window.root_quat_w,
+                window.root_ang_vel_w, window.root_lin_vel_w,
+            )
+            critic_goal = torch.cat([g, orientation, extras], dim=-1)
+            if obs_noise:
+                orientation = orientation + (torch.rand_like(orientation) * 2 - 1) * 0.05
+            return g, orientation, critic_goal
         g = lib.goal_window(frame_t, future_frames)
         if not anchor_obs:
-            return g
+            return g, None, g
         rel = anchor_relative_obs(anchor_pose[..., 0:3], anchor_pose[..., 3:7], ref_t.body_pos_w[..., ai, :], ref_t.body_quat_w[..., ai, :])
         if obs_noise:
             rel = rel + (torch.rand_like(rel) * 2 - 1) * anchor_noise_half
-        return torch.cat([g, rel], dim=-1)
+        g = torch.cat([g, rel], dim=-1)
+        return g, None, g
 
     # Initial observation history from the logged states/actions (noise re-sampled per frame).
-    hist = [add_noise(analytic_observation(start.hist_states[i], start.hist_actions[i], start.xi, q0)) for i in range(start.hist_states.shape[0])]
+    hist = [add_noise(analytic_observation(start.hist_states[i], start.hist_actions[i], start.xi,
+                                         q0, layout)) for i in range(start.hist_states.shape[0])]
+    if layout == "isaac_khan" and start.history_valid is not None:
+        # A reset fills each history buffer with the same first noisy observation.
+        # Preserve that correlation when reconstructing history from replay rows.
+        history_tensor = torch.stack(hist)
+        first = start.history_valid.long().argmax(dim=0)
+        initial = history_tensor[first, torch.arange(n, device=device)]
+        hist = list(torch.where(start.history_valid[..., None], history_tensor,
+                                initial[None]).unbind(0))
     s = start.state
     frame = start.frame.clone()
     a_prev = start.prev_action
@@ -107,17 +156,21 @@ def imagine(
                               ref_all.joint_vel[sl] if ref_all.joint_vel is not None else None)
 
     ref = ref_at(0)
-    if anchor_obs:
+    if anchor_obs or layout == "isaac_khan":
         b0 = wm.heads.robot_bodies(s)
         anchor_pose = torch.cat([b0["pos"][..., ai, :], b0["quat"][..., ai, :]], dim=-1)
     else:
         anchor_pose = None
-    goals = [make_goal(frame, ref, anchor_pose)]
+    goal, future_orientation, critic_goal = make_inputs(frame, ref, anchor_pose)
+    goals = [goal]
+    critic_goals = [critic_goal] if layout == "isaac_khan" else None
     e_roots = [wm.heads.root_error_features(s, ref)]
     term_sum = torch.zeros(len(term_names), device=device)
 
     for t in range(horizon):
-        obs_flat = flatten_history_term_major(torch.stack(hist, 0))
+        obs_flat = flatten_history_term_major(torch.stack(hist, 0), observation_layout=layout)
+        if layout == "isaac_khan":
+            obs_flat = torch.cat([future_orientation, obs_flat], dim=-1)
         if activation_checkpoint:
             # Recompute deterministic activations during backward; the complete batch,
             # objective and update schedule are unchanged. Sensor noise stays outside.
@@ -146,7 +199,10 @@ def imagine(
         rewards.append(r)
         dhats.append(d)
         survivals.append(c)
-        goals.append(make_goal(frame, ref, anchor_pose))
+        goal, future_orientation, critic_goal = make_inputs(frame, ref, anchor_pose)
+        goals.append(goal)
+        if critic_goals is not None:
+            critic_goals.append(critic_goal)
         e_roots.append(wm.heads.root_error_features(s, ref))
         frames.append(frame)
 
@@ -160,4 +216,5 @@ def imagine(
         e_root=torch.stack(e_roots),
         frames=torch.stack(frames),
         reward_terms={k: float(v / horizon) for k, v in zip(term_names, term_sum.tolist())},
+        critic_goals=torch.stack(critic_goals) if critic_goals is not None else None,
     )

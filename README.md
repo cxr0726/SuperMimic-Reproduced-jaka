@@ -97,29 +97,49 @@ env -u PYTHONPATH uv run python scripts/replay_khan_npz.py \
 See [`docs/KHAN_REPLAY.md`](docs/KHAN_REPLAY.md) for headless MP4 export and the
 full-dataset ground audit. Replay is kinematic and preserves the original heights.
 
-Khan training keeps the original networks, optimizer settings and proprioception,
-with 15 tracked bodies including `Neck_pitch_Link`, `base_link` as root/anchor,
-and explicit reference neck-position/velocity rewards. COM randomization remains
-on `waist_yaw_Link`. The server launcher enables the extra 9-dimensional anchor goal:
+Khan training keeps the original hidden layers and optimizer settings, with 15 tracked
+bodies including `Neck_pitch_Link`, `base_link` as root/anchor, and explicit neck
+position/velocity rewards. COM randomization remains on `waist_yaw_Link`.
+Khan now defaults to the Isaac observation layout: five reference frames give a
+155-dimensional goal with no reference noise in either simulation or imagination;
+five future anchor orientations plus five sensor-history
+frames give a 465-dimensional policy input. Actor angular/joint velocity scales
+are 0.5/0.2, matching SuperMimic. The critic receives clean command, future orientation
+and five frames of reference velocities/gravity alongside canonical state and context
+(467 dimensions). The layout name does not imply Isaac's original scales.
+The dynamics model separately consumes 125 values: canonical physical state67,
+executed normalized action27 and normalized context31. It uses the original
+fixed state scales and does not consume noisy actor observations or reference goals.
 
 ```bash
-env -u PYTHONPATH uv run sm-train --robot khan_mini --env.anchor-obs --run-name khan_lafan1_base_neck
+env -u PYTHONPATH uv run sm-train --robot khan_mini --run-name khan_lafan1_clean_goal
 env -u PYTHONPATH uv run python scripts/smoke_train_khan.py
 ```
 
-The smoke command preserves production networks, batches, H=32 and UTD=0.4, with
+The smoke command keeps production hidden layers, batches, H=32 and UTD=0.4, with
 32 environments for 50 steps; activation recomputation stays off by default.
-See [`docs/KHAN_TRAINING.md`](docs/KHAN_TRAINING.md) for all observations/rewards and
-[`docs/KHAN_MEMORY.md`](docs/KHAN_MEMORY.md) for the historical 12 GB memory tests.
-Khan's reward normalization now uses its 0.112 per-step upper bound; G1 stays at 0.1.
+See [`docs/KHAN_ISAAC_OBSERVATIONS.md`](docs/KHAN_ISAAC_OBSERVATIONS.md) for exact
+coordinates, term order, noise/scales and remaining differences from Isaac PPO;
+[`docs/KHAN_TRAINING.md`](docs/KHAN_TRAINING.md) covers rewards and optimization.
+Khan's `train_ret` divides by `0.112 * executed_steps`, so its theoretical maximum
+remains 1.0. G1 retains its original observations and 0.1 reward upper bound.
+The current clean-goal version passed 168 tests and an 8-environment, 50-step
+production-network smoke run, including model/optimizer/sampler restoration.
+The run confirmed dynamics input125, goal155, prop465, decoder497 and critic467.
+Activation recomputation was explicitly enabled for that local 12 GB test;
+the formal server command leaves it off. The linked observation document separates
+current validation from earlier noisy-goal and 287-input critic versions, and
+records the warnings and validation limits.
 
-For the original single-GPU optimization settings with anchor observations on a server, use
-`bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_base_neck`.
+For server training, use
+`bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_clean_goal`.
 See [`docs/KHAN_SERVER_TRAINING.md`](docs/KHAN_SERVER_TRAINING.md) for deployment,
-dry-run, a 50-step verification and checkpoint resume. Goal width is 649 (640 reference
-features plus anchor position 3 and orientation 6); activation recomputation is off.
-Start a **new run**: checkpoints now record a `robot_contract` for body/reward/physics
-semantics and reject incompatible legacy Khan policies, even when tensor widths match.
+dry-run, a 50-step verification and checkpoint resume. The legacy 9-dimensional
+anchor goal is replaced by the 30-dimensional future orientation in policy inputs.
+Start a **new run**: the Khan version-4 checkpoint contract records the observation
+layout, scales and critic references alongside robot/reward/physics semantics;
+earlier 649/870 policies, the 287-input critic version and version-3 checkpoints
+with actor-goal noise are incompatible.
 The old 40k policy's frozen-model replay and 90 push-test conditions are documented in
 [`docs/KHAN_40K_ROBUSTNESS.md`](docs/KHAN_40K_ROBUSTNESS.md); they do not evaluate the new training configuration.
 Legacy full-clip benchmarks use an isolated Git snapshot, leaving the current training

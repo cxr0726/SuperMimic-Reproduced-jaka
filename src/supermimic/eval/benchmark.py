@@ -16,6 +16,11 @@ from pathlib import Path
 import torch
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
+from supermimic.observation_layout import (
+    goal_dimension,
+    resolve_observation_layout,
+    resolve_observation_sizes,
+)
 from supermimic.policy.nets import Policy, PolicyCfg
 from supermimic.robots.contracts import validate_robot_contract
 from supermimic.robots.registry import RobotName, get_robot_spec
@@ -40,11 +45,22 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
     if pc.get("num_joints", robot.num_joints) != robot.num_joints:
         raise ValueError(f"Checkpoint policy joint count differs from robot {robot.name}")
     pc["num_joints"] = robot.num_joints
-    expected_goal = cfg["env"]["future_frames"] * robot.goal_feature_dim + (9 if cfg["env"].get("anchor_obs", False) else 0)
+    # Absence denotes the original observation schema, never the robot's new default.
+    layout = resolve_observation_layout(robot.name, cfg["env"].get("observation_layout", "supermimic"))
+    future, history = resolve_observation_sizes(
+        layout, cfg["env"]["future_frames"], pc.get("history", 10),
+        cfg["env"].get("anchor_obs", False),
+    )
+    if pc.get("observation_layout", layout) != layout:
+        raise ValueError("Checkpoint policy and environment observation layouts differ")
+    if pc.get("future_frames", future) != future:
+        raise ValueError("Checkpoint policy and environment future windows differ")
+    expected_goal = goal_dimension(layout, robot.num_joints, future, cfg["env"].get("anchor_obs", False))
     if pc.get("goal_dim", expected_goal) != expected_goal:
         raise ValueError(f"Checkpoint goal dimension differs from robot {robot.name} and future-frame settings")
     pc["goal_dim"] = expected_goal
-    validate_robot_contract(ck, robot.name)
+    pc.update(observation_layout=layout, future_frames=future, history=history)
+    validate_robot_contract(ck, robot.name, layout)
     pcfg = PolicyCfg(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in pc.items()})
     policy = Policy(pcfg).to(device)
     policy.load_state_dict(ck["policy"])
@@ -53,19 +69,27 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
 
 
 @torch.no_grad()
-def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, robot: RobotName = "g1", history_length: int | None = None) -> list[ClipResult]:
+def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int | None = None, verbose: bool = True, anchor_obs: bool = False, robot: RobotName = "g1", history_length: int | None = None, observation_layout: str | None = None) -> list[ClipResult]:
     robot_spec = get_robot_spec(robot)
     if policy.cfg.num_joints != robot_spec.num_joints:
         raise ValueError(f"Policy joint count differs from benchmark robot {robot}")
     if not npz_files:
         raise ValueError("run_benchmark needs at least one motion clip")
     num_envs = min(num_envs or 1024, len(npz_files))
+    layout = observation_layout or policy.cfg.observation_layout
+    if layout != policy.cfg.observation_layout:
+        raise ValueError("Policy and benchmark observation layouts differ")
+    future_frames, history_length = resolve_observation_sizes(
+        layout, policy.cfg.future_frames if future_frames is None else future_frames,
+        policy.cfg.history if history_length is None else history_length, anchor_obs,
+    )
     args = SuperMimicEnvCfgArgs(
         npz_files=npz_files,
         robot=robot,
         num_envs=num_envs,
         future_frames=future_frames,
         history_length=policy.cfg.history if history_length is None else history_length,
+        observation_layout=layout,
         episode_length_s=1.0e5,  # clip end decides
         action_noise_std=0.0,
         obs_noise=False,

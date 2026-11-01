@@ -47,6 +47,7 @@ def record(ckpt: Path, npz_dir: Path, out_dir: Path, clips: list[str], seconds: 
     args = SuperMimicEnvCfgArgs(
         npz_files=files, num_envs=len(files), robot=spec.name,
         history_length=policy.cfg.history, future_frames=config["env"]["future_frames"],
+        observation_layout=policy.cfg.observation_layout,
         anchor_obs=config["env"].get("anchor_obs", False), episode_length_s=1e5,
         action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False,
         sampling_mode="start", record_transitions=False, seed=0,

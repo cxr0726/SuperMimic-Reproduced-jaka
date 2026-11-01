@@ -26,7 +26,7 @@ def main(ckpt: Path, npz_dir: Path | None = None, clips: list[str] | None = None
     robot = get_robot_spec(cfg.get("robot", "g1"))
     npz_dir = npz_dir or robot.default_npz_dir
     files = [str(f) for f in discover_npz(npz_dir, names=clips, manifest=manifest)]
-    results = run_benchmark(policy, files, device=device, num_envs=num_envs, future_frames=cfg["env"]["future_frames"], anchor_obs=cfg["env"].get("anchor_obs", False), robot=robot.name, history_length=policy.cfg.history)
+    results = run_benchmark(policy, files, device=device, num_envs=num_envs, future_frames=cfg["env"]["future_frames"], anchor_obs=cfg["env"].get("anchor_obs", False), robot=robot.name, history_length=policy.cfg.history, observation_layout=policy.cfg.observation_layout)
     s = summarize(results)
     print(f"\n{s['clips']} clips | failed {s['failed']} | mean norm return {s['mean_norm_return']:.4f} | step-weighted {s['step_weighted_norm_return']:.4f}")
     if "terms" in s:

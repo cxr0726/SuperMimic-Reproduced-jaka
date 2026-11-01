@@ -1,7 +1,7 @@
 """Robot-specific assets and names shared by simulation and learned training.
 
-Observation layouts and optimization are shared. Asset bindings, tracked bodies,
-the COM randomization body and optional neck rewards depend on the robot.
+Optimization is shared. Assets, tracked bodies, COM randomization and optional
+neck rewards depend on the robot; observation_layout resolves the input schema.
 """
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ class RobotSpec:
 
     @property
     def goal_feature_dim(self) -> int:
+        """Legacy SuperMimic frame width; Isaac dimensions use goal_dimension()."""
         return 2 * self.num_joints + 10
 
     def load_model(self):

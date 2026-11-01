@@ -57,6 +57,7 @@ def main(
         num_envs=num_envs,
         future_frames=cfg["env"]["future_frames"],
         history_length=policy.cfg.history,
+        observation_layout=policy.cfg.observation_layout,
         episode_length_s=1.0e5,
         action_noise_std=0.0,
         obs_noise=False,
