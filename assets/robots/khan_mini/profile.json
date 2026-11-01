@@ -80,7 +80,13 @@
     "Camera_Link"
   ],
   "root_body": "base_link",
-  "anchor_body": "waist_yaw_Link",
+  "anchor_body": "base_link",
+  "com_body": "waist_yaw_Link",
+  "neck_joint_names": [
+    "Neck_yaw_joint",
+    "Neck_pitch_joint"
+  ],
+  "training_semantics_version": 2,
   "tracked_bodies": [
     "base_link",
     "Left_hip_roll_Link",
@@ -95,7 +101,8 @@
     "Left_wrist_yaw_Link",
     "Right_shoulder_roll_Link",
     "Right_elbow_Link",
-    "Right_wrist_yaw__Link"
+    "Right_wrist_yaw__Link",
+    "Neck_pitch_Link"
   ],
   "foot_bodies": [
     "Left_ankle_roll_Link",
@@ -499,6 +506,36 @@
     "nonfoot_sliding_friction": {
       "value": 1.0,
       "source": "user-requested alignment with mjlab G1 non-foot contacts"
+    },
+    "waist_collision_box": {
+      "geom": "waist_yaw_Link_45_collision",
+      "source_half_size_m": [
+        0.075,
+        0.1,
+        0.15
+      ],
+      "effective_half_size_m": [
+        0.075,
+        0.07,
+        0.15
+      ],
+      "source_full_size_m": [
+        0.15,
+        0.2,
+        0.3
+      ],
+      "effective_full_size_m": [
+        0.15,
+        0.14,
+        0.3
+      ],
+      "local_position_m": [
+        0.0,
+        0.0,
+        0.03
+      ],
+      "source": "user-requested narrower torso collision box",
+      "rationale": "Fit the 126--140 mm central visual shell; wider upper flanges are outside this simplified collision core. Preserve X/Z size, pose and explicit inertial properties"
     }
   },
   "contact_friction": {

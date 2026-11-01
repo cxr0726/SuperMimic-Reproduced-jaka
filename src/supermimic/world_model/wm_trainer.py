@@ -8,8 +8,8 @@ import torch
 
 from supermimic.data.replay_buffer import ReplayBuffer, WindowBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
-from supermimic.world_model.heads import ReferenceFrame
 from supermimic.training.distributed import allreduce_grads
+from supermimic.world_model.heads import ReferenceFrame
 from supermimic.world_model.world_model import WorldModel
 
 
@@ -27,7 +27,8 @@ class WMTrainerCfg:
 def reference_at(lib: MotionLibrary, frame: torch.Tensor) -> ReferenceFrame:
     r = lib.ref(frame)
     b = lib.bodies(frame)
-    return ReferenceFrame(b.pos_w, b.quat_w, b.lin_vel_w, b.ang_vel_w, r.root_pos_w, r.root_quat_w)
+    return ReferenceFrame(b.pos_w, b.quat_w, b.lin_vel_w, b.ang_vel_w,
+                          r.root_pos_w, r.root_quat_w, r.joint_pos, r.joint_vel)
 
 
 class WorldModelTrainer:

@@ -1,7 +1,7 @@
 """Robot-specific assets and names shared by simulation and learned training.
 
-All algorithms use the same observation terms, rewards and randomization; only
-these asset bindings and their resulting tensor dimensions depend on the robot.
+Observation layouts and optimization are shared. Asset bindings, tracked bodies,
+the COM randomization body and optional neck rewards depend on the robot.
 """
 
 from __future__ import annotations
@@ -27,9 +27,11 @@ class RobotSpec:
     joint_names: tuple[str, ...]
     root_body: str
     anchor_body: str
+    com_body: str
     tracked_bodies: tuple[str, ...]
     foot_geom_regex: str
     default_npz_dir: Path
+    neck_joint_names: tuple[str, ...] = ()
     nconmax: int = 35
     njmax: int = 250
 
@@ -81,7 +83,7 @@ def get_robot_spec(name: RobotName = "g1") -> RobotSpec:
 
         return RobotSpec(
             name=name, joint_names=tuple(G1_JOINT_NAMES), root_body="pelvis",
-            anchor_body="torso_link", tracked_bodies=G1_TRACKED_BODIES,
+            anchor_body="torso_link", com_body="torso_link", tracked_bodies=G1_TRACKED_BODIES,
             foot_geom_regex=r"^(left|right)_foot[1-7]_collision$",
             default_npz_dir=Path("data/npz/lafan1"),
         )
@@ -92,9 +94,11 @@ def get_robot_spec(name: RobotName = "g1") -> RobotSpec:
         return RobotSpec(
             name=name, joint_names=tuple(profile["joint_names"]),
             root_body=profile["root_body"], anchor_body=profile["anchor_body"],
+            com_body=profile["com_body"],
             tracked_bodies=tuple(profile["tracked_bodies"]),
             foot_geom_regex=profile["foot_geom_regex"],
             default_npz_dir=Path("data/npz/khan_mini/lafan1"),
+            neck_joint_names=tuple(profile["neck_joint_names"]),
             # Conservative allocation headroom, not a measured minimum.
             # Retain the original solver and timestep.
             nconmax=128, njmax=512,

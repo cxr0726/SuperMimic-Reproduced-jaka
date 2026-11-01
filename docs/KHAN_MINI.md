@@ -1,6 +1,6 @@
 # Khan_mini 模型转换与 mjlab 预览
 
-本阶段完成机器人资产转换、执行器配置和 mjlab 显示验证。来源为
+本文记录机器人资产转换、执行器配置、当前训练绑定和 mjlab 显示。来源为
 `ref_thirdparty/jaka_code/Textop/TextOpTracker/source/textop_tracker/textop_tracker/robots/K1L.py`
 中的 **Khan_mini_CFG**，以及它指向的 `assets/Khan_mini_simplified/khan.urdf`。
 转换器直接解析该配置的 AST 字面量，不导入 Isaac Lab，不使用同文件里的 K1L 配置。
@@ -22,7 +22,8 @@ assets/robots/khan_mini/
 |---|---|
 | 可动关节 | 27：双腿各 6、双臂各 6、腰 1、颈 2 |
 | 固定关节 / 机器人 link | 17 / 45 |
-| 根 / 上身锚点 | `base_link` / `waist_yaw_Link` |
+| root / anchor / COM body | `base_link` / `base_link` / `waist_yaw_Link` |
+| 跟踪 body | 原14个部位末尾追加 `Neck_pitch_Link`，共15个 |
 | 浮动根关节 | `floating_base` |
 | `nq / nv / njnt` | 34 / 33 / 28（包含根的自由关节） |
 | `nbody / ngeom / nmesh` | 46 / 71 / 44，nbody 包含 world |
@@ -49,6 +50,20 @@ assets/robots/khan_mini/
   `contact_friction` 和 `parameter_overrides` 中，不等同于 Isaac Lab 的材质参数。
 - 对 MJCF 导出重新写入 17 位有效数字的质量、惯量和坐标变换，避免默认六位输出精度造成舍入。
 - MJCF 不固定仿真器选项；预览环境显式使用 0.005 s 物理步长、4 倍 decimation，控制频率 50 Hz。
+
+### 腰部碰撞盒
+
+当前腰部box半尺寸为 **`(0.075, 0.07, 0.15) m`**，全尺寸 **`0.15×0.14×0.30 m`**。
+原URDF的半尺寸为 `(0.075, 0.10, 0.15)`；本地仅缩窄Y，不改变X/Z、局部位置/姿态、质量或显式惯量。
+有效尺寸由 `src/supermimic/robots/build_khan_mini.py` 持久化，重建后不会恢复成原宽度；
+profile的 `parameter_overrides.waist_collision_box` 记录源尺寸、有效尺寸及原因。
+
+140 mm宽度用于贴合约126–140 mm的中部视觉壳体，属于**碰撞核心近似**：上部较宽凸缘没有完全包住，
+不能描述成整件视觉mesh的保守包络，也没有据此重新估算质量或惯量。
+源文件及 `ref_thirdparty` 不变，覆盖仅应用到本地生成的MJCF。
+
+旧40k策略的鲁棒评估冻结的是18 cm宽腰盒、14-body/waist-anchor配置，不能与当前14 cm宽模型混用；
+对应资产SHA、录像及结果见 [KHAN_40K_ROBUSTNESS.md](KHAN_40K_ROBUSTNESS.md)。
 
 参考了 `ref_thirdparty/supermimic-retargeted/src/supermimic/robots/build.py` 和
 `assets.py` 的 MjSpec→MJCF→profile→EntityCfg 结构。没有采用其中丢弃视觉网格、
@@ -136,7 +151,10 @@ assert (model.nq, model.nv, model.nu) == (34, 33, 27)
 action_cfg = get_khan_mini_action_cfg()  # 全关节 0.5，默认执行噪声 std=0.1
 ```
 
-## 验证记录
+## 历史资产验证记录
+
+以下31项测试及初态预览来自较早的资产版本；当前腰宽、15-body/base-anchor及颈部奖励的
+验证由本轮对应配置、FK、奖励和contract测试覆盖，历史数字不代表新语义的完整测试总数。
 
 - 4 个 CUDA 环境完成 200 个控制步（每环境 4 秒），qpos/qvel/qacc、观测及奖励均有限。
 - 960×720 的完整初态图已渲染并检查；原生 mjlab 窗口实际打开并完成 100 次暂停刷新后关闭。
@@ -172,18 +190,21 @@ action_cfg = get_khan_mini_action_cfg()  # 全关节 0.5，默认执行噪声 st
 | 非足底摩擦 | (1.0, 0.005, 0.0001) | 相同 |
 | 显式碰撞排除对 | 0 | 4 |
 | 动作 / 状态 / 参考goal / 历史观测维度 | 27 / 67 / 640 / 870 | 29 / 71 / 680 / 930 |
+| tracked bodies / anchor / COM body | 15 / base / waist | 14 / torso / torso |
+| 奖励 / 最大单步奖励 | 原8项+颈部位置/速度两项 / 0.112 | 原8项 / 0.1 |
 | sm-train 机器人选择 | `--robot khan_mini` | 默认 `--robot g1` |
 
 G1 显式排除 pelvis 与左右 hip_roll，以及左右 elbow 与 wrist_pitch 共四对碰撞。
 两种模型都保留 MuJoCo 默认的同 body、焊接体和直接父子过滤，因此开启自碰撞不表示
 任意两个 geom 都会检测。
 
-还在无地面的纯机器人模型上，使用限位内确定性姿态探测到腰与左腕的 3 个自接触，
-确认不只是 mask 数值开启，实际碰撞检测也能生效。实编译对比及探测姿态记录在
+早期宽腰盒版本还在无地面的纯机器人模型上，用限位内姿态探测到腰与左腕的3个自接触，
+确认自碰撞检测实际生效；这不是当前14 cm宽腰盒的接触数量结论。历史实编译对比及姿态记录在
 `logs/khan_mini_collision/g1_comparison.json`。
 
-Khan 的 26 个碰撞 geom 只覆盖 14 个 body，其余 31 个 link 没有独立碰撞体，
-包括头颈和部分髋/肩部。这是源 URDF 的简化结果；碰撞体截图显示其真实覆盖范围。
+Khan 的26个碰撞geom只覆盖14个body，其余31个link没有独立碰撞体，包括头颈和部分髋/肩部。
+这与训练中跟踪15个body是两件事：增加 `Neck_pitch_Link` 跟踪不等于新增头部碰撞体。
+这是源URDF的简化结果；碰撞体截图显示真实覆盖范围。
 可用下列命令重新渲染多视角：
 
 ```bash
@@ -196,5 +217,8 @@ env -u PYTHONPATH uv run python scripts/render_khan_collisions.py
 训练已按机器人解析状态、观测、策略、世界模型、FK 与 replay 尺寸。Khan_mini 的维度是
 state=67、每帧 goal=64、10 帧 goal=640、10 帧本体观测=870、action=27、context=31。
 当前Khan服务器脚本开启anchor额外9维，完整goal为649；上表640仅为参考窗口部分。
-G1 的 NPZ 与检查点不能混用于 Khan；加载时会检查模型、关节名称和顺序。
+anchor当前使用base frame；COM随机化仍显式绑定waist。新增头部body及颈奖励不改变这些网络接口宽度。
+新检查点保存含root/anchor/COM/body/reward及模型/profile SHA的 `robot_contract`；
+旧无contract Khan检查点不能在当前训练或eval入口静默加载，必须用新run或冻结旧配置的评估运行器。
+G1的NPZ与检查点不能混用于Khan。已有45-body NPZ无需因加入头部跟踪而重新转换。
 正式参数与初步训练测试见 [KHAN_TRAINING.md](KHAN_TRAINING.md)。

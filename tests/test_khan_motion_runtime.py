@@ -51,6 +51,12 @@ def test_khan_compact_matches_full_and_clip_end(khan_motion):
     assert full.ref_dim == 67 and full.goal_feat_dim == 64
     assert full.ref71(frame).shape == (3, 67)
     assert full.goal_window(frame, 10).shape == (3, 640)
+    assert full.bodies(frame).pos_w.shape == (3, 15, 3)
+    head_index = arrays["body_names"].tolist().index("Neck_pitch_Link")
+    for name, key in (("pos_w", "body_pos_w"), ("quat_w", "body_quat_w"),
+                      ("lin_vel_w", "body_lin_vel_w"), ("ang_vel_w", "body_ang_vel_w")):
+        torch.testing.assert_close(getattr(full.bodies(frame), name)[:, -1],
+                                   torch.tensor(arrays[key])[frame, head_index])
     qp, qv = compact.ref_qpos_qvel(frame)
     assert qp.shape == (3, 34) and qv.shape == (3, 33)
     torch.testing.assert_close(full.ref(frame).joint_pos, torch.tensor(arrays["joint_pos"])[frame])
@@ -77,6 +83,27 @@ def test_each_clip_resolves_its_own_body_order(khan_motion, tmp_path):
     lib = khan_library([path, second], home)
     torch.testing.assert_close(lib.ref71(torch.arange(7)), lib.ref71(torch.arange(7, 14)))
     torch.testing.assert_close(lib.bodies(torch.arange(7)).pos_w, lib.bodies(torch.arange(7, 14)).pos_w)
+
+
+def test_existing_npz_already_contains_head_for_runtime_selection():
+    path = Path(__file__).resolve().parents[1] / "data/npz/khan_mini/lafan1/walk1_subject1.npz"
+    if not path.is_file():
+        pytest.skip("needs previously converted Khan LAFAN1 NPZ")
+    spec = get_robot_spec("khan_mini")
+    profile = load_profile()
+    home = np.array([profile["default_joint_pos"][name] for name in spec.joint_names])
+    lib = khan_library([path], home)
+    with np.load(path, allow_pickle=False) as archive:
+        body_names = archive["body_names"].tolist()
+        assert len(body_names) == 45
+        assert "Neck_yaw_Link" in body_names and "Neck_pitch_Link" in body_names
+        head = body_names.index("Neck_pitch_Link")
+        frames = torch.tensor([0, len(archive["joint_pos"]) // 2])
+        assert len(spec.tracked_bodies) == 15 and spec.tracked_bodies[-1] == "Neck_pitch_Link"
+        torch.testing.assert_close(lib.bodies(frames).pos_w[:, -1],
+                                   torch.tensor(archive["body_pos_w"])[frames, head])
+        torch.testing.assert_close(lib.bodies(frames).ang_vel_w[:, -1],
+                                   torch.tensor(archive["body_ang_vel_w"])[frames, head])
 
 
 @pytest.mark.parametrize("issue", ["fps", "joint_names", "joint_width", "quaternion", "robot"])
@@ -202,3 +229,21 @@ def test_dynamic_state_context_and_recorder_terminal_rows(num_joints):
     assert recorder.buffer.xi.shape == (2, 8, num_joints + 4)
     assert bool(recorder.buffer.terminal[0, 1])
     assert recorder.buffer.size == 2
+
+
+def test_khan_context_reads_waist_com_independently_of_base_anchor():
+    env = fake_env(27)
+    robot = env.scene["robot"]
+    robot.body_names = ["base_link", "waist_yaw_Link"]
+    robot.indexing.body_ids = torch.tensor([1, 2])
+    nominal = np.array([[0., 0., 0.], [.01, .02, .03], [.04, .05, .06]])
+    env.sim.mj_model.body_ipos = nominal
+    env.sim.model.body_ipos = torch.tensor(nominal, dtype=torch.float32).repeat(2, 1, 1)
+    waist_offsets = torch.tensor([[.01, -.02, .03], [-.01, .02, -.03]])
+    env.sim.model.body_ipos[:, 1] += torch.tensor([.9, .8, .7])
+    env.sim.model.body_ipos[:, 2] += waist_offsets
+    spec = get_robot_spec("khan_mini")
+    assert spec.anchor_body == "base_link" and spec.com_body == "waist_yaw_Link"
+    context = SimContext(env, "foot", spec.com_body)
+    assert context.com_body_global == 2
+    torch.testing.assert_close(context.read()[:, -3:], waist_offsets)

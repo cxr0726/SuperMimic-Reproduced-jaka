@@ -11,6 +11,7 @@ import torch
 
 from supermimic.eval import benchmark
 from supermimic.policy.nets import Critic, CriticCfg, Policy, PolicyCfg
+from supermimic.robots.contracts import robot_contract
 from supermimic.robots.registry import get_robot_spec
 
 
@@ -26,6 +27,8 @@ def _checkpoint(tmp_path, robot, anchor=False, legacy=False):
     else:
         config["robot"] = robot
     checkpoint = {"policy": policy.state_dict(), "config": config}
+    if not legacy:
+        checkpoint["robot_contract"] = robot_contract(robot)
     path = tmp_path / "policy.pt"
     torch.save(checkpoint, path)
     return path, policy, checkpoint

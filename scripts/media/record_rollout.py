@@ -47,7 +47,7 @@ def main(ckpt: Path, clips: list[str], npz_dir: Path | None = None, out: Path = 
         cmd.forced_frame[:] = lib.clip_start[env_clip]
         obs, _ = env.reset()
         cmd.forced_frame[:] = lib.clip_start[env_clip]  # keep the clip if an env is reset again
-        max_r = 0.1  # paper reward upper bound per step (dt * 5)
+        max_r = env.step_dt * sum(max(0.0, term.weight) for term in env.cfg.rewards.values())
         rob, ref = [], []
         alive = torch.ones(n, dtype=torch.bool, device=device)
         rew_sum = torch.zeros(n, device=device)

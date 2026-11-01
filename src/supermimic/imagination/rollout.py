@@ -63,6 +63,7 @@ def imagine(
     n = start.state.shape[0]
     q0 = lib.default_joint_pos
     step_fn = step_fn or ImagStep(wm, q0)
+    term_names = getattr(step_fn, "term_names", REWARD_TERM_NAMES)
     noise_half = observation_noise_half(q0.numel(), device=device, dtype=start.state.dtype)
     anchor_noise_half = ANCHOR_NOISE_HALF.to(device)
     ai = wm.heads.anchor_index
@@ -99,7 +100,11 @@ def imagine(
 
     def ref_at(t):
         sl = slice(t * n, (t + 1) * n)
-        return ReferenceFrame(ref_all.body_pos_w[sl], ref_all.body_quat_w[sl], ref_all.body_lin_vel_w[sl], ref_all.body_ang_vel_w[sl], ref_all.root_pos_w[sl], ref_all.root_quat_w[sl])
+        return ReferenceFrame(ref_all.body_pos_w[sl], ref_all.body_quat_w[sl],
+                              ref_all.body_lin_vel_w[sl], ref_all.body_ang_vel_w[sl],
+                              ref_all.root_pos_w[sl], ref_all.root_quat_w[sl],
+                              ref_all.joint_pos[sl] if ref_all.joint_pos is not None else None,
+                              ref_all.joint_vel[sl] if ref_all.joint_vel is not None else None)
 
     ref = ref_at(0)
     if anchor_obs:
@@ -109,7 +114,7 @@ def imagine(
         anchor_pose = None
     goals = [make_goal(frame, ref, anchor_pose)]
     e_roots = [wm.heads.root_error_features(s, ref)]
-    term_sum = torch.zeros(len(REWARD_TERM_NAMES), device=device)
+    term_sum = torch.zeros(len(term_names), device=device)
 
     for t in range(horizon):
         obs_flat = flatten_history_term_major(torch.stack(hist, 0))
@@ -154,5 +159,5 @@ def imagine(
         goals=torch.stack(goals),
         e_root=torch.stack(e_roots),
         frames=torch.stack(frames),
-        reward_terms={k: float(v / horizon) for k, v in zip(REWARD_TERM_NAMES, term_sum.tolist())},
+        reward_terms={k: float(v / horizon) for k, v in zip(term_names, term_sum.tolist())},
     )

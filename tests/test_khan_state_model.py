@@ -1,5 +1,7 @@
 """Robot-sized state, analytic heads and differentiable Khan FK on CPU."""
 
+from dataclasses import replace
+
 import mujoco
 import numpy as np
 import pytest
@@ -130,7 +132,7 @@ def test_khan_analytic_reward_and_world_model_boundaries():
     model = get_khan_mini_spec().compile()
     profile = load_profile()
     fk = G1Kinematics(model)
-    names = (profile["root_body"], profile["anchor_body"], *profile["foot_bodies"])
+    names = tuple(profile["tracked_bodies"])
     soft_limits = torch.tensor(model.jnt_range[1:], dtype=torch.float32)
     q0 = torch.tensor([profile["default_joint_pos"][name] for name in profile["joint_names"]])
     heads = AnalyticHeads(fk, names, profile["anchor_body"], profile["root_body"], soft_limits, q0)
@@ -138,10 +140,13 @@ def test_khan_analytic_reward_and_world_model_boundaries():
     state = torch.tensor(np.concatenate((qpos, qvel), -1), dtype=torch.float32)
     bodies = heads.robot_bodies(state)
     ref = ReferenceFrame(bodies["pos"], bodies["quat"], bodies["lin_vel"], bodies["ang_vel"],
-                         bodies["root_pos"], bodies["root_quat"])
+                         bodies["root_pos"], bodies["root_quat"],
+                         state[:, 7:model.nq], state[:, model.nq + 6:])
     actions = torch.zeros(3, 27)
     reward = heads.reward(state, actions, actions, ref)
-    torch.testing.assert_close(reward["total"], torch.full((3,), 0.1), rtol=0, atol=2e-7)
+    torch.testing.assert_close(reward["total"], torch.full((3,), 0.112), rtol=0, atol=2e-7)
+    assert len(reward) == 11  # Ten terms plus their total.
+    assert heads.anchor_index == 0 and names[-1] == "Neck_pitch_Link"
     assert not heads.terminated(state, ref).any()
 
     wm = WorldModel(WorldModelCfg(hidden=(16, 16), term_hidden=(8,)), heads, "cpu")
@@ -159,3 +164,55 @@ def test_khan_analytic_reward_and_world_model_boundaries():
     assert torch.isfinite(loss)
     assert any(parameter.grad is not None and parameter.grad.abs().sum() > 0
                for parameter in wm.parameters())
+
+
+@pytest.mark.parametrize("velocity_term", ["lin_vel", "ang_vel"])
+def test_tracked_head_contributes_to_body_velocity_rewards(velocity_term):
+    """Isolate the added head's physical velocity from the other 14 body targets."""
+    model = get_khan_mini_spec().compile()
+    profile = load_profile()
+    q0 = torch.tensor([profile["default_joint_pos"][name] for name in profile["joint_names"]],
+                      dtype=torch.float64)
+    names = tuple(profile["tracked_bodies"])
+    heads = AnalyticHeads(
+        G1Kinematics(model, dtype=torch.float64), names, profile["anchor_body"],
+        profile["root_body"], torch.tensor([[-100., 100.]], dtype=torch.float64).repeat(27, 1), q0,
+    )
+    assert len(names) == 15 and names[-1] == "Neck_pitch_Link"
+    state = torch.zeros(1, model.nq + model.nv, dtype=torch.float64)
+    state[:, :model.nq] = torch.tensor(model.qpos0, dtype=torch.float64)
+    state[:, 7:model.nq] = q0
+    neck = profile["joint_names"].index("Neck_pitch_joint")
+    if velocity_term == "lin_vel":
+        # The head lies above the base, so root angular motion gives its origin
+        # a real linear velocity through the lever arm.
+        state[:, model.nq + 3] = 0.4
+    else:
+        state[:, model.nq + 6 + neck] = 0.6
+    state.requires_grad_()
+    bodies = heads.robot_bodies(state)
+    assert bodies[velocity_term][:, -1].norm() > 0.1
+    if velocity_term == "ang_vel":
+        # Both neck hinges have the same origin in this URDF. Neck motion affects
+        # the head orientation/angular velocity, not its link-origin linear speed.
+        torch.testing.assert_close(bodies["ang_vel"][:, :-1],
+                                   torch.zeros_like(bodies["ang_vel"][:, :-1]))
+        torch.testing.assert_close(bodies["lin_vel"], torch.zeros_like(bodies["lin_vel"]))
+    ref = ReferenceFrame(
+        bodies["pos"].detach(), bodies["quat"].detach(),
+        bodies["lin_vel"].detach(), bodies["ang_vel"].detach(),
+        bodies["root_pos"].detach(), bodies["root_quat"].detach(),
+        state[:, 7:model.nq].detach(), state[:, model.nq + 6:].detach(),
+    )
+    action = torch.zeros(1, 27, dtype=torch.float64)
+    matching = heads.reward(state, action, action, ref)
+    field = f"body_{velocity_term}_w"
+    target = getattr(ref, field).clone()
+    target[:, -1] = 0
+    altered = heads.reward(state, action, action, replace(ref, **{field: target}))
+    term = f"motion_body_{velocity_term}"
+    assert (altered[term] < matching[term]).all()
+    for name in set(matching) - {term, "total"}:
+        torch.testing.assert_close(altered[name], matching[name])
+    altered[term].sum().backward()
+    assert torch.isfinite(state.grad).all() and state.grad.abs().sum() > 0

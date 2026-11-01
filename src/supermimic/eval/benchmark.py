@@ -17,6 +17,7 @@ import torch
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.policy.nets import Policy, PolicyCfg
+from supermimic.robots.contracts import validate_robot_contract
 from supermimic.robots.registry import RobotName, get_robot_spec
 
 
@@ -43,6 +44,7 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
     if pc.get("goal_dim", expected_goal) != expected_goal:
         raise ValueError(f"Checkpoint goal dimension differs from robot {robot.name} and future-frame settings")
     pc["goal_dim"] = expected_goal
+    validate_robot_contract(ck, robot.name)
     pcfg = PolicyCfg(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in pc.items()})
     policy = Policy(pcfg).to(device)
     policy.load_state_dict(ck["policy"])
@@ -79,7 +81,7 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
         cmd = env.command_manager.get_term("motion")
         lib = cmd.library
         n_clips = lib.num_clips
-        max_r = 0.1  # paper reward upper bound per step (dt * 5)
+        max_r = env.step_dt * sum(max(0.0, term.weight) for term in env.cfg.rewards.values())
 
         # Clip queue: env e plays clips e, e+N, e+2N, ...
         current = torch.arange(num_envs, device=device)

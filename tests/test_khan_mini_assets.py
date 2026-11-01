@@ -222,6 +222,41 @@ def test_requested_action_scale_and_velocity_correction_survive_rebuild(bundle):
     assert get_khan_mini_action_cfg(bundle, noise_std=0).noise_std == 0
 
 
+def test_training_metadata_separates_base_anchor_waist_com_and_tracked_head(bundle):
+    profile = load_profile(bundle)
+    assert profile["root_body"] == profile["anchor_body"] == "base_link"
+    assert profile["com_body"] == "waist_yaw_Link"
+    assert profile["neck_joint_names"] == ["Neck_yaw_joint", "Neck_pitch_joint"]
+    assert len(profile["tracked_bodies"]) == 15
+    assert profile["tracked_bodies"][0] == "base_link"
+    assert profile["tracked_bodies"][7] == "waist_yaw_Link"
+    assert profile["tracked_bodies"][-1] == "Neck_pitch_Link"
+    assert len(profile["body_names"]) == 45 and "Neck_pitch_Link" in profile["body_names"]
+    assert profile["dimensions"]["action"] == 27
+    assert profile["dimensions"]["state"] == 67
+    assert profile["dimensions"]["proprio_10_frames"] == 870
+    assert profile["dimensions"]["goal_10_frames"] == 640
+
+
+def test_waist_collision_width_override_keeps_pose_and_source_geometry(bundle):
+    # Source/URDF provenance remains untouched; the MJCF uses a narrower Y box.
+    source = ET.parse(bundle / "source.urdf").getroot()
+    box = source.find("./link[@name='waist_yaw_Link']/collision/geometry/box")
+    np.testing.assert_allclose(np.fromstring(box.attrib["size"], sep=" "), [.15, .20, .30])
+    model = mujoco.MjModel.from_xml_path(str(bundle / "robot.xml"))
+    body = model.body("waist_yaw_Link").id
+    collisions = np.flatnonzero((model.geom_bodyid == body) & (model.geom_group == 3))
+    assert len(collisions) == 1
+    gid = collisions[0]
+    assert model.geom_type[gid] == mujoco.mjtGeom.mjGEOM_BOX
+    np.testing.assert_allclose(model.geom_size[gid], [.075, .07, .15], atol=1e-12)
+    np.testing.assert_allclose(model.geom_pos[gid], [0, 0, .03], atol=1e-12)
+    np.testing.assert_allclose(model.geom_quat[gid], [1, 0, 0, 0], atol=1e-12)
+    override = load_profile(bundle)["parameter_overrides"]["waist_collision_box"]
+    np.testing.assert_allclose(override["source_full_size_m"], [.15, .20, .30])
+    np.testing.assert_allclose(override["effective_full_size_m"], [.15, .14, .30])
+
+
 def test_visuals_collisions_capsules_and_feet_remain_distinct(bundle):
     for model in (
         mujoco.MjModel.from_xml_path(str(bundle / "robot.xml")),

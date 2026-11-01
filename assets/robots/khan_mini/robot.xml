@@ -188,7 +188,7 @@
         <inertial pos="-0.0027328000000000001 -0.00020744000000000001 0.025423999999999999" quat="0.70147910940250313 -0.043033173619426622 -0.045996517855974618 0.7099010673222278" mass="7.1276999999999999" diaginertia="0.012163154183872796 0.011374330779130326 0.010205515036996906" />
         <joint name="waist_yaw_joint" range="-2.0071 3.5779" actuatorfrcrange="-120 120" armature="0.03" />
         <geom name="waist_yaw_Link_44_visual" quat="1 0 0 0" type="mesh" contype="0" conaffinity="0" group="2" rgba="0.89804 0.91765 0.92941 1" density="0" mesh="waist_yaw_Link" pos="0 0 0" />
-        <geom name="waist_yaw_Link_45_collision" size="0.074999999999999997 0.10000000000000001 0.14999999999999999" pos="0 0 0.029999999999999999" type="box" condim="1" group="3" rgba="0.2 0.6 0.2 0.3" quat="1 0 0 0" />
+        <geom name="waist_yaw_Link_45_collision" size="0.074999999999999997 0.070000000000000007 0.14999999999999999" pos="0 0 0.029999999999999999" type="box" condim="1" group="3" rgba="0.2 0.6 0.2 0.3" quat="1 0 0 0" />
         <body name="IMU_Link" pos="0.050200000000000002 0 -0.089999999999999997" quat="1 0 0 0">
           <inertial pos="5.2041704279304197e-18 -0.000351118090529547 0.0046190940956160904" quat="0.00061826207087661844 0.70710651089635279 0.00061826207087661844 0.70710651089635279" mass="0.0043489501808336396" diaginertia="3.7393402244775225e-07 2.1579885151717709e-07 2.149952177626741e-07" />
           <geom name="IMU_Link_46_visual" quat="1 0 0 0" type="mesh" contype="0" conaffinity="0" group="2" rgba="1 1 1 1" density="0" mesh="IMU_Link" pos="0 0 0" />

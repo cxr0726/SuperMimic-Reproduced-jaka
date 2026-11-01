@@ -5,7 +5,8 @@ Differences from mjlab's BeyondMimic re-implementation (``mjlab.tasks.tracking``
     10-frame history (term-major), plus a separate ``goal`` group with K future frames;
   * action: ``NoisyJointPositionAction`` (clean action observed, noise only executed);
   * multi-clip command with return-based reset sampling and clip-end time-outs;
-  * rewards: self-collision term removed, joint-limit weight -2;
+  * rewards: self-collision term removed, joint-limit weight -2; Khan additionally
+    tracks the two reference neck joint positions and velocities;
   * terminations: pelvis height / tilt vs reference, no end-effector term, clip-end time-out;
   * events: no push; friction and encoder bias re-sampled per episode; COM at startup;
   * a ``ReplayRecorder`` streams transitions into a GPU replay buffer.
@@ -33,8 +34,10 @@ from mjlab.viewer import ViewerConfig
 from supermimic.data.recorder import ReplayRecorderCfg
 from supermimic.envs.actions import NoisyJointPositionActionCfg
 from supermimic.envs.mdp import observations as sm_obs
+from supermimic.envs.mdp import rewards as sm_rewards
 from supermimic.envs.mdp import terminations as sm_term
 from supermimic.envs.mdp.commands import MultiClipMotionCommandCfg
+from supermimic.envs.mdp.rewards import TrackingRewardCfg
 from supermimic.robots.registry import G1_TRACKED_BODIES, RobotName, get_robot_spec
 
 
@@ -82,6 +85,7 @@ class SuperMimicEnvCfgArgs:
 
 def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     robot_spec = get_robot_spec(a.robot)
+    tracking_rewards = TrackingRewardCfg.for_joint_names(robot_spec.joint_names)
     # ---------------------------------------------------------------- observations
     noise = (lambda lo, hi: Unoise(n_min=lo, n_max=hi)) if a.obs_noise else (lambda lo, hi: None)
     policy_terms = {
@@ -130,6 +134,11 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     # ---------------------------------------------------------------- commands
     pose_range = {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (-0.01, 0.01), "roll": (-0.1, 0.1), "pitch": (-0.1, 0.1), "yaw": (-0.2, 0.2)}
     vel_range = {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (-0.2, 0.2), "roll": (-0.52, 0.52), "pitch": (-0.52, 0.52), "yaw": (-0.78, 0.78)}
+    command_kwargs = {
+        # Preserve the original sampler's reward-relative temperature after adding neck rewards.
+        "g_max": 10.0 * (tracking_rewards.max_step_reward / 0.1),
+        **a.extra_command_kwargs,
+    }
     commands = {
         "motion": MultiClipMotionCommandCfg(
             npz_files=[str(f) for f in a.npz_files],
@@ -146,7 +155,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             sampling_mode=a.sampling_mode,  # type: ignore[arg-type]
             compact_library=a.compact_library,
             debug_vis=a.debug_vis,
-            **a.extra_command_kwargs,
+            **command_kwargs,
         )
     }
 
@@ -157,7 +166,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             mode="startup",
             func=dr.body_com_offset,
             params={
-                "asset_cfg": SceneEntityCfg("robot", body_names=(robot_spec.anchor_body,)),
+                "asset_cfg": SceneEntityCfg("robot", body_names=(robot_spec.com_body,)),
                 "operation": "add",
                 "ranges": {0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05)},
             },
@@ -201,6 +210,20 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         "action_rate_l2": RewardTermCfg(func=base_mdp.action_rate_l2, weight=-0.1),
         "joint_limit": RewardTermCfg(func=base_mdp.joint_pos_limits, weight=a.joint_limit_weight, params={"asset_cfg": SceneEntityCfg("robot", joint_names=(".*",))}),
     }
+    if robot_spec.neck_joint_names:
+        neck_asset = SceneEntityCfg("robot", joint_names=robot_spec.neck_joint_names, preserve_order=True)
+        rewards["motion_neck_pos"] = RewardTermCfg(
+            func=sm_rewards.motion_neck_position_error_exp,
+            weight=tracking_rewards.w_neck_pos,
+            params={"command_name": "motion", "std": tracking_rewards.std_neck_pos,
+                    "asset_cfg": neck_asset},
+        )
+        rewards["motion_neck_vel"] = RewardTermCfg(
+            func=sm_rewards.motion_neck_velocity_error_exp,
+            weight=tracking_rewards.w_neck_vel,
+            params={"command_name": "motion", "std": tracking_rewards.std_neck_vel,
+                    "asset_cfg": neck_asset},
+        )
 
     # ---------------------------------------------------------------- terminations
     terminations = {
@@ -212,7 +235,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
 
     recorders = {}
     if a.record_transitions:
-        recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot_spec.foot_geom_regex, "com_body_name": robot_spec.anchor_body})
+        recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot_spec.foot_geom_regex, "com_body_name": robot_spec.com_body})
 
     cfg = ManagerBasedRlEnvCfg(
         scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=a.num_envs, entities={"robot": robot_spec.entity_cfg()}),

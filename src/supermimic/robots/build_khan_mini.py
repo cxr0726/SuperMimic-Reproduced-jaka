@@ -22,6 +22,9 @@ DEFAULT_CONFIG = (
     "/textop_tracker/robots/K1L.py"
 )
 FOOT_BODIES = ("Left_ankle_roll_Link", "Right_ankle_roll_Link")
+# Fit the central torso shell (126--140 mm wide), not its wider upper flanges.
+# Depth, height and placement stay unchanged; this is a collision-core approximation.
+WAIST_COLLISION_HALF_SIZE = (0.075, 0.07, 0.15)
 TRACKED_BODIES = (
     "base_link",
     "Left_hip_roll_Link", "Left_knee_Link", "Left_ankle_roll_Link",
@@ -29,6 +32,7 @@ TRACKED_BODIES = (
     "waist_yaw_Link",
     "Left_shoulder_roll_Link", "Left_elbow_Link", "Left_wrist_yaw_Link",
     "Right_shoulder_roll_Link", "Right_elbow_Link", "Right_wrist_yaw__Link",
+    "Neck_pitch_Link",
 )
 
 
@@ -146,7 +150,10 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
     profile = {
         "robot": "khan_mini", "schema_version": 1,
         "xml_path": "robot.xml", "num_joints": 27, "joint_names": joint_names,
-        "body_names": links, "root_body": "base_link", "anchor_body": "waist_yaw_Link",
+        "body_names": links, "root_body": "base_link", "anchor_body": "base_link",
+        "com_body": "waist_yaw_Link",
+        "neck_joint_names": ["Neck_yaw_joint", "Neck_pitch_joint"],
+        "training_semantics_version": 2,
         "tracked_bodies": list(TRACKED_BODIES), "foot_bodies": list(FOOT_BODIES),
         "foot_geom_regex": r"^(Left|Right)_ankle_roll_Link_\d+_collision$",
         "initial_pos": source["initial_pos"], "standing_height": source["initial_pos"][2],
@@ -240,6 +247,27 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
             geom.rgba = [0.2, 0.6, 0.2, 0.3]
             if source["replace_cylinders_with_capsules"] and geom.type == mujoco.mjtGeom.mjGEOM_CYLINDER:
                 geom.type = mujoco.mjtGeom.mjGEOM_CAPSULE
+    waist_boxes = [
+        geom for geom in spec.geoms
+        if geom.parent.name == "waist_yaw_Link" and geom.group == 3
+    ]
+    if len(waist_boxes) != 1 or waist_boxes[0].type != mujoco.mjtGeom.mjGEOM_BOX:
+        raise ValueError("Expected one waist_yaw_Link collision box")
+    waist_box = waist_boxes[0]
+    original_waist_size = np.array(waist_box.size, dtype=float)
+    if not np.allclose(original_waist_size, (0.075, 0.1, 0.15), rtol=0, atol=1e-9):
+        raise ValueError("Source waist box changed; review the local collision-width override")
+    waist_box.size[:] = WAIST_COLLISION_HALF_SIZE
+    profile["parameter_overrides"]["waist_collision_box"] = {
+        "geom": waist_box.name,
+        "source_half_size_m": original_waist_size.tolist(),
+        "effective_half_size_m": list(WAIST_COLLISION_HALF_SIZE),
+        "source_full_size_m": (2 * original_waist_size).tolist(),
+        "effective_full_size_m": (2 * np.array(WAIST_COLLISION_HALF_SIZE)).tolist(),
+        "local_position_m": np.array(waist_box.pos).tolist(),
+        "source": "user-requested narrower torso collision box",
+        "rationale": "Fit the 126--140 mm central visual shell; wider upper flanges are outside this simplified collision core. Preserve X/Z size, pose and explicit inertial properties",
+    }
     # Export only portable mesh paths; MuJoCo may resolve URDF filenames absolutely.
     for mesh in spec.meshes:
         mesh.file = str(Path("meshes") / Path(mesh.file).name)

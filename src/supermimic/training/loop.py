@@ -16,6 +16,7 @@ from supermimic.envs.mdp.motion_library import discover_npz
 from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.policy.nets import Critic, Policy
+from supermimic.robots.contracts import robot_contract, validate_robot_contract
 from supermimic.robots.registry import get_robot_spec
 from supermimic.training.distributed import (
     allreduce_mean,
@@ -133,6 +134,7 @@ class Trainer:
                 "bin_return": self.command.bin_return,
                 "bin_memory": self.command.bin_memory,
                 "config": asdict(self.cfg),
+                "robot_contract": robot_contract(self.cfg.robot),
             },
             self.log_dir / name,
         )
@@ -161,6 +163,7 @@ class Trainer:
                 f"Checkpoint goal/observation layout differs: saved {saved_layout}, requested {current_layout}; "
                 "use matching settings or start a new run"
             )
+        validate_robot_contract(ck, self.cfg.robot)
         self.wm.load_state_dict(ck["wm"])
         self.policy.load_state_dict(ck["policy"])
         self.critic.load_state_dict(ck["critic"])

@@ -14,10 +14,18 @@ manager (``scale_rewards_by_dt=True``).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 from mjlab.utils.lab_api.math import quat_apply, quat_box_minus, quat_inv, quat_mul, yaw_quat
+
+if TYPE_CHECKING:
+    from mjlab.envs import ManagerBasedRlEnv
+    from mjlab.managers.scene_entity_config import SceneEntityCfg
+
+NECK_JOINT_NAMES = ("Neck_yaw_joint", "Neck_pitch_joint")
 
 
 @dataclass
@@ -36,11 +44,55 @@ class TrackingRewardCfg:
     w_root_ori: float = 0.5
     w_action_rate: float = -0.1
     w_joint_limit: float = -2.0
+    std_neck_pos: float = 0.3
+    std_neck_vel: float = 1.0
+    w_neck_pos: float = 0.0
+    w_neck_vel: float = 0.0
     dt: float = 0.02
+
+    @classmethod
+    def for_joint_names(cls, joint_names: Sequence[str]) -> TrackingRewardCfg:
+        """Enable reference neck tracking for Khan while retaining the G1 reward."""
+        if set(NECK_JOINT_NAMES).issubset(joint_names):
+            return cls(w_neck_pos=0.5, w_neck_vel=0.1)
+        return cls()
 
     @property
     def max_step_reward(self) -> float:
-        return self.dt * (self.w_body_pos + self.w_body_ori + self.w_body_lin_vel + self.w_body_ang_vel + self.w_root_pos + self.w_root_ori)
+        return self.dt * (self.w_body_pos + self.w_body_ori + self.w_body_lin_vel + self.w_body_ang_vel + self.w_root_pos + self.w_root_ori + self.w_neck_pos + self.w_neck_vel)
+
+
+def joint_tracking_error_exp(
+    actual: torch.Tensor, reference: torch.Tensor, std: float,
+) -> torch.Tensor:
+    """Unweighted tracking reward, averaging squared error over selected joints."""
+    if std <= 0 or actual.shape[-1] == 0:
+        raise ValueError("Joint tracking requires positive std and at least one joint")
+    return torch.exp(-(actual - reference).square().mean(-1) / std**2)
+
+
+def motion_neck_position_error_exp(
+    env: ManagerBasedRlEnv, command_name: str, std: float, asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Track reference neck angles using the resolved entity joint selection."""
+    command = env.command_manager.get_term(command_name)
+    robot = env.scene[asset_cfg.name]
+    return joint_tracking_error_exp(
+        robot.data.joint_pos[:, asset_cfg.joint_ids],
+        command.joint_pos[:, asset_cfg.joint_ids], std,
+    )
+
+
+def motion_neck_velocity_error_exp(
+    env: ManagerBasedRlEnv, command_name: str, std: float, asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Track reference neck velocities using the same core as imagined rewards."""
+    command = env.command_manager.get_term(command_name)
+    robot = env.scene[asset_cfg.name]
+    return joint_tracking_error_exp(
+        robot.data.joint_vel[:, asset_cfg.joint_ids],
+        command.joint_vel[:, asset_cfg.joint_ids], std,
+    )
 
 
 def reanchor_reference(
@@ -88,6 +140,10 @@ def tracking_reward_terms(
     joint_pos: torch.Tensor,
     soft_limits: torch.Tensor,  # (29, 2) or (N, 29, 2)
     cfg: TrackingRewardCfg,
+    joint_vel: torch.Tensor | None = None,
+    ref_joint_pos: torch.Tensor | None = None,
+    ref_joint_vel: torch.Tensor | None = None,
+    neck_joint_ids: Sequence[int] = (),
 ) -> dict[str, torch.Tensor]:
     """Per-term weighted, dt-scaled rewards (N,) plus 'total'."""
     ra_pos = robot_body_pos_w[..., anchor_index, :]
@@ -120,6 +176,18 @@ def tracking_reward_terms(
         "action_rate_l2": dt * cfg.w_action_rate * action_rate,
         "joint_limit": dt * cfg.w_joint_limit * joint_limit,
     }
+    if cfg.w_neck_pos:
+        if not neck_joint_ids or ref_joint_pos is None:
+            raise ValueError("Neck position reward requires neck joint IDs and reference positions")
+        terms["motion_neck_pos"] = dt * cfg.w_neck_pos * joint_tracking_error_exp(
+            joint_pos[..., neck_joint_ids], ref_joint_pos[..., neck_joint_ids], cfg.std_neck_pos,
+        )
+    if cfg.w_neck_vel:
+        if not neck_joint_ids or joint_vel is None or ref_joint_vel is None:
+            raise ValueError("Neck velocity reward requires joint velocities and reference velocities")
+        terms["motion_neck_vel"] = dt * cfg.w_neck_vel * joint_tracking_error_exp(
+            joint_vel[..., neck_joint_ids], ref_joint_vel[..., neck_joint_ids], cfg.std_neck_vel,
+        )
     total = terms["motion_global_root_pos"]
     for k, v in terms.items():
         if k != "motion_global_root_pos":

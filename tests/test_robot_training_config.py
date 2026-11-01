@@ -39,12 +39,13 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
     assert tuple(khan.observations["goal"].terms) == (
         ("future_frames", "anchor_pos", "anchor_ori") if anchor_obs else ("future_frames",)
     )
-    assert khan.rewards == g1.rewards
+    assert {name: khan.rewards[name] for name in g1.rewards} == g1.rewards
     assert {name: term.weight for name, term in khan.rewards.items()} == {
         "motion_global_root_pos": 0.5, "motion_global_root_ori": 0.5,
         "motion_body_pos": 1.0, "motion_body_ori": 1.0,
         "motion_body_lin_vel": 1.0, "motion_body_ang_vel": 1.0,
         "action_rate_l2": -0.1, "joint_limit": -2.0,
+        "motion_neck_pos": 0.5, "motion_neck_vel": 0.1,
     }
     assert khan.terminations == g1.terminations
     assert khan.terminations["root_height"].params["threshold"] == 0.25
@@ -66,6 +67,7 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
         assert khan.events["base_com"].params["ranges"] == {
             0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05)
         }
+        assert khan.events["base_com"].params["asset_cfg"].body_names == ("waist_yaw_Link",)
         assert khan.events["encoder_bias"].mode == "reset"
         assert khan.events["encoder_bias"].params["bias_range"] == (-0.01, 0.01)
         assert khan.events["foot_friction"].mode == "reset"
@@ -90,6 +92,8 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
     assert action_a == action_b
     assert action_a["noise_std"] == 0.1
     command_a, command_b = asdict(khan.commands["motion"]), asdict(g1.commands["motion"])
+    assert command_a.pop("g_max") == pytest.approx(11.2)
+    assert command_b.pop("g_max") == pytest.approx(10.0)
     for key in ("robot_name", "anchor_body_name", "root_body_name", "body_names"):
         command_a.pop(key)
         command_b.pop(key)
@@ -104,25 +108,30 @@ def test_robot_bindings_and_g1_compatibility_defaults():
     g1 = get_robot_spec()
     assert g1.root_body == ROOT_BODY == "pelvis"
     assert g1.anchor_body == ANCHOR_BODY == "torso_link"
+    assert g1.com_body == "torso_link" and g1.neck_joint_names == ()
     assert g1.tracked_bodies == TRACKED_BODIES and len(TRACKED_BODIES) == 14
     assert g1.foot_geom_regex == FOOT_GEOM_REGEX
     assert (g1.num_joints, g1.nconmax, g1.njmax) == (29, 35, 250)
     khan = get_robot_spec("khan_mini")
     cfg = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused.npz"], robot=khan.name))
-    assert khan.root_body == "base_link" and khan.anchor_body == "waist_yaw_Link"
+    assert khan.root_body == khan.anchor_body == "base_link"
+    assert khan.com_body == "waist_yaw_Link"
+    assert khan.neck_joint_names == ("Neck_yaw_joint", "Neck_pitch_joint")
     assert len(khan.joint_names) == khan.num_joints == 27
-    assert len(khan.tracked_bodies) == 14
-    assert khan.tracked_bodies[0] == khan.root_body and khan.tracked_bodies[7] == khan.anchor_body
+    assert len(khan.tracked_bodies) == 15
+    assert khan.tracked_bodies[0] == khan.root_body == khan.anchor_body
+    assert khan.tracked_bodies[7] == khan.com_body
+    assert khan.tracked_bodies[-1] == "Neck_pitch_Link"
     assert cfg.commands["motion"].robot_name == khan.name
     assert cfg.commands["motion"].body_names == khan.tracked_bodies
     assert cfg.commands["motion"].root_body_name == khan.root_body
     assert cfg.commands["motion"].anchor_body_name == khan.anchor_body
     assert cfg.viewer.body_name == khan.anchor_body
-    assert cfg.events["base_com"].params["asset_cfg"].body_names == (khan.anchor_body,)
+    assert cfg.events["base_com"].params["asset_cfg"].body_names == (khan.com_body,)
     assert cfg.events["foot_friction"].params["asset_cfg"].geom_names == khan.foot_geom_regex
     assert cfg.recorders["replay"].params == {
         "capacity": 1000, "foot_geom_regex": khan.foot_geom_regex,
-        "com_body_name": khan.anchor_body,
+        "com_body_name": khan.com_body,
     }
     model = khan.load_model()
     assert all(name in [model.body(i).name for i in range(model.nbody)] for name in khan.tracked_bodies)

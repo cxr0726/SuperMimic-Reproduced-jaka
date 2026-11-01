@@ -97,27 +97,34 @@ env -u PYTHONPATH uv run python scripts/replay_khan_npz.py \
 See [`docs/KHAN_REPLAY.md`](docs/KHAN_REPLAY.md) for headless MP4 export and the
 full-dataset ground audit. Replay is kinematic and preserves the original heights.
 
-Khan training keeps G1's proprioception, rewards, randomization and optimization
-defaults, with robot dimensions selected by `--robot khan_mini`. The Khan server
-launcher additionally enables the 9-dimensional anchor-relative goal observation:
+Khan training keeps the original networks, optimizer settings and proprioception,
+with 15 tracked bodies including `Neck_pitch_Link`, `base_link` as root/anchor,
+and explicit reference neck-position/velocity rewards. COM randomization remains
+on `waist_yaw_Link`. The server launcher enables the extra 9-dimensional anchor goal:
 
 ```bash
-env -u PYTHONPATH uv run sm-train --robot khan_mini --env.anchor-obs --run-name khan_lafan1_anchor
+env -u PYTHONPATH uv run sm-train --robot khan_mini --env.anchor-obs --run-name khan_lafan1_base_neck
 env -u PYTHONPATH uv run python scripts/smoke_train_khan.py
 ```
 
-The second command preserves the full production networks, batch sizes, H=32,
-UTD=0.4 and compilation, while running 32 environments for 50 steps. Activation
-recomputation is disabled by default. This original execution path exceeds the
-local 12 GB GPU even at one environment; the earlier passing run explicitly used
-`--activation-checkpoint`. See [`docs/KHAN_MEMORY.md`](docs/KHAN_MEMORY.md) for the
-measurements and [`docs/KHAN_TRAINING.md`](docs/KHAN_TRAINING.md) for configuration.
+The smoke command preserves production networks, batches, H=32 and UTD=0.4, with
+32 environments for 50 steps; activation recomputation stays off by default.
+See [`docs/KHAN_TRAINING.md`](docs/KHAN_TRAINING.md) for all observations/rewards and
+[`docs/KHAN_MEMORY.md`](docs/KHAN_MEMORY.md) for the historical 12 GB memory tests.
+Khan's reward normalization now uses its 0.112 per-step upper bound; G1 stays at 0.1.
 
 For the original single-GPU optimization settings with anchor observations on a server, use
-`bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_anchor`.
+`bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_base_neck`.
 See [`docs/KHAN_SERVER_TRAINING.md`](docs/KHAN_SERVER_TRAINING.md) for deployment,
 dry-run, a 50-step verification and checkpoint resume. Goal width is 649 (640 reference
 features plus anchor position 3 and orientation 6); activation recomputation is off.
+Start a **new run**: checkpoints now record a `robot_contract` for body/reward/physics
+semantics and reject incompatible legacy Khan policies, even when tensor widths match.
+The old 40k policy's frozen-model replay and 90 push-test conditions are documented in
+[`docs/KHAN_40K_ROBUSTNESS.md`](docs/KHAN_40K_ROBUSTNESS.md); they do not evaluate the new training configuration.
+Legacy full-clip benchmarks use an isolated Git snapshot, leaving the current training
+checkout unchanged; commands and the 100k comparison are in
+[`docs/KHAN_LEGACY_BENCHMARK.md`](docs/KHAN_LEGACY_BENCHMARK.md).
 
 ### Data
 

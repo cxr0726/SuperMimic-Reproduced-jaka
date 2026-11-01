@@ -30,18 +30,20 @@ NEEDS_CUDA_DATA = pytest.mark.skipif(
 )
 
 
-def test_khan_config_preserves_g1_observation_reward_and_randomization():
+def test_khan_config_preserves_g1_observation_and_extends_neck_tracking_reward():
     g1 = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused.npz"]))
     khan = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused.npz"], robot="khan_mini"))
     spec = get_robot_spec("khan_mini")
-    assert len(spec.tracked_bodies) == 14
-    assert spec.tracked_bodies[0] == spec.root_body == "base_link"
-    assert spec.tracked_bodies[7] == spec.anchor_body == "waist_yaw_Link"
+    assert len(spec.tracked_bodies) == 15
+    assert spec.tracked_bodies[0] == spec.root_body == spec.anchor_body == "base_link"
+    assert spec.tracked_bodies[7] == spec.com_body == "waist_yaw_Link"
+    assert spec.tracked_bodies[-1] == "Neck_pitch_Link"
+    assert spec.neck_joint_names == ("Neck_yaw_joint", "Neck_pitch_joint")
     assert khan.commands["motion"].body_names == spec.tracked_bodies
     assert khan.commands["motion"].root_body_name == spec.root_body
     assert khan.commands["motion"].anchor_body_name == spec.anchor_body
     assert khan.viewer.body_name == spec.anchor_body
-    assert khan.recorders["replay"].params["com_body_name"] == spec.anchor_body
+    assert khan.recorders["replay"].params["com_body_name"] == spec.com_body
     assert set(khan.actions["joint_pos"].scale.values()) == {0.5}
     assert len(khan.actions["joint_pos"].scale) == 27
     for group_name in ("policy", "goal"):
@@ -53,18 +55,24 @@ def test_khan_config_preserves_g1_observation_reward_and_randomization():
             assert actual.terms[name].func is expected.terms[name].func
             assert actual.terms[name].params == expected.terms[name].params
             assert actual.terms[name].noise == expected.terms[name].noise
-    assert len(khan.rewards) == len(g1.rewards) == 8
-    for name, term in khan.rewards.items():
-        original = g1.rewards[name]
+    assert len(khan.rewards) == 10 and len(g1.rewards) == 8
+    for name, original in g1.rewards.items():
+        term = khan.rewards[name]
         assert term.func is original.func
         assert term.weight == original.weight
         assert term.params == original.params
+    for name, weight, std in (("motion_neck_pos", 0.5, 0.3),
+                              ("motion_neck_vel", 0.1, 1.0)):
+        term = khan.rewards[name]
+        assert term.weight == weight and term.params["std"] == std
+        assert term.params["command_name"] == "motion"
+        assert term.params["asset_cfg"].joint_names == spec.neck_joint_names
     for name, term in khan.terminations.items():
         original = g1.terminations[name]
         assert term.func is original.func
         assert term.time_out == original.time_out
         assert term.params == original.params
-    assert khan.events["base_com"].params["asset_cfg"].body_names == (spec.anchor_body,)
+    assert khan.events["base_com"].params["asset_cfg"].body_names == (spec.com_body,)
     assert khan.events["base_com"].params["ranges"] == g1.events["base_com"].params["ranges"]
     for name in ("encoder_bias", "foot_friction"):
         assert khan.events[name].func is g1.events[name].func
@@ -131,7 +139,7 @@ def test_khan_spaces_observation_reward_history_and_replay(setup_khan):
         actions = 0.1 * torch.randn(env.num_envs, 27, device=env.device)
         obs, reward, _, _, _ = env.step(actions)
         assert torch.isfinite(obs["policy"]).all() and torch.isfinite(obs["goal"]).all()
-        assert torch.isfinite(reward).all() and reward.max() <= 0.100001
+        assert torch.isfinite(reward).all() and reward.max() <= 0.112001
         _refresh(env, cmd)
         state, xi = io.read(), rec.ctx.read()
         current = analytic_observation(state, env.action_manager.action, xi,
@@ -153,7 +161,13 @@ def test_khan_spaces_observation_reward_history_and_replay(setup_khan):
                                    rtol=0, atol=1e-6)
         ref = reference_at(cmd.library, cmd.frame)
         ours = heads.reward(state, env.action_manager.action, env.action_manager.prev_action, ref)
-        for name, term in env.cfg.rewards.items():
+        for name in env.cfg.rewards:
+            # The manager owns resolved joint IDs; env.cfg retains unresolved
+            # SceneEntityCfg selectors (slice(None) before resolution).
+            term = env.reward_manager.get_term_cfg(name)
+            if name in ("motion_neck_pos", "motion_neck_vel"):
+                selected = term.params["asset_cfg"].joint_ids
+                assert tuple(robot.joint_names[i] for i in selected) == spec.neck_joint_names
             theirs = term.weight * term.func(env, **term.params)
             error = (ours[name] / env.step_dt - theirs).abs().max().item()
             worst_rewards[name] = max(worst_rewards[name], error)
@@ -199,8 +213,10 @@ def test_khan_domain_randomization_and_reset_noise(setup_khan):
         assert before[:, 1:28].abs().max() <= 0.010001
         limits = torch.tensor([0.025, 0.05, 0.05], device=env.device)
         assert (before[:, 28:].abs() <= limits + 1e-6).all()
-        expected_com_id = robot.indexing.body_ids[robot.body_names.index(spec.anchor_body)]
+        expected_com_id = robot.indexing.body_ids[robot.body_names.index(spec.com_body)]
         assert rec.ctx.com_body_global == int(expected_com_id)
+        anchor_id = robot.indexing.body_ids[robot.body_names.index(spec.anchor_body)]
+        assert int(expected_com_id) != int(anchor_id)
         local_ids, _ = robot.find_geoms(spec.foot_geom_regex)
         assert len(local_ids) == 14
         geom_ids = robot.indexing.geom_ids[local_ids]
@@ -271,7 +287,7 @@ def test_khan_root_terminations_and_state_io(setup_khan):
 
 @NEEDS_CUDA_DATA
 @pytest.mark.parametrize("obs_noise", [False, True])
-def test_khan_anchor_goal_matches_reference_pose_in_robot_waist_frame(obs_noise):
+def test_khan_anchor_goal_matches_reference_pose_in_robot_base_frame(obs_noise):
     """The actual mjlab goal appends one 3+6 anchor pose, with matching noise."""
     env = make_env(SuperMimicEnvCfgArgs(
         npz_files=[str(NPZ)], robot="khan_mini", num_envs=4,
@@ -290,8 +306,10 @@ def test_khan_anchor_goal_matches_reference_pose_in_robot_waist_frame(obs_noise)
         io = StateIO(env)
         cmd = env.command_manager.get_term("motion")
         obs, _ = env.reset()
-        assert len(spec.tracked_bodies) == 14
-        assert spec.anchor_body == "waist_yaw_Link"
+        assert len(spec.tracked_bodies) == 15
+        assert spec.anchor_body == "base_link" and heads.anchor_index == 0
+        assert spec.com_body == "waist_yaw_Link"
+        assert spec.tracked_bodies[-1] == "Neck_pitch_Link"
         assert robot.body_names[cmd.robot_anchor_body_index] == spec.anchor_body
         assert tuple(env.cfg.observations["goal"].terms) == (
             "future_frames", "anchor_pos", "anchor_ori"
