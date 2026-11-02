@@ -26,6 +26,9 @@ dependencies = [
 [project.scripts]
 sm-train = "supermimic.scripts.train:main"
 
+[project.optional-dependencies]
+export = ["onnx>=1.17,<2", "onnxruntime>=1.20,<2"]
+
 [dependency-groups]
 dev = [
   "pytest>=8.0",

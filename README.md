@@ -44,7 +44,7 @@ Paper section → code. Everything is torch; nothing from rsl_rl.
 | Algorithm A.1 loop, UTD 0.4, Table A.5/A.6 hyper-parameters, cosine LR decay, torchrun data parallelism (one simulator per rank, explicit all-reduce, lr × √world) | `src/supermimic/training/loop.py`, `src/supermimic/scripts/train.py` |
 | Appendix F benchmark, push test, drift diagnostic, interactive replay | `src/supermimic/eval/benchmark.py`, `scripts/eval_benchmark.py`, `eval_push.py`, `diag_drift.py`, `play.py` |
 
-Deviations and choices the paper leaves open (U1–U20 in [`docs/PAPER_SPEC.md`](docs/PAPER_SPEC.md), decisions D1–D20 in [`docs/REPRODUCTION_PLAN.md`](docs/REPRODUCTION_PLAN.md)) are recorded with their reasons; the ones that changed after measurement are in the experiment log. Not done: velocity interface and distillation, PPO baselines, the H×critic ablation, ONNX export, real-robot deployment.
+Deviations and choices the paper leaves open (U1–U20 in [`docs/PAPER_SPEC.md`](docs/PAPER_SPEC.md), decisions D1–D20 in [`docs/REPRODUCTION_PLAN.md`](docs/REPRODUCTION_PLAN.md)) are recorded with their reasons; the ones that changed after measurement are in the experiment log. Not done: velocity interface and distillation, PPO baselines, the H×critic ablation, real-robot deployment.
 
 ## Setup
 
@@ -145,6 +145,21 @@ The old 40k policy's frozen-model replay and 90 push-test conditions are documen
 Legacy full-clip benchmarks use an isolated Git snapshot, leaving the current training
 checkout unchanged; commands and the 100k comparison are in
 [`docs/KHAN_LEGACY_BENCHMARK.md`](docs/KHAN_LEGACY_BENCHMARK.md).
+
+Export the current Khan actor and ordered robot parameters as a single FP32 ONNX:
+
+```bash
+uv sync --extra export
+env -u PYTHONPATH .venv/bin/python scripts/export_onnx.py \
+  --ckpt logs/Khan_lafan1_clean_goal/ckpt_0100000.pt \
+  --out exports/khan_mini/ckpt_0100000.onnx
+```
+
+The default interface is `obs[batch,620] = [goal155, policy_obs465]` to
+`actions[batch,27]`; ONNX Runtime parity checks run before the file is published.
+See [`docs/KHAN_ONNX_EXPORT.md`](docs/KHAN_ONNX_EXPORT.md) for input offsets,
+single/split input exports and the joint-order/scale differences from the older
+Isaac ONNX. Reference motions remain external to the model.
 
 ### Data
 
