@@ -78,19 +78,22 @@ profile的 `parameter_overrides.waist_collision_box` 记录源尺寸、有效尺
 
 ## 执行器参数
 
-下表均来自 Khan_mini_CFG 的有效值。PD、转子惯量和力矩限制由
+下表为 Khan_mini_CFG 加本地参数覆盖后的有效值。PD、转子惯量和力矩限制由
 `BuiltinPositionActuatorCfg` 应用，初态由 `EntityCfg.InitialStateCfg` 应用。
 
 | 关节组 | 数量 | kp | kd | armature | 力矩限额 Nm | 速度元数据 rad/s |
 |---|---:|---:|---:|---:|---:|---:|
 | 髋、膝 | 8 | 187 | 18.7 | 0.03 | 120 | 11.52 |
-| 踝 pitch | 2 | 100 | 2 | 0.016 | 96 | 14.6 |
+| 踝 pitch | 2 | 100 | 2 | 0.3 | 96 | 14.6 |
 | 踝 roll | 2 | 50 | 0.5 | 0.016 | 96 | 14.6 |
 | 肩 pitch/roll | 4 | 102 | 10.2 | 0.016 | 96 | 11.5 |
 | 肩 yaw、肘 | 4 | 40.8 | 4 | 0.01 | 36 | 15.7 |
 | 腕 | 4 | 6.7 | 0.67 | 0.01 | 8 | 12.5 |
 | 腰 yaw | 1 | 187 | 18.7 | 0.03 | 120 | 11.519 |
 | 颈 | 2 | 6.7 | 0.67 | 0.01 | 8 | 8 |
+
+左右踝pitch的armature按用户要求从源配置的0.016改为0.3；踝roll仍为0.016。
+转换器固定应用此覆盖，profile及source.json的 `parameter_overrides.ankle_pitch_armature` 记录源值与有效值。
 
 mjlab 1.6 的内建 position servo 不支持 Isaac Lab `velocity_limit_sim` 的硬速度约束；
 这些值保存在 profile 的 `velocity_limit` 中，`velocity_limit_enforced=false`。

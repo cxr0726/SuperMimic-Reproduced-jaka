@@ -187,6 +187,9 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
     # unchanged and make the overrides explicit so rebuilding preserves them.
     original_waist_velocity = profile["velocity_limit"]["waist_yaw_joint"]
     profile["velocity_limit"]["waist_yaw_joint"] = profile["urdf_limits"]["waist_yaw_joint"]["velocity"]
+    ankle_pitch_names = ("Left_ankle_pitch_joint", "Right_ankle_pitch_joint")
+    original_ankle_pitch_armature = {name: profile["armature"][name] for name in ankle_pitch_names}
+    profile["armature"].update(dict.fromkeys(ankle_pitch_names, 0.3))
     profile["action_scale"] = dict.fromkeys(joint_names, 0.5)
     profile["parameter_overrides"] = {
         "waist_velocity_limit": {
@@ -195,6 +198,12 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
             "effective_source": "URDF joint limit velocity",
         },
         "action_scale": {"value": 0.5, "source": "user-specified uniform joint action scale"},
+        "ankle_pitch_armature": {
+            "joint_names": list(ankle_pitch_names),
+            "source_config_values": original_ankle_pitch_armature,
+            "effective_value": 0.3,
+            "source": "user-specified ankle pitch armature",
+        },
         "nonfoot_sliding_friction": {
             "value": 1.0, "source": "user-requested alignment with mjlab G1 non-foot contacts",
         },

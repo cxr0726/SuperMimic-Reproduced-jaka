@@ -218,13 +218,13 @@
     "Left_hip_roll_joint": 0.03,
     "Left_hip_yaw_joint": 0.03,
     "Left_knee_joint": 0.03,
-    "Left_ankle_pitch_joint": 0.016,
+    "Left_ankle_pitch_joint": 0.3,
     "Left_ankle_roll_joint": 0.016,
     "Right_hip_pitch_joint": 0.03,
     "Right_hip_roll_joint": 0.03,
     "Right_hip_yaw_joint": 0.03,
     "Right_knee_joint": 0.03,
-    "Right_ankle_pitch_joint": 0.016,
+    "Right_ankle_pitch_joint": 0.3,
     "Right_ankle_roll_joint": 0.016,
     "waist_yaw_joint": 0.03,
     "Left_shoulder_pitch_joint": 0.016,
@@ -502,6 +502,18 @@
     "action_scale": {
       "value": 0.5,
       "source": "user-specified uniform joint action scale"
+    },
+    "ankle_pitch_armature": {
+      "joint_names": [
+        "Left_ankle_pitch_joint",
+        "Right_ankle_pitch_joint"
+      ],
+      "source_config_values": {
+        "Left_ankle_pitch_joint": 0.016,
+        "Right_ankle_pitch_joint": 0.016
+      },
+      "effective_value": 0.3,
+      "source": "user-specified ankle pitch armature"
     },
     "nonfoot_sliding_friction": {
       "value": 1.0,

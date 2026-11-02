@@ -61,6 +61,18 @@
       "value": 0.5,
       "source": "user-specified uniform joint action scale"
     },
+    "ankle_pitch_armature": {
+      "joint_names": [
+        "Left_ankle_pitch_joint",
+        "Right_ankle_pitch_joint"
+      ],
+      "source_config_values": {
+        "Left_ankle_pitch_joint": 0.016,
+        "Right_ankle_pitch_joint": 0.016
+      },
+      "effective_value": 0.3,
+      "source": "user-specified ankle pitch armature"
+    },
     "nonfoot_sliding_friction": {
       "value": 1.0,
       "source": "user-requested alignment with mjlab G1 non-foot contacts"
@@ -126,8 +138,8 @@
     "contacts": "self-collision masks retained; feet condim=3, other contacts condim=1"
   },
   "output_sha256": {
-    "robot.xml": "7a24edbbcde9b684a2b1b519646f369e533f5cf107c511480befa9826ad3a2a3",
+    "robot.xml": "a25f2da6aa75dbf9b298a7cf32b7c22e71c8076861fc9eed92cd0b964af0871a",
     "source.urdf": "927cf814485ce2e2fea77aed95dd4b858e60763b785693c2f3f4b23f9940be33",
-    "profile.json": "e6484f8f97a067acb4b5f5e1903b5214accb5142fb7e8b327a77c04880d1aab7"
+    "profile.json": "ddc9f1ec6687515f400c22df1756a7d94cbd4fc0bade67275d12be938b99e321"
   }
 }
