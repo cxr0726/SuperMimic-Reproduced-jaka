@@ -120,7 +120,7 @@ def _metadata(ckpt: Path, cfg: dict, input_layout: InputLayout) -> dict[str, str
     def array(key):
         return ",".join(format(float(profile[key][name]), ".9g") for name in names)
 
-    contract = robot_contract("khan_mini", "isaac_khan")
+    contract = robot_contract("khan_mini", "isaac_khan", env_config=cfg["env"])
     # Dimensions come from the validated actor contract, not profile's historical
     # legacy SuperMimic dimensions section.
     return {

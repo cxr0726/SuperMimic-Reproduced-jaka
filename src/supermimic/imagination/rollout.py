@@ -61,6 +61,7 @@ class ImagRollout:
     frames: torch.Tensor  # (H+1, n)
     reward_terms: dict  # mean of each reward term over the rollout (diagnostics)
     critic_goals: torch.Tensor | None = None  # Khan: command155 + orientation30 + velocity/gravity180
+    critic_reference: ReferenceFrame | None = None  # Khan current frames, flattened (H+1)*n
 
 
 def imagine(
@@ -221,4 +222,5 @@ def imagine(
         frames=torch.stack(frames),
         reward_terms={k: float(v / horizon) for k, v in zip(term_names, term_sum.tolist())},
         critic_goals=torch.stack(critic_goals) if critic_goals is not None else None,
+        critic_reference=ref_all if layout == "isaac_khan" else None,
     )

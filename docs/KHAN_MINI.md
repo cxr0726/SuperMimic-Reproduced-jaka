@@ -26,16 +26,16 @@ assets/robots/khan_mini/
 | 跟踪 body | 原14个部位末尾追加 `Neck_pitch_Link`，共15个 |
 | 浮动根关节 | `floating_base` |
 | `nq / nv / njnt` | 34 / 33 / 28（包含根的自由关节） |
-| `nbody / ngeom / nmesh` | 46 / 71 / 44，nbody 包含 world |
+| `nbody / ngeom / nmesh` | 46 / 59 / 44，nbody 包含 world |
 | 执行器 | 原始 MJCF 的 nu=0；mjlab EntityCfg 创建 27 个 position servo |
 | 总质量 | 40.8325349886391 kg |
-| 初始根位置 | `(0, 0, 0.65)` m |
+| 资产home根位置 | `(0, 0, 0.65)` m；运动跟踪reset另在参考root上加0.05 m |
 | 初始关节角 | 按 Khan_mini_CFG：双肩 roll=-1.57、双肘=1.57、双腕 yaw=0.3，其余 0 |
 | 软关节限位 | 硬限位区间的 90% |
-| 碰撞 | 45 个视觉 geom 与 26 个碰撞 geom 分开；保留自碰撞 |
+| 碰撞 | 45 个视觉 geom 与 14 个碰撞 geom 分开；含双脚各1个完整mesh凸包，保留自碰撞 |
 
 带地面的 mjlab scene 多出一个 terrain body 和一个地面 geom，因此预览汇总显示
-`nbody=47, ngeom=72`，机器人本身的拓扑保持上述数值。
+`nbody=47, ngeom=60`，机器人本身的拓扑保持上述数值。
 
 ## 转换处理
 
@@ -43,8 +43,15 @@ assets/robots/khan_mini/
 - 为根添加 freejoint，保留原始大小写、关节轴、限位和父子关系，包括
   `Right_wrist_yaw__Link` 的双下划线。
 - 视觉放在 group 2，碰撞放在 group 3；视觉不参与接触，碰撞 contype/conaffinity 均为 1。
-- 按源配置将 18 个 cylinder 碰撞形状转成 capsule，保留半径和轴向半长，端部由半球补齐。
-  双脚共 14 个 capsule，接触 condim=3；其他接触 condim=1。
+- 非脚部的4个cylinder碰撞按源配置转成capsule，保留半径和轴向半长，端部由半球补齐。
+- 双脚原有每脚7个sole capsule替换为每脚1个完整CAD mesh凸包，包含脚背与踝连接结构。
+  复用随资产分发的 `Left_ankle_roll_Link.STL` / `Right_ankle_roll_Link.STL`，与SDK脚碰撞源mesh一致；
+  使用visual原始局部姿态，由MuJoCo生成碰撞凸包，不引入SDK的其他接触掩码或关节动力学设置。
+  脚接触仍为condim=3、priority=1、μ=0.6；非脚接触仍为condim=1。碰撞geom密度为0，显式URDF惯量不变。
+  新名称为 `Left_ankle_roll_Link_convex_collision` / `Right_ankle_roll_Link_convex_collision`，profile和训练足部正则同步。
+  部署只需已生成资产，不依赖外部SDK或ref目录；已有NPZ无需重新转换。
+  左脚凸包在ankle_roll局部坐标中的包围范围约为X[-0.07496,0.12497]、Y±0.0475、Z[-0.048,0.014] m；
+  最低点仍约为−0.048 m，替换凸包不会自动修复原始参考的接地偏差。
 - 接触摩擦按当前 G1 对齐：足底 `(0.6, 0.005, 0.0001)`，非足底
   `(1.0, 0.005, 0.0001)`。该用户指定的配置在重建时保持，并记录在 profile 的
   `contact_friction` 和 `parameter_overrides` 中，不等同于 Isaac Lab 的材质参数。
@@ -158,8 +165,8 @@ action_cfg = get_khan_mini_action_cfg()  # 全关节 0.5，默认执行噪声 st
 上一轮155/465观测、Isaac原scale、287维critic通过165项全量测试及8环境50步正式网络训练smoke，详见
 [KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。
 上一版SuperMimic scale、467维critic、goal仍加噪的版本通过167项全量测试及8环境50步训练smoke；
-这些观测改动没有重建或修改本节机器人资产。
-当前version-4干净goal版本通过168项全量测试及8环境50步正式网络/batch训练smoke，
+这些历史观测改动当时没有重建或修改机器人资产；当前v5另有本文记录的脚部凸包替换。
+历史version-4干净goal版本通过168项全量测试及8环境50步正式网络/batch训练smoke，
 15个跟踪body与模型接口确认；验证记录同见上述观测文档，不构成长片收敛或接地修复的证明。
 
 - 4 个 CUDA 环境完成 200 个控制步（每环境 4 秒），qpos/qvel/qacc、观测及奖励均有限。
@@ -189,9 +196,9 @@ action_cfg = get_khan_mini_action_cfg()  # 全关节 0.5，默认执行噪声 st
 | 动作处理 | NoisyJointPositionActionCfg，全部 scale=0.5 | 相同类型，scale 按 0.25×effort/kp 分组 |
 | 视觉 / 碰撞组 | 2 / 3 | 2 / 3 |
 | 自碰撞 mask | 1 / 1，开启 | 1 / 1，开启 |
-| 足底碰撞 | 14 个，condim=3、priority=1 | 相同 |
+| 足底碰撞 | 2个完整CAD mesh凸包，condim=3、priority=1 | 14个足底几何，condim=3、priority=1 |
 | 非足底接触 | condim=1、priority=0 | 相同 |
-| 碰撞几何数 / 覆盖 body | 26 / 14 | 33 / 18 |
+| 碰撞几何数 / 覆盖 body | 14 / 14 | 33 / 18 |
 | 足底摩擦 | (0.6, 0.005, 0.0001) | 相同 |
 | 非足底摩擦 | (1.0, 0.005, 0.0001) | 相同 |
 | 显式碰撞排除对 | 0 | 4 |
@@ -208,7 +215,7 @@ G1 显式排除 pelvis 与左右 hip_roll，以及左右 elbow 与 wrist_pitch �
 确认自碰撞检测实际生效；这不是当前14 cm宽腰盒的接触数量结论。历史实编译对比及姿态记录在
 `logs/khan_mini_collision/g1_comparison.json`。
 
-Khan 的26个碰撞geom只覆盖14个body，其余31个link没有独立碰撞体，包括头颈和部分髋/肩部。
+Khan 的14个碰撞geom只覆盖14个body，其余31个link没有独立碰撞体，包括头颈和部分髋/肩部。
 这与训练中跟踪15个body是两件事：增加 `Neck_pitch_Link` 跟踪不等于新增头部碰撞体。
 这是源URDF的简化结果；碰撞体截图显示真实覆盖范围。
 可用下列命令重新渲染多视角：
@@ -222,12 +229,13 @@ env -u PYTHONPATH uv run python scripts/render_khan_collisions.py
 
 训练已按机器人解析状态、观测、策略、世界模型、FK与replay尺寸。Khan当前默认 `isaac_khan`：
 state=67、5帧参考goal=155、policy prop=465（未来姿态30＋5帧传感器历史435）、action=27、context=31。
-actor本体角速度/关节速度有效scale为0.5/0.2；critic为467维，其中365维是干净参考特征。
+actor本体角速度/关节速度有效scale为0.5/0.2；critic为545维，其中365维是干净参考特征，另增78维当前跟踪误差。
 155维actor参考goal也在真实环境和想象训练中保持干净；prop本体/未来朝向噪声仍保留。
-anchor使用base frame；COM随机化仍显式绑定waist。观测改变没有更改上述MJCF、惯量或执行器。
-Khan version-4 `robot_contract` 保存root/anchor/COM/body/reward、模型/profile SHA、actor尺度及critic参考schema；
-旧14-body、649/870输入、Isaac原scale/287维critic或version-3带goal噪声的Khan检查点不能直接用于当前训练或eval，
-应使用新run或相应冻结旧版评估器。
-G1的NPZ与检查点不能混用于Khan。已有45-body NPZ无需因本次观测调整而重新转换。
+anchor使用base frame；COM随机化仍显式绑定waist。当前增加0–20 ms执行器延迟随机化及实际机器人reset的5 cm高度余量；
+这些不改变关节PD/惯量、参考轨迹或actor输入维度。nominal eval关闭延迟，但保留同样的reset高度余量。
+Khan version-5 `robot_contract` 保存上述仿真语义、模型/profile SHA、actor尺度及critic扩展schema；
+旧Khan contract包括version-4 clean-goal/100k均不能直接用于当前训练、eval或export，
+应使用新run或匹配的历史源码与资产。
+G1的NPZ与检查点不能混用于Khan。已有45-body NPZ无需因本次观测、脚部碰撞或reset调整而重新转换。
 正式参数见 [KHAN_TRAINING.md](KHAN_TRAINING.md)，Isaac观测的公式和差异见
 [KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。

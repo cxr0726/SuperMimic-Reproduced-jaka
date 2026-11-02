@@ -3,6 +3,7 @@
 import re
 from dataclasses import asdict
 
+import mujoco
 import pytest
 import torch
 from mjlab.asset_zoo.robots import G1_ACTION_SCALE
@@ -96,6 +97,8 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
     command_a, command_b = asdict(khan.commands["motion"]), asdict(g1.commands["motion"])
     assert command_a.pop("g_max") == pytest.approx(11.2)
     assert command_b.pop("g_max") == pytest.approx(10.0)
+    assert command_a.pop("reset_root_z_offset") == 0.05
+    assert command_b.pop("reset_root_z_offset") == 0.0
     for key in ("robot_name", "anchor_body_name", "root_body_name", "body_names"):
         command_a.pop(key)
         command_b.pop(key)
@@ -103,6 +106,13 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
     assert command_a["sampling_mode"] == "return"
     assert command_a["future_frames"] == 10 and command_a["bin_frames"] == 50
     assert command_a["joint_position_range"] == ((-0.1, 0.1) if randomized else (0.0, 0.0))
+    for actuator in khan.scene.entities["robot"].articulation.actuators:
+        assert actuator.delay_min_lag == 0
+        assert actuator.delay_max_lag == (4 if randomized else 0)
+        assert actuator.delay_update_period == 2**40
+        assert actuator.delay_hold_prob == 0.0 and not actuator.delay_per_env_phase
+    for actuator in g1.scene.entities["robot"].articulation.actuators:
+        assert actuator.delay_min_lag == actuator.delay_max_lag == 0
 
 
 def test_robot_bindings_and_g1_compatibility_defaults():
@@ -114,11 +124,13 @@ def test_robot_bindings_and_g1_compatibility_defaults():
     assert g1.tracked_bodies == TRACKED_BODIES and len(TRACKED_BODIES) == 14
     assert g1.foot_geom_regex == FOOT_GEOM_REGEX
     assert (g1.num_joints, g1.nconmax, g1.njmax) == (29, 35, 250)
+    assert not g1.default_actuator_delay and g1.default_reset_root_z_offset == 0.0
     khan = get_robot_spec("khan_mini")
     cfg = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused.npz"], robot=khan.name))
     assert khan.root_body == khan.anchor_body == "base_link"
     assert khan.com_body == "waist_yaw_Link"
     assert khan.neck_joint_names == ("Neck_yaw_joint", "Neck_pitch_joint")
+    assert khan.default_actuator_delay and khan.default_reset_root_z_offset == 0.05
     assert len(khan.joint_names) == khan.num_joints == 27
     assert len(khan.tracked_bodies) == 15
     assert khan.tracked_bodies[0] == khan.root_body == khan.anchor_body
@@ -138,7 +150,8 @@ def test_robot_bindings_and_g1_compatibility_defaults():
     model = khan.load_model()
     assert all(name in [model.body(i).name for i in range(model.nbody)] for name in khan.tracked_bodies)
     feet = [i for i in range(model.ngeom) if re.fullmatch(khan.foot_geom_regex, model.geom(i).name)]
-    assert len(feet) == 14
+    assert len(feet) == 2
+    assert (model.geom_type[feet] == mujoco.mjtGeom.mjGEOM_MESH).all()
     assert (model.geom_priority[feet] == 1).all() and (model.geom_condim[feet] == 3).all()
     assert cfg.scene.entities["robot"].articulation.soft_joint_pos_limit_factor == 0.9
     assert (cfg.sim.nconmax, cfg.sim.njmax) == (128, 512)

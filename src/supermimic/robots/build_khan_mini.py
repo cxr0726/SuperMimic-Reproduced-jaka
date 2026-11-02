@@ -155,7 +155,7 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
         "neck_joint_names": ["Neck_yaw_joint", "Neck_pitch_joint"],
         "training_semantics_version": 2,
         "tracked_bodies": list(TRACKED_BODIES), "foot_bodies": list(FOOT_BODIES),
-        "foot_geom_regex": r"^(Left|Right)_ankle_roll_Link_\d+_collision$",
+        "foot_geom_regex": r"^(Left|Right)_ankle_roll_Link_convex_collision$",
         "initial_pos": source["initial_pos"], "standing_height": source["initial_pos"][2],
         "default_joint_pos": source["default_joint_pos"],
         "soft_joint_pos_limit_factor": source["soft_joint_pos_limit_factor"],
@@ -247,6 +247,41 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
             geom.rgba = [0.2, 0.6, 0.2, 0.3]
             if source["replace_cylinders_with_capsules"] and geom.type == mujoco.mjtGeom.mjGEOM_CYLINDER:
                 geom.type = mujoco.mjtGeom.mjGEOM_CAPSULE
+    # The simplified URDF has seven sole capsules per foot. Use the existing
+    # whole-foot CAD mesh, as in the SDK model, so collision includes the instep.
+    # MuJoCo collides meshes using their convex hull. Reuse the visual mesh's raw
+    # pose (not the compiled, recentered mesh pose) and keep training contact
+    # masks/friction/priority. Explicit URDF inertials remain authoritative.
+    foot_shapes = {}
+    for body_name in FOOT_BODIES:
+        body = spec.body(body_name)
+        visuals = [geom for geom in body.geoms if geom.group == 2]
+        collisions = [geom for geom in body.geoms if geom.group == 3]
+        if (len(visuals) != 1 or visuals[0].type != mujoco.mjtGeom.mjGEOM_MESH
+                or len(collisions) != 7):
+            raise ValueError(f"Expected one whole-foot visual mesh and seven sole collisions: {body_name}")
+        visual, collision = visuals[0], collisions[0]
+        collision.name = f"{body_name}_convex_collision"
+        collision.type = mujoco.mjtGeom.mjGEOM_MESH
+        collision.meshname = visual.meshname
+        collision.pos = np.array(visual.pos)
+        collision.quat = np.array(visual.quat)
+        collision.size[:] = 0
+        collision.density = 0
+        for obsolete in collisions[1:]:
+            spec.delete(obsolete)
+        foot_shapes[body_name] = {
+            "geom": collision.name,
+            "mesh": visual.meshname,
+            "source_collision_count": len(collisions),
+            "effective_collision_count": 1,
+        }
+    profile["parameter_overrides"]["foot_collision"] = {
+        "shape": "whole-foot CAD mesh convex hull, including instep",
+        "source": "existing URDF visual STL; identical to SDK whole-foot collision mesh",
+        "feet": foot_shapes,
+        "inertials": "preserved from URDF; collision geom density is zero",
+    }
     waist_boxes = [
         geom for geom in spec.geoms
         if geom.parent.name == "waist_yaw_Link" and geom.group == 3
@@ -307,6 +342,7 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
         "conversion": {
             "fixed_links": "preserved", "visual_meshes": "preserved",
             "freejoint": "floating_base", "cylinders": "capsules with original radius/axis half-length",
+            "foot_collisions": "seven sole capsules replaced by each existing whole-foot CAD mesh convex hull; training contact parameters and explicit inertials preserved",
             "actuators": "created by get_khan_mini_cfg from profile.json",
             "velocity_limits": "recorded only; not enforced by builtin position servos",
             "contacts": "self-collision masks retained; feet condim=3, other contacts condim=1",

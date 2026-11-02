@@ -13,7 +13,12 @@ from dataclasses import dataclass
 
 import torch
 
-from supermimic.envs.mdp.rewards import NECK_JOINT_NAMES, TrackingRewardCfg, tracking_reward_terms
+from supermimic.envs.mdp.rewards import (
+    NECK_JOINT_NAMES,
+    TrackingRewardCfg,
+    reanchor_reference,
+    tracking_reward_terms,
+)
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.kinematics.rotations import projected_gravity, quat_apply_inverse
 from supermimic.world_model.state_spec import StateSpec
@@ -197,3 +202,36 @@ class AnalyticHeads:
         dp = quat_apply_inverse(yaw_quat(ref.root_quat_w), s[..., 0:3] - ref.root_pos_w)
         dyaw = wrap_to_pi(heading_yaw(s[..., 3:7]) - heading_yaw(ref.root_quat_w))
         return torch.cat([dp, dyaw[..., None]], dim=-1)
+
+    def critic_error_features(self, s: torch.Tensor, ref: ReferenceFrame, bodies=None) -> torch.Tensor:
+        """Clean current tracking errors, matching InstantTrack/Uni-SuperMimic.
+
+        Layout: ref-minus-actual joint positions (J), reanchored tracked-body
+        position errors in the actual root heading frame (3*B), and the first
+        two columns of R_actual^T R_reference (6, row-flattened). Body reanchoring
+        shares the robot anchor's XY/yaw while preserving reference height and
+        tilt, just as in the tracking reward. No sensor noise/bias or scaling is
+        applied. The relative rotation is identity, not zero, at perfect tracking.
+
+        This is a critic-only feature head; differentiability through state/FK
+        is required by the policy's value bootstrap at the imagined final state.
+        """
+        from supermimic.kinematics.rotations import quat_inv, quat_mul, rot6d_from_quat, yaw_quat
+
+        if ref.joint_pos is None:
+            raise ValueError("Critic tracking errors require reference joint positions")
+        b = bodies if bodies is not None else self.robot_bodies(s)
+        if b["pos"].shape != ref.body_pos_w.shape:
+            raise ValueError("Critic reference and robot tracked bodies must have matching shapes")
+        ai = self.anchor_index
+        reference_pos, _ = reanchor_reference(
+            ref.body_pos_w, ref.body_quat_w,
+            ref.body_pos_w[..., ai, :], ref.body_quat_w[..., ai, :],
+            b["pos"][..., ai, :], b["quat"][..., ai, :],
+        )
+        root_quat = s[..., 3:7]
+        heading = yaw_quat(root_quat)[..., None, :].expand(*b["pos"].shape[:-1], 4)
+        body_error = quat_apply_inverse(heading, reference_pos - b["pos"]).flatten(-2)
+        joint_error = ref.joint_pos - s[..., 7:self.fk.nq]
+        root_orientation = rot6d_from_quat(quat_mul(quat_inv(root_quat), ref.root_quat_w))
+        return torch.cat([joint_error, body_error, root_orientation], dim=-1)

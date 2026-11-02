@@ -15,7 +15,7 @@ Differences from mjlab's BeyondMimic re-implementation (``mjlab.tasks.tracking``
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as base_mdp
@@ -44,7 +44,12 @@ from supermimic.observation_layout import (
     resolve_observation_layout,
     resolve_observation_sizes,
 )
-from supermimic.robots.registry import G1_TRACKED_BODIES, RobotName, get_robot_spec
+from supermimic.robots.registry import (
+    G1_TRACKED_BODIES,
+    RobotName,
+    get_robot_spec,
+    resolve_robot_environment,
+)
 
 
 class QuietSimulationCfg(SimulationCfg):
@@ -74,6 +79,9 @@ class SuperMimicEnvCfgArgs:
     obs_noise: bool = True
     reset_noise: bool = True
     domain_randomization: bool = True
+    actuator_delay: bool | None = None
+    actuator_delay_max_ms: float = 20.0
+    reset_root_z_offset: float | None = None
     sampling_mode: str = "return"  # return | uniform | start
     replay_capacity: int = 1000
     record_transitions: bool = True
@@ -92,6 +100,23 @@ class SuperMimicEnvCfgArgs:
 
 def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     robot_spec = get_robot_spec(a.robot)
+    settings = resolve_robot_environment(
+        a.robot, actuator_delay=a.actuator_delay,
+        actuator_delay_max_ms=a.actuator_delay_max_ms,
+        reset_root_z_offset=a.reset_root_z_offset,
+    )
+    for name, value in settings.items():
+        setattr(a, name, value)
+    entity_cfg = robot_spec.entity_cfg()
+    # Match MorphMimic: one held lag per episode and fused actuator group.
+    # Nominal evaluation uses domain_randomization=False and has no delay.
+    lag = round(a.actuator_delay_max_ms / 5) if a.actuator_delay and a.domain_randomization else 0
+    if entity_cfg.articulation is not None and (a.actuator_delay or a.robot == "khan_mini"):
+        entity_cfg.articulation.actuators = tuple(
+            replace(actuator, delay_min_lag=0, delay_max_lag=lag, delay_hold_prob=0.0,
+                    delay_update_period=2**40, delay_per_env_phase=False)
+            for actuator in entity_cfg.articulation.actuators
+        )
     a.observation_layout = resolve_observation_layout(a.robot, a.observation_layout)
     a.future_frames, a.history_length = resolve_observation_sizes(
         a.observation_layout, a.future_frames, a.history_length, a.anchor_obs,
@@ -199,6 +224,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             velocity_range=vel_range if a.reset_noise else {},
             joint_position_range=(-0.1, 0.1) if a.reset_noise else (0.0, 0.0),
             sampling_mode=a.sampling_mode,  # type: ignore[arg-type]
+            reset_root_z_offset=a.reset_root_z_offset,
             compact_library=a.compact_library,
             debug_vis=a.debug_vis,
             **command_kwargs,
@@ -284,7 +310,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot_spec.foot_geom_regex, "com_body_name": robot_spec.com_body})
 
     cfg = ManagerBasedRlEnvCfg(
-        scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=a.num_envs, entities={"robot": robot_spec.entity_cfg()}),
+        scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=a.num_envs, entities={"robot": entity_cfg}),
         observations=observations,
         actions=actions,
         commands=commands,

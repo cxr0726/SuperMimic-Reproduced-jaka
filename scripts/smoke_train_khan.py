@@ -1,6 +1,6 @@
 """Verify Khan training with the repository's full production hyperparameters.
 
-Robot/data selection, Isaac observation layout, world count and execution limit
+Robot/data selection, Khan physics/observations, world count and execution limit
 differ from the original G1 defaults. Optimization settings remain unchanged. Optional activation recomputation
 is disabled by default, matching the original execution. The 320k LR schedule, network
 widths, batch sizes, compilation, warmup, horizon and UTD are preserved.
@@ -99,7 +99,7 @@ def verify_production_config(cfg: TrainConfig) -> dict:
     assert trainer == original_trainer, "policy optimization parameters changed"
     policy = asdict(cfg.policy)
     original = asdict(formal.policy)
-    for key in ("num_joints", "goal_dim", "observation_layout", "history", "future_frames",
+    for key in ("num_joints", "num_tracked_bodies", "goal_dim", "observation_layout", "history", "future_frames",
                 "obs_term_scale", "goal_term_scale"):
         policy.pop(key)
         original.pop(key)
@@ -113,7 +113,8 @@ def verify_production_config(cfg: TrainConfig) -> dict:
     reference_env = asdict(formal.env)
     env.pop("num_envs")
     reference_env.pop("num_envs")
-    for key in ("anchor_obs", "observation_layout", "future_frames"):
+    for key in ("anchor_obs", "observation_layout", "future_frames", "actuator_delay",
+                "actuator_delay_max_ms", "reset_root_z_offset"):
         env.pop(key)
         reference_env.pop(key)
     assert env == reference_env, "observation/reward/randomization settings changed"

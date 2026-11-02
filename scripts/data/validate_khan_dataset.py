@@ -1,4 +1,4 @@
-"""Independently validate the 50 Hz JAKA LAFAN pack against converted Khan NPZs.
+"""Independently validate 25/27-DOF JAKA packs against 50 Hz Khan NPZs.
 
 Reads trusted local joblib input and pickle-free NPZ output. Uses NumPy/SciPy
 derivatives and MuJoCo mj_forward/mj_objectVelocity, never the converter.
@@ -14,7 +14,7 @@ from pathlib import Path
 import joblib
 import mujoco
 import numpy as np
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Rotation, Slerp
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_INPUT = ROOT / (
@@ -49,6 +49,66 @@ def max_error(actual, expected, label: str, tolerance: float) -> float:
     return error
 
 
+def independent_reference(source: dict, names: list[str], home: np.ndarray) -> dict:
+    """Reconstruct the output grid with NumPy interpolation and SciPy rotations.
+
+    Close quaternion pairs use normalized linear interpolation, matching the
+    converter's documented small-angle approximation, without calling it.
+    """
+    position = np.asarray(source["root_pos"], dtype=np.float64)
+    quaternion = np.array(source["root_rot"], dtype=np.float64, copy=True)
+    dof = np.asarray(source["dof_pos"], dtype=np.float64)
+    count = len(position)
+    fps_value = np.asarray(source["fps"])
+    if fps_value.size != 1:
+        raise ValueError("Source fps must be scalar")
+    fps = float(fps_value.reshape(-1)[0])
+    if not np.isfinite(fps) or fps <= 0 or count < 3:
+        raise ValueError("Source must have positive fps and at least three frames")
+    if position.shape != (count, 3) or quaternion.shape != (count, 4):
+        raise ValueError("Invalid source root shapes")
+    if dof.ndim != 2 or len(dof) != count or dof.shape[1] not in (25, 27):
+        raise ValueError("Source dof_pos must have 25 or 27 columns")
+    if not all(np.isfinite(a).all() for a in (position, quaternion, dof)):
+        raise ValueError("Nonfinite source arrays")
+    source_names = source.get("joint_names")
+    if source_names is None:
+        source_names = [n for n in names if dof.shape[1] == 27 or n not in WRISTS]
+    source_names = [str(n) for n in source_names]
+    missing = [n for n in names if n not in source_names]
+    if (len(source_names) != dof.shape[1] or len(set(source_names)) != len(source_names)
+            or set(source_names)-set(names) or not set(missing).issubset(WRISTS)):
+        raise ValueError("Invalid source joint names")
+    source_joints = np.broadcast_to(home, (count, 27)).copy()
+    source_joints[:, [names.index(n) for n in source_names]] = dof
+    norms = np.linalg.norm(quaternion, axis=1, keepdims=True)
+    if (norms < 1e-8).any():
+        raise ValueError("Zero source quaternion")
+    quaternion /= norms
+    source_time = np.arange(count, dtype=np.float64) / fps
+    output_count = int(np.floor(source_time[-1]*50 + 1e-6)) + 1
+    time = np.arange(output_count, dtype=np.float64) / 50
+    root_pos = np.column_stack([np.interp(time, source_time, a) for a in position.T])
+    joints = np.column_stack([np.interp(time, source_time, a) for a in source_joints.T])
+    # A grid point within the converter's 1e-6-frame endpoint tolerance is its
+    # endpoint, rather than an extrapolation beyond the source's support.
+    evaluation_time = np.minimum(time, source_time[-1])
+    interpolated = Slerp(source_time, rotations(quaternion))(evaluation_time)
+    root_quat = interpolated.as_quat()[:, [3, 0, 1, 2]]
+    left = np.clip(np.searchsorted(source_time, evaluation_time, side="right")-1, 0, count-2)
+    fraction = ((evaluation_time-source_time[left])/(source_time[left+1]-source_time[left]))[:, None]
+    a, b = quaternion[left], quaternion[left+1]
+    dot = np.sum(a*b, axis=1, keepdims=True)
+    b = np.where(dot < 0, -b, b)
+    close = np.abs(dot[:, 0]) > .9995
+    linear_quat = (1-fraction)*a + fraction*b
+    linear_quat /= np.linalg.norm(linear_quat, axis=1, keepdims=True)
+    root_quat[close] = linear_quat[close]
+    return {"input_fps": fps, "input_frames": count, "source_names": source_names,
+            "filled_names": missing, "root_pos": root_pos, "root_quat": root_quat,
+            "joint_pos": joints}
+
+
 def validate_dataset(input_path: Path, npz_dir: Path, asset_dir: Path, samples: int = 8) -> dict:
     pack = joblib.load(input_path)
     if not isinstance(pack, dict) or not pack:
@@ -59,8 +119,6 @@ def validate_dataset(input_path: Path, npz_dir: Path, asset_dir: Path, samples: 
     bodies = [model.body(i).name for i in range(1, model.nbody)]
     assert (model.nq, model.nv, len(bodies)) == (34, 33, 45)
     assert names == profile["joint_names"]
-    source_names = [name for name in names if name not in WRISTS]
-    source_ids = [names.index(name) for name in source_names]
     home = np.array([profile["default_joint_pos"][name] for name in names])
     velocity_limits = np.array([profile["velocity_limit"][name] for name in names])
     if {path.stem for path in npz_dir.glob("*.npz")} != set(pack):
@@ -79,15 +137,9 @@ def validate_dataset(input_path: Path, npz_dir: Path, asset_dir: Path, samples: 
     data = mujoco.MjData(model)
     for clip, source in pack.items():
         path = npz_dir / f"{clip}.npz"
-        n = len(source["root_pos"])
-        assert n >= 3 and float(source["fps"]) == 50.0, clip
-        assert source["dof_pos"].shape == (n, 25), clip
-        root_pos = np.asarray(source["root_pos"], dtype=np.float64)
-        root_quat = np.asarray(source["root_rot"], dtype=np.float64)
-        assert root_pos.shape == (n, 3) and root_quat.shape == (n, 4), clip
-        assert all(np.isfinite(source[k]).all() for k in ("root_pos", "root_rot", "dof_pos"))
-        joints = np.broadcast_to(home, (n, 27)).copy()
-        joints[:, source_ids] = source["dof_pos"]
+        source_ref = independent_reference(source, names, home)
+        root_pos, root_quat, joints = (source_ref[k] for k in ("root_pos", "root_quat", "joint_pos"))
+        n = len(root_pos)
         linear = np.gradient(root_pos, 0.02, axis=0)
         joint_velocity = np.gradient(joints, 0.02, axis=0)
         rotation = rotations(root_quat)
@@ -104,20 +156,22 @@ def validate_dataset(input_path: Path, npz_dir: Path, asset_dir: Path, samples: 
             for key, value in motion.items():
                 if value.dtype.kind in "fiu":
                     assert np.isfinite(value).all(), (clip, key)
-            for key in ("fps", "input_fps"):
-                assert motion[key].shape == (1,) and float(motion[key][0]) == 50.0
+            for key, expected_fps in (("fps", 50.0), ("input_fps", source_ref["input_fps"])):
+                assert motion[key].shape == (1,) and np.isclose(float(motion[key][0]), expected_fps)
                 assert motion[key].dtype == np.float32, (clip, key)
             assert motion["joint_names"].tolist() == names, clip
             assert motion["body_names"].tolist() == bodies, clip
-            assert motion["source_joint_names"].tolist() == source_names, clip
+            assert motion["source_joint_names"].tolist() == source_ref["source_names"], clip
             assert str(motion["source_clip"]) == clip
             assert str(motion["robot"]) == "khan_mini"
             assert str(motion["source_quat_order"]) == "wxyz"
             assert Path(str(motion["source"])).resolve() == input_path.resolve()
-            assert motion["filled_joint_names"].tolist() == list(WRISTS)
-            assert motion["filled_joint_values"].shape == (2,)
+            assert motion["filled_joint_names"].tolist() == source_ref["filled_names"]
+            assert motion["filled_joint_values"].shape == (len(source_ref["filled_names"]),)
             assert motion["filled_joint_values"].dtype == np.float32
-            max_error(motion["filled_joint_values"], [0.3, 0.3], clip + "/wrist-fill", 1e-7)
+            if source_ref["filled_names"]:
+                max_error(motion["filled_joint_values"], home[[names.index(n) for n in source_ref["filled_names"]]],
+                          clip + "/wrist-fill", 1e-7)
             errors["joint_pos_rad"] = max_error(motion["joint_pos"], joints, clip + "/joints", 1e-6)
             root_id = bodies.index("base_link")
             errors["root_pos_m"] = max_error(
@@ -167,6 +221,8 @@ def validate_dataset(input_path: Path, npz_dir: Path, asset_dir: Path, samples: 
         speed_count = int((np.abs(joint_velocity) > velocity_limits).sum())
         report["clips"].append({
             "name": clip, "frames": n, "duration_s": (n - 1) / 50,
+            "input_frames": source_ref["input_frames"], "input_fps": source_ref["input_fps"],
+            "source_dofs": len(source_ref["source_names"]), "filled_joints": source_ref["filled_names"],
             "output_sha256": sha256(path), "max_errors": errors,
             "fk_sample_frames": frames.tolist(), "position_limit_samples_gt_1e_6": position_count,
             "max_position_limit_excess_rad": float(violation.max()),

@@ -4,6 +4,10 @@
 
 导出时沿用训练 checkpoint 中的网络参数与固定 scale，不引入运行均值/方差归一化。世界模型、critic、优化器、replay、MuJoCo 模型和参考动作库均不进入推理图。动作可以在部署端按需加载，不必为每条动作重新导出网络。
 
+当前源码要求Khan **version-5** contract。actor仍为goal155＋prop465，因脚碰撞、延迟/reset和critic契约变化，
+已有version-4 `Khan_lafan1_clean_goal/ckpt_0100000.pt` 不能在当前源码下导出；须使用其匹配的历史checkout，或先训练新的v5策略。
+下列命令指向未来生成的新v5 checkpoint，不表示该策略已经训练完成。已有旧ONNX文件不受源码改动影响，其物理训练语义仍是历史版本。
+
 ## 导出命令
 
 在本仓库根目录、具备 ONNX 导出及 ONNX Runtime 依赖的训练环境中运行：
@@ -12,8 +16,8 @@
 uv sync --extra export
 
 env -u PYTHONPATH .venv/bin/python scripts/export_onnx.py \
-  --ckpt logs/Khan_lafan1_clean_goal/ckpt_0100000.pt \
-  --out exports/khan_mini/ckpt_0100000.onnx
+  --ckpt logs/khan_lafan1_delay_convex/ckpt_latest.pt \
+  --out exports/khan_mini/ckpt_latest.onnx
 ```
 
 默认采用与已有 `latest_m62k_pico_base.onnx` 相同的单观测输入、单动作输出形式：
@@ -29,8 +33,8 @@ env -u PYTHONPATH .venv/bin/python scripts/export_onnx.py \
 
 ```bash
 env -u PYTHONPATH .venv/bin/python scripts/export_onnx.py \
-  --ckpt logs/Khan_lafan1_clean_goal/ckpt_0100000.pt \
-  --out exports/khan_mini/ckpt_0100000.onnx \
+  --ckpt logs/khan_lafan1_delay_convex/ckpt_latest.pt \
+  --out exports/khan_mini/ckpt_latest.onnx \
   --motion data/npz/khan_mini/lafan1/dance2_subject1.npz \
   --validation-samples 64 --overwrite
 ```
@@ -41,8 +45,8 @@ env -u PYTHONPATH .venv/bin/python scripts/export_onnx.py \
 
 ```bash
 env -u PYTHONPATH .venv/bin/python scripts/export_onnx.py \
-  --ckpt logs/Khan_lafan1_clean_goal/ckpt_0100000.pt \
-  --out exports/khan_mini/ckpt_0100000_split.onnx \
+  --ckpt logs/khan_lafan1_delay_convex/ckpt_latest.pt \
+  --out exports/khan_mini/ckpt_latest_split.onnx \
   --input-layout split
 ```
 
@@ -152,7 +156,7 @@ import numpy as np
 import onnxruntime as ort
 
 session = ort.InferenceSession(
-    "exports/khan_mini/ckpt_0100000.onnx",
+    "exports/khan_mini/ckpt_latest.onnx",
     providers=["CPUExecutionProvider"],
 )
 obs = np.concatenate([goal, policy_obs], axis=-1).astype(np.float32)
@@ -179,7 +183,7 @@ actions = session.run(
 
 导出器检查 checkpoint 机器人/观测契约，保留训练网络固定 scale，并使用 ONNX checker 与 ONNX Runtime 比较 PyTorch/ONNX 输出。数值一致性覆盖随机观测及参考动作构造的输入；这验证的是图导出与输入接口，不替代实际部署控制器的闭环 sim2sim 或真机验证。
 
-本次已对 `logs/Khan_lafan1_clean_goal/ckpt_0100000.pt` 导出并验证两个接口：
+以下为历史version-4配置对 `logs/Khan_lafan1_clean_goal/ckpt_0100000.pt` 的导出与验证记录，不代表当前v5新配置已训练或完成导出：
 
 | 文件 | 图大小 | 接口 |
 |---|---:|---|

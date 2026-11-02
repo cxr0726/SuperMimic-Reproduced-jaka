@@ -15,14 +15,17 @@
 - goal为5帧参考位移/高度/关节角，共155维，真实环境与想象训练均不加噪声；
   prop为未来姿态30＋5帧传感器历史435，共465维，保留本体和未来朝向噪声。
 
-decoder输入为497、critic输入为467；state67、action27、context31保持不变。
+decoder输入为497、critic输入为545；state67、action27、context31保持不变。
+critic在原467维后新增78维当前误差：q_ref−q27、重锚body位置误差45（实际root heading系）、完整root相对旋转rot6d6；scale均为1。
+Khan新增0–20 ms每回合固定的执行器延迟；nominal eval关闭延迟。ξ31及WM125不变，WM/想象不加显式队列，使用隐式拟合近似。
+脚部改成每脚1个完整CAD凸包，质量/惯量不变；运动跟踪所有reset对实际机器人root加0.05 m，包含eval，参考/NPZ/goal不变。
 actor本体角速度/关节速度有效scale为0.5/0.2，恢复原SuperMimic值；prop噪声保留此前范围，参考goal保持干净。
 critic除原canonical state/context/root error外，接收干净command155、未来朝向30和5帧参考速度/重力180。
 新增180维按帧排列，每帧为qd27、重力3、root系角速度3、heading系线速度3，网络入口乘数为0.2/1/0.5/1。
-原末尾9维anchor goal由prop前部5帧未来姿态替代。**此前649/870、287维critic或version-3带goal噪声的检查点均不兼容，必须新run。**
+原末尾9维anchor goal由prop前部5帧未来姿态替代。**包括version-4 clean-goal/100k在内的旧Khan检查点均不兼容，当前v5必须新run；旧策略需匹配的历史源码/资产做eval或export。**
 观测公式、噪声及与Isaac PPO的差异见 [KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。
 完整奖励公式及对齐范围见 [KHAN_TRAINING.md](KHAN_TRAINING.md)。
-世界模型动力学输入为canonical state67＋实际执行动作27＋标准化context31，共125维；
+世界模型动力学输入为canonical state67＋延迟队列前的带执行噪声命令27＋标准化context31，共125维；
 状态输入除数为1/1/1/2/1/5，动作在MLP入口不再乘0.5，详见该训练文档的世界模型输入段。
 
 ## 35/250与参考仓库的来源
@@ -60,7 +63,7 @@ critic除原canonical state/context/root error外，接收干净command155、未
 
 ## 需要同步到服务器的文件
 
-部署前同步包含 `isaac_khan` 布局、SuperMimic actor尺度、467维critic及Khan version-4 contract的源码和当前机器人资产。
+部署前同步包含 `isaac_khan` 布局、SuperMimic actor尺度、545维critic及Khan version-5 contract的源码和当前机器人资产。
 若使用Git，确认服务器已检出包含这些改动的版本；先前14-body或15-body的649/870观测版本不能代表当前训练配置。
 也可同步工作区或重新生成部署包。
 必须包含 `src/`、`scripts/`、`assets/robots/khan_mini/`、`pyproject.toml`、`uv.lock`、
@@ -80,7 +83,7 @@ bash scripts/setup/setup_server_env.sh --project-dir "$PWD"
 
 # 只检查路径、打印完整命令，不启动CUDA/训练，不创建训练日志
 bash scripts/training/train_khan_server.sh \
-  --num-envs 1024 --run-name khan_lafan1_clean_goal_1024 --dry-run
+  --num-envs 1024 --run-name khan_lafan1_delay_convex_1024 --dry-run
 ```
 
 安装细节见 [SERVER_SETUP.md](SERVER_SETUP.md)。脚本从自身路径定位项目，换项目目录无需改源码。
@@ -95,16 +98,16 @@ bash scripts/training/train_khan_server.sh \
 
 ```bash
 bash scripts/training/train_khan_server.sh \
-  --num-envs 1024 --run-name khan_lafan1_clean_goal_1024 --stop-after-iterations 50
+  --num-envs 1024 --run-name khan_lafan1_delay_convex_1024 --stop-after-iterations 50
 ```
 
 成功后日志应显示 `it 50 ... updates 4`，并保存
-`logs/khan_lafan1_clean_goal_1024/ckpt_latest.pt`。然后从该检查点继续到正式320000步：
+`logs/khan_lafan1_delay_convex_1024/ckpt_latest.pt`。然后从该检查点继续到正式320000步：
 
 ```bash
 bash scripts/training/train_khan_server.sh \
-  --num-envs 1024 --run-name khan_lafan1_clean_goal_1024 \
-  --resume logs/khan_lafan1_clean_goal_1024/ckpt_latest.pt
+  --num-envs 1024 --run-name khan_lafan1_delay_convex_1024 \
+  --resume logs/khan_lafan1_delay_convex_1024/ckpt_latest.pt
 ```
 
 恢复时重新预热40步填充新进程replay，沿用已有模型/Adam状态/全局迭代和采样器统计。
@@ -112,14 +115,14 @@ bash scripts/training/train_khan_server.sh \
 也可直接从头完整运行：
 
 ```bash
-bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_clean_goal_full
+bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_delay_convex_full
 ```
 
 这是前台命令，不会替用户自动启动后台任务。控制台可直接查看，TensorBoard位于
 `logs/<run-name>/tb`，解析后的完整配置位于 `logs/<run-name>/config.json`。
 已有检查点时脚本要求明确 `--resume` 或新run-name，避免静默覆盖。
 当前检查点记录 `robot_contract`，加载前检查root/anchor/COM/body、关节、动作缩放、奖励配置、
-模型/profile SHA，以及version-4观测schema和goal/history布局。旧无contract及旧观测contract的Khan
+模型/profile SHA，以及version-5观测/仿真schema和goal/history布局。旧无contract及旧观测contract的Khan
 检查点会被拒绝，包括此前649维goal的40k/100k/200k模型；当前配置必须新run。
 服务器脚本拒绝旧 `--anchor-obs`/`--no-anchor-obs` 开关；新布局固定包含未来anchor姿态，不使用旧9维扩展。
 旧策略通过独立导出的旧源码/资产运行器评估，见
@@ -142,7 +145,7 @@ bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan
 | WM、actor、critic LR | 单GPU均2e-4 |
 | gamma / lambda | 0.99 / 0.95 |
 | 训练长度 / LR衰减 | 320000步 / 250000步余弦衰减到0.03× |
-| obs/reset/域随机化/执行噪声 | prop观测噪声开启、参考goal干净；其余沿用本库 |
+| obs/reset/域随机化/执行噪声 | prop噪声开、goal干净；Khan延迟0–20 ms；实际机器人reset z+0.05 m；执行噪声std0.1 |
 | 观测 / 激活重计算 | isaac_khan，未来/历史5/5 / 关闭 |
 | torch.compile | default |
 
@@ -166,16 +169,16 @@ bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan
 
 上一轮155/465观测、Isaac原scale、287维critic通过165项全量测试，另完成8环境50步训练smoke，
 正式网络、batch2048/4096、H32和UTD0.4均保留；40次WM、4次actor、80次critic优化及恢复检查通过。
-本机12 GB测试显式开启激活重计算，正式服务器入口仍关闭。这不替代当前467维critic/SuperMimic scale验证。命令和结果见
+本机12 GB测试显式开启激活重计算，正式服务器入口仍关闭。这不替代当时467维critic/SuperMimic scale验证，也不代表当前v5验证。命令和结果见
 [KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。
 
 上一版SuperMimic scale、467维critic、goal仍加噪的版本通过 **167项全量测试**，并完成8环境50步正式网络/batch的
 训练smoke，包含40次WM、4次actor、80次critic更新，以及模型/优化器/采样器恢复检查；
 实际观测、参数和TB标量有限。该本机12 GB测试显式开启激活重计算，服务器脚本默认仍关闭。
 结果在 `logs/khan_sm_scale_critic467_smoke/summary.json`，完整说明见上述观测文档的对应历史验证段。
-这不替代当前version-4干净goal版本的验证。
+这不替代当时version-4干净goal版本的验证，更不代表当前v5的新物理配置已验证。
 
-当前version-4干净goal版本另通过 **168项全量测试** 和8环境50步正式参数训练smoke：
+历史version-4干净goal版本另通过 **168项全量测试** 和8环境50步正式参数训练smoke：
 动力学输入125、goal155、prop465、decoder497、critic467和15个跟踪body确认；
 40次WM、4次actor、80次critic更新及模型/优化器/采样器恢复通过，参数与实际TB有限。
 本机测试显式开启激活重计算，正式服务器入口仍关闭；结果在
@@ -183,7 +186,7 @@ bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan
 
 ## 起始 bin 采样器（2026-11-02）
 
-当前 G1 和 Khan 共用新的采样实现；机器人的网络、观测、奖励、域随机化和正式优化参数保持原值。
+本节记录该次起始bin采样器改动：当时G1和Khan共用新采样实现，且该次未改变网络、观测、奖励、域随机化和正式优化参数。当前Khan v5的延迟、脚凸包、reset余量和critic扩展另见本文开头。
 这次修改对齐 `supermimic_vibed`、`instantTrack`、`Uni-SuperMimic` 共有的正常截断平均奖励续值，
 并采用 vibed 的重复 bin 聚合和严格想象起点筛选；不复制 instantTrack/Uni 的重复索引覆盖及
 `no_sync` 固定候选不足时仍可能放入无效起点的做法。
@@ -250,3 +253,13 @@ bash scripts/training/train_khan_server.sh \
 `logs/khan_sampler_v2_smoke/summary.json`。50步时replay不足2048行，尚未触发独立的online NSE8评估，
 因此控制台该字段显示缺省 `nan`；实际训练损失、参数和已写出的TensorBoard标量均有限。
 短测用于验证实现及更新链路，不证明长期训练回报或benchmark已经改善。
+
+## 当前v5配置与验证记录
+
+当前默认run名为 `khan_lafan1_delay_convex`，必须从头训练。网络隐藏层、latent、batch、H、UTD、优化器和学习率计划继续使用原正式值；
+critic仅将输入层从467扩为545。actor155/465、decoder497、ξ31和WM125均不变，G1默认不受本次Khan物理适配影响。
+旧100k/168项测试、上面的采样器234项测试、历史benchmark与旧ONNX验证均属于对应历史版本。
+
+delay pending target在reset时清零为物理关节目标0，没有用参考姿态预填；模型未加入延迟队列或delay参数，采用隐式拟合近似。
+reset z+0.05 m覆盖训练与nominal eval，参考保持原高；这是常态接触余量，无法修复严重约25 cm穿地。
+当前v5实际回归、smoke和恢复结果在完成后单独记录；此处不沿用历史测试总数作为新版本结论。

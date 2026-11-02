@@ -79,7 +79,10 @@ def render_collisions(asset_dir: Path | None, output_dir: Path) -> dict:
     draw.text((24, 16), "Khan_mini: actual collision geometry", fill="#f4f7fa", font=title_font)
     draw.text(
         (26, 66),
-        "27 joints | 26 collision geoms: 18 capsules + 6 meshes + 2 boxes",
+        f"{model.nu} joints | {len(collisions)} collision geoms: "
+        f"{np.count_nonzero(model.geom_type[collisions] == mujoco.mjtGeom.mjGEOM_CAPSULE)} capsules + "
+        f"{np.count_nonzero(model.geom_type[collisions] == mujoco.mjtGeom.mjGEOM_MESH)} meshes + "
+        f"{np.count_nonzero(model.geom_type[collisions] == mujoco.mjtGeom.mjGEOM_BOX)} boxes",
         fill="#d6e0eb", font=note_font,
     )
     draw.text(

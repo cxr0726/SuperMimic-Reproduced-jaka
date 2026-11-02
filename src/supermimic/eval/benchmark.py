@@ -45,6 +45,9 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
     if pc.get("num_joints", robot.num_joints) != robot.num_joints:
         raise ValueError(f"Checkpoint policy joint count differs from robot {robot.name}")
     pc["num_joints"] = robot.num_joints
+    if pc.get("num_tracked_bodies") not in (None, len(robot.tracked_bodies)):
+        raise ValueError(f"Checkpoint tracked-body count differs from robot {robot.name}")
+    pc["num_tracked_bodies"] = len(robot.tracked_bodies)
     # Absence denotes the original observation schema, never the robot's new default.
     layout = resolve_observation_layout(robot.name, cfg["env"].get("observation_layout", "supermimic"))
     future, history = resolve_observation_sizes(
@@ -69,7 +72,7 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
 
 
 @torch.no_grad()
-def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int | None = None, verbose: bool = True, anchor_obs: bool = False, robot: RobotName = "g1", history_length: int | None = None, observation_layout: str | None = None) -> list[ClipResult]:
+def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int | None = None, verbose: bool = True, anchor_obs: bool = False, robot: RobotName = "g1", history_length: int | None = None, observation_layout: str | None = None, reset_root_z_offset: float | None = None) -> list[ClipResult]:
     robot_spec = get_robot_spec(robot)
     if policy.cfg.num_joints != robot_spec.num_joints:
         raise ValueError(f"Policy joint count differs from benchmark robot {robot}")
@@ -95,6 +98,8 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
         obs_noise=False,
         reset_noise=False,
         domain_randomization=False,
+        actuator_delay=False,
+        reset_root_z_offset=reset_root_z_offset,
         sampling_mode="start",
         record_transitions=False,
         seed=0,

@@ -12,6 +12,7 @@ from supermimic.imagination.objective import gae_targets, policy_objective
 from supermimic.imagination.rollout import ImagRollout, imagine
 from supermimic.policy.nets import Critic, Policy
 from supermimic.training.distributed import allreduce_grads
+from supermimic.world_model.heads import ReferenceFrame
 from supermimic.world_model.world_model import WorldModel
 
 
@@ -57,9 +58,30 @@ class PolicyTrainer:
 
     def _critic_inputs(self, ro: ImagRollout):
         H1, n, _ = ro.states.shape
-        feat = self.wm.spec.canonical(ro.states.reshape(H1 * n, -1)).reshape(H1, n, -1)
+        states = ro.states.reshape(H1 * n, -1)
+        feat = self.wm.spec.canonical(states).reshape(H1, n, -1)
         goals = ro.critic_goals if ro.critic_goals is not None else ro.goals
-        return feat, goals, ro.e_root
+        errors = None
+        if ro.critic_reference is not None:
+            reference = ro.critic_reference
+
+            def ref_slice(sl):
+                return ReferenceFrame(
+                    reference.body_pos_w[sl], reference.body_quat_w[sl],
+                    reference.body_lin_vel_w[sl], reference.body_ang_vel_w[sl],
+                    reference.root_pos_w[sl], reference.root_quat_w[sl],
+                    reference.joint_pos[sl] if reference.joint_pos is not None else None,
+                    reference.joint_vel[sl] if reference.joint_vel is not None else None,
+                )
+
+            # Only V(s_H) contributes to actor BPTT. Earlier errors are used
+            # exclusively by the detached critic fit; do not retain H redundant
+            # FK graphs for those states in a full-size training batch.
+            with torch.no_grad():
+                prefix = self.wm.heads.critic_error_features(states[:-n], ref_slice(slice(None, -n)))
+            bootstrap = self.wm.heads.critic_error_features(states[-n:], ref_slice(slice(-n, None)))
+            errors = torch.cat([prefix, bootstrap], dim=0).reshape(H1, n, -1)
+        return feat, goals, ro.e_root, errors
 
     def update(self, buffer: ReplayBuffer, xi_norm_fn=None) -> dict[str, float]:
         cfg = self.cfg
@@ -73,9 +95,10 @@ class PolicyTrainer:
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
         ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs, activation_checkpoint=cfg.activation_checkpoint)
-        feat, goals, e_root = self._critic_inputs(ro)
+        feat, goals, e_root, errors = self._critic_inputs(ro)
         if cfg.use_critic:
-            v_H = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1])
+            v_H = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1],
+                              errors[-1] if errors is not None else None)
         else:
             v_H = None
         J = policy_objective(ro, v_H, cfg.gamma)
@@ -105,14 +128,18 @@ class PolicyTrainer:
         if cfg.use_critic:
             with torch.no_grad():
                 feat_d, goals_d, e_root_d = feat.detach(), goals.detach(), e_root.detach()
+                errors_d = errors.detach() if errors is not None else None
                 H1, n, _ = feat_d.shape
                 xi_rep = xi_norm[None].expand(H1, n, -1)
-                values = self.critic(feat_d.reshape(H1 * n, -1), goals_d.reshape(H1 * n, -1), xi_rep.reshape(H1 * n, -1), e_root_d.reshape(H1 * n, -1)).reshape(H1, n)
+                values = self.critic(feat_d.reshape(H1 * n, -1), goals_d.reshape(H1 * n, -1),
+                                     xi_rep.reshape(H1 * n, -1), e_root_d.reshape(H1 * n, -1),
+                                     errors_d.reshape(H1 * n, -1) if errors_d is not None else None).reshape(H1, n)
                 targets = gae_targets(ro.rewards.detach(), ro.dhat[1:].detach(), values, cfg.gamma, cfg.gae_lambda)  # (H, n)
                 X_feat = feat_d[:-1].reshape(-1, feat_d.shape[-1])
                 X_goal = goals_d[:-1].reshape(-1, goals_d.shape[-1])
                 X_xi = xi_rep[:-1].reshape(-1, xi_rep.shape[-1])
                 X_er = e_root_d[:-1].reshape(-1, 4)
+                X_errors = errors_d[:-1].reshape(-1, errors_d.shape[-1]) if errors_d is not None else None
                 Y = targets.reshape(-1)
             N = Y.shape[0]
             mb = N // cfg.critic_minibatches
@@ -121,7 +148,8 @@ class PolicyTrainer:
                 perm = torch.randperm(N, device=Y.device)
                 for i in range(cfg.critic_minibatches):
                     idx = perm[i * mb : (i + 1) * mb]
-                    pred = self.critic(X_feat[idx], X_goal[idx], X_xi[idx], X_er[idx])
+                    pred = self.critic(X_feat[idx], X_goal[idx], X_xi[idx], X_er[idx],
+                                       X_errors[idx] if X_errors is not None else None)
                     closs = torch.nn.functional.mse_loss(pred, Y[idx])
                     self.critic_opt.zero_grad(set_to_none=True)
                     closs.backward()

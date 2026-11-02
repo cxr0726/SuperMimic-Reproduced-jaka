@@ -42,6 +42,8 @@ def test_khan_config_uses_isaac_observation_and_extends_neck_tracking_reward():
     assert khan.commands["motion"].body_names == spec.tracked_bodies
     assert khan.commands["motion"].root_body_name == spec.root_body
     assert khan.commands["motion"].anchor_body_name == spec.anchor_body
+    assert khan.commands["motion"].reset_root_z_offset == 0.05
+    assert g1.commands["motion"].reset_root_z_offset == 0.0
     assert khan.viewer.body_name == spec.anchor_body
     assert khan.recorders["replay"].params["com_body_name"] == spec.com_body
     assert set(khan.actions["joint_pos"].scale.values()) == {0.5}
@@ -83,6 +85,10 @@ def test_khan_config_uses_isaac_observation_and_extends_neck_tracking_reward():
     assert khan.commands["motion"].pose_range == g1.commands["motion"].pose_range
     assert khan.commands["motion"].velocity_range == g1.commands["motion"].velocity_range
     assert khan.commands["motion"].joint_position_range == (-0.1, 0.1)
+    for actuator in khan.scene.entities["robot"].articulation.actuators:
+        assert actuator.delay_min_lag == 0 and actuator.delay_max_lag == 4
+        assert actuator.delay_update_period == 2**40
+        assert actuator.delay_hold_prob == 0.0 and not actuator.delay_per_env_phase
 
 
 @pytest.fixture(scope="module")
@@ -220,16 +226,17 @@ def test_khan_domain_randomization_and_reset_noise(setup_khan):
         anchor_id = robot.indexing.body_ids[robot.body_names.index(spec.anchor_body)]
         assert int(expected_com_id) != int(anchor_id)
         local_ids, _ = robot.find_geoms(spec.foot_geom_regex)
-        assert len(local_ids) == 14
+        assert len(local_ids) == 2
         geom_ids = robot.indexing.geom_ids[local_ids]
         actual_friction = env.sim.model.geom_friction[:, geom_ids, 0]
-        torch.testing.assert_close(actual_friction, before[:, :1].expand(-1, 14), rtol=0, atol=1e-6)
+        torch.testing.assert_close(actual_friction, before[:, :1].expand(-1, 2), rtol=0, atol=1e-6)
 
-        # Reset writes the sampled/forced frame, then the existing G1 command
-        # semantics advance the target by one. Compare noise to the written frame.
+        # Reset writes the sampled/forced frame without advancing its target.
+        # Remove the deterministic actual-root clearance before checking noise.
         source = cmd.library.ref(frame)
         state = io.read()
         delta_pos = state[:, :3] - source.root_pos_w
+        delta_pos[:, 2] -= cmd.cfg.reset_root_z_offset
         assert (delta_pos.abs() <= torch.tensor([0.05, 0.05, 0.01], device=env.device) + 1e-6).all()
         delta_rot = quat_mul(state[:, 3:7], quat_inv(source.root_quat_w))
         rpy = torch.stack(euler_xyz_from_quat(delta_rot), -1)

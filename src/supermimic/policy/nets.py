@@ -32,6 +32,7 @@ class PolicyCfg:
     decoder_last_gain: float = 0.01
     goal_dim: int = GOAL_DIM  # G1:680 (+9 anchor); Khan Isaac:155
     num_joints: int = ACT_DIM
+    num_tracked_bodies: int | None = None  # Training resolves this from RobotSpec.
 
 
 @dataclass
@@ -45,6 +46,16 @@ def critic_goal_dimension(cfg: PolicyCfg) -> int:
         # Per reference frame: orientation6 + qd(J) + gravity3 + ang_b3 + lin_h3.
         return cfg.goal_dim + cfg.future_frames * (6 + cfg.num_joints + 9)
     return cfg.goal_dim
+
+
+def critic_error_dimension(cfg: PolicyCfg) -> int:
+    """Khan's current ref-minus-robot joint/body errors and relative root rotation."""
+    if cfg.observation_layout == "isaac_khan":
+        num_bodies = 15 if cfg.num_tracked_bodies is None else cfg.num_tracked_bodies
+        if num_bodies < 1:
+            raise ValueError("Khan critic needs at least one tracked body")
+        return cfg.num_joints + 3 * num_bodies + 6
+    return 0
 
 
 def _obs_scale_vector(cfg: PolicyCfg) -> torch.Tensor:
@@ -129,7 +140,7 @@ class Policy(nn.Module):
 
 
 class Critic(nn.Module):
-    """V(state, privileged reference, xi, root error); G1 input788, Khan input467."""
+    """V(state, reference, xi, root drift, tracking errors); G1 input788, Khan input545."""
 
     def __init__(self, cfg: CriticCfg, feat_dim: int | None = None, goal_dim: int | None = None, xi_dim: int | None = None, pcfg: PolicyCfg | None = None):
         super().__init__()
@@ -137,8 +148,17 @@ class Critic(nn.Module):
         feat_dim = 13 + 2 * pcfg.num_joints if feat_dim is None else feat_dim
         xi_dim = pcfg.num_joints + 4 if xi_dim is None else xi_dim
         goal_dim = critic_goal_dimension(pcfg) if goal_dim is None else goal_dim
-        self.mlp = MLP(feat_dim + goal_dim + xi_dim + 4, cfg.hidden, 1)
+        self.error_dim = critic_error_dimension(pcfg)
+        self.mlp = MLP(feat_dim + goal_dim + xi_dim + 4 + self.error_dim, cfg.hidden, 1)
         self.register_buffer("goal_scale", _critic_goal_scale_vector(pcfg, goal_dim))
 
-    def forward(self, feat: torch.Tensor, goal: torch.Tensor, xi_norm: torch.Tensor, e_root: torch.Tensor) -> torch.Tensor:
-        return self.mlp(torch.cat([feat, goal * self.goal_scale, xi_norm, e_root], dim=-1)).squeeze(-1)
+    def forward(self, feat: torch.Tensor, goal: torch.Tensor, xi_norm: torch.Tensor,
+                e_root: torch.Tensor, tracking_errors: torch.Tensor | None = None) -> torch.Tensor:
+        parts = [feat, goal * self.goal_scale, xi_norm, e_root]
+        if self.error_dim:
+            if tracking_errors is None or tracking_errors.shape[-1] != self.error_dim:
+                raise ValueError(f"Khan critic requires {self.error_dim} current tracking error values")
+            parts.append(tracking_errors)
+        elif tracking_errors is not None:
+            raise ValueError("SuperMimic critic does not use extra tracking errors")
+        return self.mlp(torch.cat(parts, dim=-1)).squeeze(-1)

@@ -6,6 +6,7 @@ neck rewards depend on the robot; observation_layout resolves the input schema.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -34,6 +35,8 @@ class RobotSpec:
     neck_joint_names: tuple[str, ...] = ()
     nconmax: int = 35
     njmax: int = 250
+    default_actuator_delay: bool = False
+    default_reset_root_z_offset: float = 0.0
 
     @property
     def num_joints(self) -> int:
@@ -103,5 +106,24 @@ def get_robot_spec(name: RobotName = "g1") -> RobotSpec:
             # Conservative allocation headroom, not a measured minimum.
             # Retain the original solver and timestep.
             nconmax=128, njmax=512,
+            default_actuator_delay=True,
+            default_reset_root_z_offset=0.05,
         )
     raise ValueError(f"Unknown robot {name!r}; expected g1 or khan_mini")
+
+
+def resolve_robot_environment(
+    robot: RobotName, *, actuator_delay: bool | None = None,
+    actuator_delay_max_ms: float = 20.0, reset_root_z_offset: float | None = None,
+) -> dict:
+    """Resolve saved simulation settings without changing G1's original defaults."""
+    spec = get_robot_spec(robot)
+    delay = spec.default_actuator_delay if actuator_delay is None else actuator_delay
+    offset = spec.default_reset_root_z_offset if reset_root_z_offset is None else reset_root_z_offset
+    if (not math.isfinite(actuator_delay_max_ms) or actuator_delay_max_ms < 0
+            or not math.isclose(actuator_delay_max_ms / 5, round(actuator_delay_max_ms / 5))):
+        raise ValueError("Actuator delay must be a nonnegative multiple of the 5 ms physics step")
+    if not math.isfinite(offset) or offset < 0:
+        raise ValueError("reset_root_z_offset must be finite and nonnegative")
+    return {"actuator_delay": bool(delay), "actuator_delay_max_ms": float(actuator_delay_max_ms),
+            "reset_root_z_offset": float(offset)}

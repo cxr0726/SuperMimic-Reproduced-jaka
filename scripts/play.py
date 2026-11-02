@@ -63,6 +63,8 @@ def main(
         obs_noise=False,
         reset_noise=False,
         domain_randomization=False,
+        actuator_delay=False,
+        reset_root_z_offset=cfg["env"].get("reset_root_z_offset"),
         sampling_mode=sampling,
         record_transitions=False,
         seed=0,

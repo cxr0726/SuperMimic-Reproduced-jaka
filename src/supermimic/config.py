@@ -35,6 +35,9 @@ class EnvCfg:
     obs_noise: bool = True
     reset_noise: bool = True
     domain_randomization: bool = True
+    actuator_delay: bool | None = None  # Khan on, G1 off; nominal evaluation disables it
+    actuator_delay_max_ms: float = 20.0
+    reset_root_z_offset: float | None = None  # Actual robot only: Khan .05 m, G1 zero
     sampling_mode: str = "return"
     replay_capacity: int = 1000
     future_frames: int | None = None  # robot/layout default: G1=10, Khan Isaac=5
@@ -82,9 +85,16 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
     is rejected rather than silently replaced. Network hidden layers and all
     optimization settings remain independent of the observation layout.
     """
-    from supermimic.robots.registry import get_robot_spec
+    from supermimic.robots.registry import get_robot_spec, resolve_robot_environment
 
     robot = get_robot_spec(cfg.robot)
+    settings = resolve_robot_environment(
+        cfg.robot, actuator_delay=cfg.env.actuator_delay,
+        actuator_delay_max_ms=cfg.env.actuator_delay_max_ms,
+        reset_root_z_offset=cfg.env.reset_root_z_offset,
+    )
+    for name, value in settings.items():
+        setattr(cfg.env, name, value)
     layout = resolve_observation_layout(cfg.robot, cfg.env.observation_layout)
     future, history = resolve_observation_sizes(
         layout, cfg.env.future_frames, cfg.policy.history, cfg.env.anchor_obs,
@@ -95,6 +105,7 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
     cfg.policy.future_frames = future
     cfg.policy.history = history
     cfg.policy.num_joints = robot.num_joints
+    cfg.policy.num_tracked_bodies = len(robot.tracked_bodies)
     cfg.policy.goal_dim = goal_dimension(layout, robot.num_joints, future, cfg.env.anchor_obs)
     if layout == "isaac_khan":
         # The environment and analytic observations already apply Isaac's scales.

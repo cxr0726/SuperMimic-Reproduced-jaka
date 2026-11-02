@@ -287,6 +287,10 @@ class MultiClipMotionCommand(CommandTerm):
         return f
 
     def _write_reference_state_to_sim(self, env_ids, root_pos, root_ori, root_lin_vel, root_ang_vel, joint_pos, joint_vel):
+        # Spawn clearance changes the actual initial state, never the library,
+        # reference reward/goal height, or subsequent commanded trajectory.
+        root_pos = root_pos.clone()
+        root_pos[:, 2] += self.cfg.reset_root_z_offset
         soft_limits = self.robot.data.soft_joint_pos_limits[env_ids]
         joint_pos = torch.clip(joint_pos, soft_limits[:, :, 0], soft_limits[:, :, 1])
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
@@ -373,7 +377,7 @@ class MultiClipMotionCommand(CommandTerm):
         self.update_relative_body_poses()
 
     def reset_to_frame(self, env_ids: torch.Tensor, frame: torch.Tensor) -> None:
-        """Deterministic reset to exact reference frames (no noise); used by evaluation."""
+        """Deterministic reference-frame reset plus configured actual-root clearance."""
         self.ep_len[env_ids] = 0
         self.ep_reward_sum[env_ids] = 0
         self.ep_discounted_return[env_ids] = 0
@@ -433,6 +437,7 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     pose_range: dict[str, tuple[float, float]] = field(default_factory=dict)
     velocity_range: dict[str, tuple[float, float]] = field(default_factory=dict)
     joint_position_range: tuple[float, float] = (0.0, 0.0)
+    reset_root_z_offset: float = 0.0
     sampling_mode: Literal["return", "uniform", "start"] = "return"
     # Return-based sampling: start-bin targets, mean-reward continuation at cutoffs.
     uniform_ratio: float = 0.5

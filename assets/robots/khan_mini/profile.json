@@ -108,7 +108,7 @@
     "Left_ankle_roll_Link",
     "Right_ankle_roll_Link"
   ],
-  "foot_geom_regex": "^(Left|Right)_ankle_roll_Link_\\d+_collision$",
+  "foot_geom_regex": "^(Left|Right)_ankle_roll_Link_convex_collision$",
   "initial_pos": [
     0.0,
     0.0,
@@ -507,6 +507,25 @@
       "value": 1.0,
       "source": "user-requested alignment with mjlab G1 non-foot contacts"
     },
+    "foot_collision": {
+      "shape": "whole-foot CAD mesh convex hull, including instep",
+      "source": "existing URDF visual STL; identical to SDK whole-foot collision mesh",
+      "feet": {
+        "Left_ankle_roll_Link": {
+          "geom": "Left_ankle_roll_Link_convex_collision",
+          "mesh": "Left_ankle_roll_Link",
+          "source_collision_count": 7,
+          "effective_collision_count": 1
+        },
+        "Right_ankle_roll_Link": {
+          "geom": "Right_ankle_roll_Link_convex_collision",
+          "mesh": "Right_ankle_roll_Link",
+          "source_collision_count": 7,
+          "effective_collision_count": 1
+        }
+      },
+      "inertials": "preserved from URDF; collision geom density is zero"
+    },
     "waist_collision_box": {
       "geom": "waist_yaw_Link_45_collision",
       "source_half_size_m": [
@@ -554,7 +573,7 @@
     "nq": 34,
     "nv": 33,
     "nbody": 46,
-    "ngeom": 71,
+    "ngeom": 59,
     "nmesh": 44,
     "mass_kg": 40.8325349886391,
     "initial_self_contacts": 0

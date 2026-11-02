@@ -7,10 +7,10 @@ from dataclasses import asdict
 
 from supermimic.envs.mdp.rewards import TrackingRewardCfg
 from supermimic.observation_layout import resolve_observation_layout
-from supermimic.robots.registry import RobotName, get_robot_spec
+from supermimic.robots.registry import RobotName, get_robot_spec, resolve_robot_environment
 
 
-def robot_contract(robot: RobotName, observation_layout: str = "auto") -> dict:
+def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_config: dict | None = None) -> dict:
     spec = get_robot_spec(robot)
     contract = {
         "version": 1,
@@ -30,12 +30,38 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto") -> dict:
         contract["model_sha256"] = hashlib.sha256((DEFAULT_ASSET_DIR / "robot.xml").read_bytes()).hexdigest()
         contract["profile_sha256"] = hashlib.sha256((DEFAULT_ASSET_DIR / "profile.json").read_bytes()).hexdigest()
         layout = resolve_observation_layout(robot, observation_layout)
-        contract["version"] = 4
+        contract["version"] = 5
         contract["observation_layout"] = layout
+        env_config = env_config or {}
+        settings = resolve_robot_environment(
+            robot, **{key: env_config[key] for key in
+                      ("actuator_delay", "actuator_delay_max_ms", "reset_root_z_offset")
+                      if key in env_config},
+        )
+        contract["simulation_schema"] = {
+            **settings,
+            "actuator_delay_enabled_in_training": settings["actuator_delay"] and env_config.get("domain_randomization", True),
+            "actuator_delay_sampling": "per_environment_per_fused_group_held_for_episode",
+            "actuator_delay_physics_dt_s": 0.005,
+            "nominal_evaluation_delay": False,
+            "delay_initial_pending_target": "zero_physical_target_after_robot_reset",
+            "world_model_delay_queue": False, "delay_in_xi": False,
+            "xi_dim": 31, "world_model_input_dim": 125,
+            "reset_offset_scope": "actual_robot_only_all_resets_including_nominal_evaluation",
+            "reference_height_offset": 0.0,
+            "foot_collision": "one_full_CAD_convex_mesh_per_foot",
+        }
         if layout == "isaac_khan":
             contract["observation_schema"] = {
                 "future_frames": 5, "history": 5, "goal_dim": 155, "policy_dim": 465,
-                "critic_goal_dim": 365, "critic_input_dim": 467,
+                "critic_goal_dim": 365, "critic_input_dim": 545,
+                "critic_tracking_errors": {
+                    "order": ["reference_minus_actual_joint_pos", "reanchored_body_position_error_heading",
+                              "full_root_relative_rotation_6d"],
+                    "dimensions": [27, 45, 6], "scales": [1.0, 1.0, 1.0],
+                    "tracked_body_count": 15,
+                    "append_after_original_root_error4": True,
+                },
                 "actor_goal_noise": False,
                 "critic_reference_noise": False, "critic_future_orientation": True,
                 "critic_reference_order": ["command", "future_anchor_ori_b", "extra_reference_frames"],
@@ -81,7 +107,8 @@ def validate_robot_contract(checkpoint: dict, robot: RobotName, observation_layo
             "policies with scripts/analysis/eval_legacy_khan_benchmark.py, which exports "
             "the matching legacy source and assets without changing this checkout."
         )
-    expected = robot_contract(robot, observation_layout)
+    expected = robot_contract(robot, observation_layout,
+                              env_config=checkpoint.get("config", {}).get("env", {}))
     differences = sorted(key for key in set(saved) | set(expected) if saved.get(key) != expected.get(key))
     if differences:
         raise ValueError("Checkpoint robot_contract differs from current model: " + ", ".join(differences))

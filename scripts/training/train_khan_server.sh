@@ -5,7 +5,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 NUM_ENVS=4096
-RUN_NAME=khan_lafan1_clean_goal
+RUN_NAME=khan_lafan1_delay_convex
 DATA_DIR="$PROJECT_DIR/data/npz/khan_mini/lafan1"
 RESUME=''
 STOP_AFTER=''
@@ -16,14 +16,16 @@ usage() {
 Usage: bash scripts/training/train_khan_server.sh [options]
 
 Single GPU, Khan_mini, original single-GPU LAFAN training parameters.
-Networks, optimization, H=32, UTD=0.4, randomization and LR schedule reuse
+Networks, optimization, H=32, UTD=0.4 and LR schedule reuse
 the repository defaults. Khan uses the Isaac observation layout: 5 reference
 frames, 5 history frames, clean goal 155 and policy input 465. Activation
-recomputation remains disabled. No dataset is downloaded.
+recomputation remains disabled. Khan adds episode-held 0-20 ms actuator delay,
+full CAD convex feet, actual root reset clearance 0.05 m, and a 545-dim critic.
+No dataset is downloaded. Pre-v5 Khan checkpoints need a new training run.
 
 Options:
   --num-envs N                Parallel robot environments (default: 4096)
-  --run-name NAME             Directory under project logs/ (default: khan_lafan1_clean_goal)
+  --run-name NAME             Directory under project logs/ (default: khan_lafan1_delay_convex)
   --data-dir PATH             Converted Khan NPZ directory (default: project data/npz/khan_mini/lafan1)
   --resume PATH               Restore a Khan checkpoint with the same data/configuration
   --stop-after-iterations N   Optional execution limit; retains the 320k LR schedule
@@ -112,6 +114,7 @@ fi
 printf '[INFO] Khan clips: %d; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "${#NPZ_FILES[@]}" "$NUM_ENVS"
 printf '[INFO] Khan observations: future/history 5/5; clean goal 155; policy 465; activation recomputation: OFF\n'
+printf '[INFO] Khan v5: critic 545; actuator delay 0-20 ms; reset root clearance 0.05 m; full convex feet\n'
 printf '[COMMAND]'
 printf ' %q' "${command[@]}"
 printf '\n'

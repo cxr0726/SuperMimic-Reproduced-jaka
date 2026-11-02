@@ -70,7 +70,7 @@ def test_conversion_preserves_original_tree_mass_and_joint_limits(bundle):
     source = ET.parse(SOURCE_URDF).getroot()
     model = mujoco.MjModel.from_xml_path(str(bundle / "robot.xml"))
     assert (model.nq, model.nv, model.njnt, model.nbody, model.ngeom, model.nmesh) == (
-        34, 33, 28, 46, 71, 44
+        34, 33, 28, 46, 59, 44
     )
     assert model.nu == 0 and model.nkey == 0
     assert model.jnt_type[0] == mujoco.mjtJoint.mjJNT_FREE
@@ -264,13 +264,13 @@ def test_visuals_collisions_capsules_and_feet_remain_distinct(bundle):
     ):
         visual = model.geom_group == 2
         collision = model.geom_group == 3
-        assert visual.sum() == 45 and collision.sum() == 26
+        assert visual.sum() == 45 and collision.sum() == 14
         assert (visual | collision).all()
         assert (model.geom_contype[visual] == 0).all()
         assert (model.geom_conaffinity[visual] == 0).all()
         assert (model.geom_contype[collision] == 1).all()
         assert (model.geom_conaffinity[collision] == 1).all()
-        assert (model.geom_type[collision] == mujoco.mjtGeom.mjGEOM_CAPSULE).sum() == 18
+        assert (model.geom_type[collision] == mujoco.mjtGeom.mjGEOM_CAPSULE).sum() == 4
         assert not (model.geom_type[collision] == mujoco.mjtGeom.mjGEOM_CYLINDER).any()
         feet = []
         for geom_id in np.flatnonzero(collision):
@@ -281,15 +281,45 @@ def test_visuals_collisions_capsules_and_feet_remain_distinct(bundle):
             assert name.endswith("_collision") and body_name in name
             if body_name in ("Left_ankle_roll_Link", "Right_ankle_roll_Link"):
                 feet.append(geom_id)
-        assert len(feet) == 14
-        assert (model.geom_type[feet] == mujoco.mjtGeom.mjGEOM_CAPSULE).all()
+        assert len(feet) == 2
+        assert (model.geom_type[feet] == mujoco.mjtGeom.mjGEOM_MESH).all()
         np.testing.assert_allclose(
-            model.geom_friction[feet], np.tile([0.6, 0.005, 0.0001], (14, 1))
+            model.geom_friction[feet], np.tile([0.6, 0.005, 0.0001], (2, 1))
         )
         nonfeet = np.flatnonzero(collision & ~np.isin(np.arange(model.ngeom), feet))
         np.testing.assert_allclose(
             model.geom_friction[nonfeet], np.tile([1.0, 0.005, 0.0001], (12, 1))
         )
+
+
+def test_foot_convex_collisions_share_full_visual_mesh_and_preserve_inertials(bundle):
+    model = mujoco.MjModel.from_xml_path(str(bundle / "robot.xml"))
+    reference = mujoco.MjModel.from_xml_path(str(bundle / "source.urdf"))
+    profile = load_profile(bundle)
+    for name in ("Left_ankle_roll_Link", "Right_ankle_roll_Link"):
+        body = model.body(name).id
+        collisions = np.flatnonzero((model.geom_bodyid == body) & (model.geom_group == 3))
+        visuals = np.flatnonzero((model.geom_bodyid == body) & (model.geom_group == 2))
+        assert len(collisions) == len(visuals) == 1
+        collision, visual = int(collisions[0]), int(visuals[0])
+        assert model.geom(collision).name == f"{name}_convex_collision"
+        assert model.geom_dataid[collision] == model.geom_dataid[visual]
+        assert model.mesh(model.geom_dataid[collision]).name == name
+        np.testing.assert_allclose(model.geom_pos[collision], model.geom_pos[visual], atol=1e-12)
+        np.testing.assert_allclose(model.geom_quat[collision], model.geom_quat[visual], atol=1e-12)
+        assert model.geom_condim[collision] == 3 and model.geom_priority[collision] == 1
+        override = profile["parameter_overrides"]["foot_collision"]["feet"][name]
+        assert override["source_collision_count"] == 7
+        assert override["effective_collision_count"] == 1
+    # Changing contact envelopes must not change the robot's physical inertials.
+    for body_id in range(1, model.nbody):
+        name = model.body(body_id).name
+        old_id = reference.body(name).id
+        for field in ("body_mass", "body_ipos", "body_iquat", "body_inertia"):
+            np.testing.assert_allclose(
+                getattr(model, field)[body_id], getattr(reference, field)[old_id],
+                rtol=1e-10, atol=1e-12,
+            )
 
 
 def test_rebuild_without_force_preserves_local_edits(bundle):

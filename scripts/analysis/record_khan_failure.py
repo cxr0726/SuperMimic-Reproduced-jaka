@@ -50,6 +50,7 @@ def record(ckpt: Path, npz_dir: Path, out_dir: Path, clips: list[str], seconds: 
         observation_layout=policy.cfg.observation_layout,
         anchor_obs=config["env"].get("anchor_obs", False), episode_length_s=1e5,
         action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False,
+        actuator_delay=False, reset_root_z_offset=config["env"].get("reset_root_z_offset"),
         sampling_mode="start", record_transitions=False, seed=0,
     )
     env = make_env(args, device=device)

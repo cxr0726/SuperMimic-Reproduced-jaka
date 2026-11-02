@@ -74,8 +74,9 @@ env -u PYTHONPATH uv run python scripts/data/audit_khan_ground.py \
 
 判定使用实际几何底部，不使用 ankle link 原点：
 
-- 碰撞底：每只脚 7 个 capsule，最低点精确为
-  `center_z - abs(axis_world_z) * half_length - radius`，再取所有足底几何的最小值。
+- 碰撞底：当前每脚1个完整CAD mesh凸包，包含脚背。用编译后的mesh支持顶点及实际geom世界变换求最低点；
+  线性Z极值在完整顶点集和凸包上相同。旧7-capsule模型使用
+  `center_z - abs(axis_world_z) * half_length - radius` 后取脚内最小值，工具仍支持这种旧几何。
 - 视觉底：ankle_roll 及其固定焊接组件的全部脚部 visual，每只脚 4 个 mesh，
   用 MuJoCo 编译后顶点和实际 geom 世界变换求最低点。用于极值计算的凸包简化不改变最低高度。
 - “穿地帧”指至少一个脚底 `z <= -0.001 m`；负高度总数也独立记录。
@@ -85,7 +86,7 @@ env -u PYTHONPATH uv run python scripts/data/audit_khan_ground.py \
 
 ## 实测结果
 
-在当前 Khan 模型、地面 `z=0`、没有根高度补偿的情况下：
+以下是历史7-capsule足部模型、地面 `z=0`、没有根高度补偿的结果，不能当作当前完整脚凸包的重测统计：
 
 | 项目 | 碰撞几何 | 可见脚部网格 |
 |---|---:|---:|
@@ -111,7 +112,9 @@ BuiltinPositionActuator、0.9 软限位、视觉/碰撞分组、足底接触规�
 机器人自身的关节数、几何、增益、初态和动作缩放仍按 Khan 配置。
 
 完整训练端已支持 `--robot khan_mini`，机器人名称、FK、状态、观测与网络边界随模型解析，
-见 [KHAN_TRAINING.md](KHAN_TRAINING.md)。本节上述接地偏差仍保留，训练不会自动抬高参考数据。
+见 [KHAN_TRAINING.md](KHAN_TRAINING.md)。当前Khan运动跟踪reset仅将实际机器人抬高0.05 m，
+训练/eval/play保留这项初始余量，但不改NPZ或参考goal，不能消除严重参考穿地。
+本工具按帧直接写入NPZ，**不施加reset offset**；因此仍适合检查原始数据和新凸包的接地问题。
 
 ## Git 内容
 

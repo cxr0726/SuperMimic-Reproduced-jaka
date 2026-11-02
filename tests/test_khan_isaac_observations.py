@@ -25,7 +25,11 @@ from supermimic.observation_layout import (
     resolve_observation_sizes,
 )
 from supermimic.policy.nets import Policy, PolicyCfg
-from supermimic.world_model.heads import analytic_observation, flatten_history_term_major
+from supermimic.world_model.heads import (
+    AnalyticHeads,
+    analytic_observation,
+    flatten_history_term_major,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 NPZ = ROOT / "data/npz/khan_mini/lafan1/walk1_subject1.npz"
@@ -227,7 +231,7 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(n
     lib = _tiny_library()
     policy = Policy(PolicyCfg(encoder_hidden=(12,), decoder_hidden=(12,), latent_dim=4,
                               history=5, future_frames=5, num_joints=27, goal_dim=155,
-                              observation_layout="isaac_khan"))
+                              observation_layout="isaac_khan", num_tracked_bodies=1))
     state = torch.zeros(2, 67)
     state[:, :3], state[:, 3:7] = lib._ref[:2, :3], lib._ref[:2, 3:7]
     state[:, 7:34] = lib.default_joint_pos
@@ -238,9 +242,11 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(n
                        history_valid=torch.tensor([[False, False], [False, False],
                                                    [True, True], [True, True], [True, True]]))
     heads = SimpleNamespace(
+        fk=SimpleNamespace(nq=34),
         anchor_index=0, root_error_features=lambda state, ref: state[:, :4] * 0,
         robot_bodies=lambda state: {"pos": state[:, None, :3], "quat": state[:, None, 3:7]},
     )
+    heads.critic_error_features = lambda state, ref: AnalyticHeads.critic_error_features(heads, state, ref)
     captured = []
     hook = policy.register_forward_pre_hook(lambda module, args: captured.append(args))
 
@@ -276,9 +282,17 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(n
         torch.testing.assert_close(rollout.goals[time], expected_critic[:, :155], rtol=0, atol=0)
     if noise:
         assert not torch.equal(captured[0][0][:, :30], rollout.critic_goals[0, :, 155:185])
-    trainer = SimpleNamespace(wm=SimpleNamespace(spec=SimpleNamespace(canonical=lambda state: state)))
-    _, value_goals, _ = PolicyTrainer._critic_inputs(trainer, rollout)
+    trainer = SimpleNamespace(wm=SimpleNamespace(
+        spec=SimpleNamespace(canonical=lambda state: state), heads=heads,
+    ))
+    _, value_goals, _, value_errors = PolicyTrainer._critic_inputs(trainer, rollout)
     assert value_goals is rollout.critic_goals
+    assert value_errors.shape == (3, 2, 36)  # This synthetic fixture tracks only its root.
+    torch.testing.assert_close(
+        value_errors[..., :27], lib._ref[rollout.frames, 7:34] - rollout.states[..., 7:34],
+    )
+    torch.testing.assert_close(rollout.critic_reference.root_pos_w,
+                               lib._ref[rollout.frames.reshape(-1), :3])
     orientation_gradients = torch.autograd.grad(
         (rollout.critic_goals[-1, :, 155:185] * torch.arange(30)).sum(),
         tuple(policy.parameters()), retain_graph=True, allow_unused=True,

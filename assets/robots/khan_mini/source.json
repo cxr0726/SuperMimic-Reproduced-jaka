@@ -65,6 +65,25 @@
       "value": 1.0,
       "source": "user-requested alignment with mjlab G1 non-foot contacts"
     },
+    "foot_collision": {
+      "shape": "whole-foot CAD mesh convex hull, including instep",
+      "source": "existing URDF visual STL; identical to SDK whole-foot collision mesh",
+      "feet": {
+        "Left_ankle_roll_Link": {
+          "geom": "Left_ankle_roll_Link_convex_collision",
+          "mesh": "Left_ankle_roll_Link",
+          "source_collision_count": 7,
+          "effective_collision_count": 1
+        },
+        "Right_ankle_roll_Link": {
+          "geom": "Right_ankle_roll_Link_convex_collision",
+          "mesh": "Right_ankle_roll_Link",
+          "source_collision_count": 7,
+          "effective_collision_count": 1
+        }
+      },
+      "inertials": "preserved from URDF; collision geom density is zero"
+    },
     "waist_collision_box": {
       "geom": "waist_yaw_Link_45_collision",
       "source_half_size_m": [
@@ -101,13 +120,14 @@
     "visual_meshes": "preserved",
     "freejoint": "floating_base",
     "cylinders": "capsules with original radius/axis half-length",
+    "foot_collisions": "seven sole capsules replaced by each existing whole-foot CAD mesh convex hull; training contact parameters and explicit inertials preserved",
     "actuators": "created by get_khan_mini_cfg from profile.json",
     "velocity_limits": "recorded only; not enforced by builtin position servos",
     "contacts": "self-collision masks retained; feet condim=3, other contacts condim=1"
   },
   "output_sha256": {
-    "robot.xml": "0347d60fe828a2110924caf6071089a9f9701f3d92883dc242ef3912856011e1",
+    "robot.xml": "7a24edbbcde9b684a2b1b519646f369e533f5cf107c511480befa9826ad3a2a3",
     "source.urdf": "927cf814485ce2e2fea77aed95dd4b858e60763b785693c2f3f4b23f9940be33",
-    "profile.json": "fcf92412b6bb56029a6735cf105cc93b133831f2e2932c8a4934f26115d4916e"
+    "profile.json": "e6484f8f97a067acb4b5f5e1903b5214accb5142fb7e8b327a77c04880d1aab7"
   }
 }

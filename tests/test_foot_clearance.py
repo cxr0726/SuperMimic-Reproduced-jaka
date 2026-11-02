@@ -88,7 +88,7 @@ def test_root_translation_moves_actual_penetration_by_the_same_amount():
 
 
 @pytest.mark.skipif(not (DEFAULT_ASSET_DIR / "robot.xml").is_file(), reason="Khan assets missing")
-def test_real_khan_home_uses_all_fourteen_foot_colliders_and_has_ground_clearance():
+def test_real_khan_home_uses_both_whole_foot_convex_colliders_and_has_ground_clearance():
     profile = load_profile()
     model = get_khan_mini_cfg().build().spec.compile()
     data = mujoco.MjData(model)
@@ -97,8 +97,9 @@ def test_real_khan_home_uses_all_fourteen_foot_colliders_and_has_ground_clearanc
     groups = foot_geom_groups(model, profile)
     assert set(groups) == set(profile["foot_bodies"])
     collision_ids = [geom for group in groups.values() for geom in group["collision"]]
-    assert len(collision_ids) == 14 and len(set(collision_ids)) == 14
-    assert all(len(group["collision"]) == 7 for group in groups.values())
+    assert len(collision_ids) == 2 and len(set(collision_ids)) == 2
+    assert all(len(group["collision"]) == 1 for group in groups.values())
+    assert (model.geom_type[collision_ids] == mujoco.mjtGeom.mjGEOM_MESH).all()
     assert all(group["visual"] for group in groups.values())
     bottoms = [geom_bottom_z(model, data, geom) for geom in collision_ids]
     assert min(bottoms) == pytest.approx(0.00195, abs=1e-5)

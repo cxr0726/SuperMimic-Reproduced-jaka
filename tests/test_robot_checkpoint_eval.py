@@ -22,12 +22,14 @@ def _checkpoint(tmp_path, robot, anchor=False, legacy=False):
     goal = 155 if layout == "isaac_khan" else future * spec.goal_feature_dim + (9 if anchor else 0)
     cfg = PolicyCfg(encoder_hidden=(8,), decoder_hidden=(8,), latent_dim=4,
                     num_joints=spec.num_joints, history=history, future_frames=future,
-                    goal_dim=goal, observation_layout=layout)
+                    goal_dim=goal, observation_layout=layout,
+                    num_tracked_bodies=len(spec.tracked_bodies))
     policy = Policy(cfg)
     config = {"policy": asdict(cfg), "env": {"future_frames": future, "anchor_obs": anchor,
                                              "observation_layout": layout}}
     if legacy:
         config["policy"].pop("num_joints")
+        config["policy"].pop("num_tracked_bodies")
         config["policy"].pop("observation_layout")
         config["policy"].pop("future_frames")
         config["env"].pop("observation_layout")
@@ -121,7 +123,7 @@ def test_khan_isaac_policy_and_critic_keep_production_hidden_layers():
         (497, 2048), (2048, 1024), (1024, 512), (512, 256), (256, 27)
     ]
     assert [(layer.in_features, layer.out_features) for layer in critic_layers] == [
-        (467, 256), (256, 128), (128, 1)
+        (545, 256), (256, 128), (128, 1)
     ]
     for scale in (policy.encoders["motion"].scale, policy.decoder.scale):
         assert torch.equal(scale, torch.ones_like(scale)), "Isaac values must not be scaled twice"
@@ -132,7 +134,8 @@ def test_khan_isaac_policy_and_critic_keep_production_hidden_layers():
     observations, goals = torch.randn(2, 465), torch.randn(2, 155)
     action = policy(observations, goals)
     critic_goals = torch.cat((goals, torch.randn(2, 30), torch.randn(2, 180)), dim=-1)
-    value = critic(torch.randn(2, 67), critic_goals, torch.randn(2, 31), torch.randn(2, 4))
+    value = critic(torch.randn(2, 67), critic_goals, torch.randn(2, 31),
+                   torch.randn(2, 4), torch.randn(2, 78))
     assert action.shape == (2, 27) and value.shape == (2,)
     loss = action.square().mean() + value.square().mean()
     loss.backward()

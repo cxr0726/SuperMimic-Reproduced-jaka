@@ -170,8 +170,11 @@ def audit_npz(
     frames = np.unique(np.r_[np.arange(0, n, stride), n - 1]).astype(np.int64)
     root_id = motion["body_names"].tolist().index(profile["root_body"])
     data = mujoco.MjData(model)
+    # Collision meshes need the same support cache as visual meshes; otherwise
+    # geom_bottom_z would reconstruct a convex hull for every motion frame.
     support = {g: mesh_support_vertices(model, g) for group in groups.values()
-               for g in group["visual"] if model.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH}
+               for kind in ("collision", "visual") for g in group[kind]
+               if model.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH}
     heights = {foot: {kind: np.empty(len(frames)) for kind in ("collision", "visual")}
                for foot in groups}
     collision_ids = np.array([g for group in groups.values() for g in group["collision"]])
@@ -193,7 +196,9 @@ def audit_npz(
                 heights[foot]["collision"][i] = capsule_bottom[offset:offset + count].min()
                 offset += count
             else:
-                heights[foot]["collision"][i] = min(geom_bottom_z(model, data, g) for g in group["collision"])
+                heights[foot]["collision"][i] = min(
+                    geom_bottom_z(model, data, g, mesh_vertices=support.get(g)) for g in group["collision"]
+                )
             heights[foot]["visual"][i] = min(
                 geom_bottom_z(model, data, g, mesh_vertices=support.get(g)) for g in group["visual"]
             )
@@ -222,6 +227,6 @@ def audit_npz(
         "criterion": "min geometry Z <= -tolerance_m",
         "visual_scope": "visual geoms on each ankle_roll body and its welded fixed bodies",
         "notes": ["Kinematic geometry audit only; no dynamics, height lift, clipping or contact repair.",
-                  "Collision bottoms use exact primitives; visual bottoms use compiled mesh vertex support."],
+                  "Collision bottoms use exact primitives or compiled mesh vertex support; visual bottoms use compiled mesh vertex support."],
         "_per_frame": per_frame,
     }

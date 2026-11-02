@@ -105,14 +105,14 @@ Khan now defaults to the Isaac observation layout: five reference frames give a
 five future anchor orientations plus five sensor-history
 frames give a 465-dimensional policy input. Actor angular/joint velocity scales
 are 0.5/0.2, matching SuperMimic. The critic receives clean command, future orientation
-and five frames of reference velocities/gravity alongside canonical state and context
-(467 dimensions). The layout name does not imply Isaac's original scales.
+and five frames of reference velocities/gravity alongside canonical state and context,
+plus 78 current tracking-error features (545 dimensions in total). The layout name does not imply Isaac's original scales.
 The dynamics model separately consumes 125 values: canonical physical state67,
-executed normalized action27 and normalized context31. It uses the original
+noisy normalized command27 (before actuator delay) and normalized context31. It uses the original
 fixed state scales and does not consume noisy actor observations or reference goals.
 
 ```bash
-env -u PYTHONPATH uv run sm-train --robot khan_mini --run-name khan_lafan1_clean_goal
+env -u PYTHONPATH uv run sm-train --robot khan_mini --run-name khan_lafan1_delay_convex
 env -u PYTHONPATH uv run python scripts/smoke_train_khan.py
 ```
 
@@ -123,12 +123,12 @@ coordinates, term order, noise/scales and remaining differences from Isaac PPO;
 [`docs/KHAN_TRAINING.md`](docs/KHAN_TRAINING.md) covers rewards and optimization.
 Khan's `train_ret` divides by `0.112 * executed_steps`, so its theoretical maximum
 remains 1.0. G1 retains its original observations and 0.1 reward upper bound.
-The current clean-goal version passed 168 tests and an 8-environment, 50-step
+The historical version-4 clean-goal configuration passed 168 tests and an 8-environment, 50-step
 production-network smoke run, including model/optimizer/sampler restoration.
 The run confirmed dynamics input125, goal155, prop465, decoder497 and critic467.
 Activation recomputation was explicitly enabled for that local 12 GB test;
 the formal server command leaves it off. The linked observation document separates
-current validation from earlier noisy-goal and 287-input critic versions, and
+historical validation from earlier noisy-goal and 287-input critic versions, and
 records the warnings and validation limits.
 
 Reset sampling now updates episode start bins with mean-reward continuation at
@@ -137,14 +137,22 @@ strict full-H reference availability. See the sampler comparison and checkpoint
 migration notes in [`docs/KHAN_SERVER_TRAINING.md`](docs/KHAN_SERVER_TRAINING.md#起始-bin-采样器2026-11-02).
 
 For server training, use
-`bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_clean_goal`.
+`bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_delay_convex`.
 See [`docs/KHAN_SERVER_TRAINING.md`](docs/KHAN_SERVER_TRAINING.md) for deployment,
 dry-run, a 50-step verification and checkpoint resume. The legacy 9-dimensional
 anchor goal is replaced by the 30-dimensional future orientation in policy inputs.
-Start a **new run**: the Khan version-4 checkpoint contract records the observation
-layout, scales and critic references alongside robot/reward/physics semantics;
-earlier 649/870 policies, the 287-input critic version and version-3 checkpoints
-with actor-goal noise are incompatible.
+Khan now randomizes actuator delay over 0/5/10/15/20 ms per environment and fused
+actuator group, held for each episode. Nominal evaluation disables delay. The world
+model and imagination keep context31/input125 and approximate this hidden delay
+without an explicit queue. Each physical tracking reset starts the robot 5 cm above
+the unmodified reference, including evaluation resets; reference goals stay unchanged.
+Feet now use one whole-foot CAD convex mesh each, including the instep; inertias and
+non-foot contacts are preserved, and existing NPZ files need no reconversion.
+
+Start a **new run**: the Khan version-5 checkpoint contract records these physics
+settings and the expanded critic. Version-4 checkpoints, including the existing
+clean-goal 100k policy, cannot resume, evaluate or export under this configuration;
+use their matching historical checkout for those operations.
 The old 40k policy's frozen-model replay and 90 push-test conditions are documented in
 [`docs/KHAN_40K_ROBUSTNESS.md`](docs/KHAN_40K_ROBUSTNESS.md); they do not evaluate the new training configuration.
 Legacy full-clip benchmarks use an isolated Git snapshot, leaving the current training
@@ -156,8 +164,8 @@ Export the current Khan actor and ordered robot parameters as a single FP32 ONNX
 ```bash
 uv sync --extra export
 env -u PYTHONPATH .venv/bin/python scripts/export_onnx.py \
-  --ckpt logs/Khan_lafan1_clean_goal/ckpt_0100000.pt \
-  --out exports/khan_mini/ckpt_0100000.onnx
+  --ckpt logs/khan_lafan1_delay_convex/ckpt_latest.pt \
+  --out exports/khan_mini/ckpt_latest.onnx
 ```
 
 The default interface is `obs[batch,620] = [goal155, policy_obs465]` to

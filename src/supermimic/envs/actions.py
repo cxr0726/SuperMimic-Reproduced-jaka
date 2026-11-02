@@ -2,8 +2,10 @@
 
 The *clean* policy action stays in ``raw_action`` (so ``last_action`` observations and
 the action-rate penalty see it); Gaussian noise ``eps ~ N(0, std^2)`` is added to the
-normalized action only when computing the executed set-point. ``executed_raw`` exposes
-``a + eps`` for the replay buffer (the world model is fit on executed actions).
+normalized action only when computing the requested set-point. ``executed_raw`` exposes
+``a + eps`` for replay. When actuator delay is enabled, this is the current command
+before the physics-step target queue, not the historical target actually applied
+on every substep. The world model intentionally fits that delay implicitly.
 """
 
 from __future__ import annotations

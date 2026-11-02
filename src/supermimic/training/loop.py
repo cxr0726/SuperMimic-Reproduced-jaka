@@ -136,6 +136,9 @@ class Trainer:
                 obs_noise=cfg.env.obs_noise,
                 reset_noise=cfg.env.reset_noise,
                 domain_randomization=cfg.env.domain_randomization,
+                actuator_delay=cfg.env.actuator_delay,
+                actuator_delay_max_ms=cfg.env.actuator_delay_max_ms,
+                reset_root_z_offset=cfg.env.reset_root_z_offset,
                 sampling_mode=cfg.env.sampling_mode,
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
@@ -194,7 +197,8 @@ class Trainer:
                 "bin_memory": self.command.bin_memory,
                 "sampler_contract": self.command.sampler_contract,
                 "config": asdict(self.cfg),
-                "robot_contract": robot_contract(self.cfg.robot, self.cfg.env.observation_layout),
+                "robot_contract": robot_contract(self.cfg.robot, self.cfg.env.observation_layout,
+                                                 env_config=asdict(self.cfg.env)),
             },
             self.log_dir / name,
         )
@@ -225,6 +229,10 @@ class Trainer:
                 "use matching settings or start a new run"
             )
         validate_robot_contract(ck, self.cfg.robot, self.cfg.env.observation_layout)
+        if self.cfg.robot == "khan_mini" and ck["robot_contract"] != robot_contract(
+            self.cfg.robot, self.cfg.env.observation_layout, env_config=asdict(self.cfg.env),
+        ):
+            raise ValueError("Checkpoint environment semantics differ (delay/reset/DR); start a new run or use matching settings")
         self.wm.load_state_dict(ck["wm"])
         self.policy.load_state_dict(ck["policy"])
         self.critic.load_state_dict(ck["critic"])
