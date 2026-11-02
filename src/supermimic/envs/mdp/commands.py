@@ -12,6 +12,8 @@ functions work unchanged, plus:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
@@ -29,6 +31,7 @@ from mjlab.utils.lab_api.math import (
 )
 
 from supermimic.envs.mdp.motion_library import MotionLibrary
+from supermimic.envs.mdp.reset_sampling import mean_reward_continuation, update_bin_returns
 
 if TYPE_CHECKING:
     from mjlab.entity import Entity
@@ -69,16 +72,37 @@ class MultiClipMotionCommand(CommandTerm):
         self.body_quat_relative_w[:, :, 0] = 1.0
 
         # Return-based reset sampling state.
-        self.bin_return = torch.full((lib.num_bins,), cfg.g_max, device=self.device)
-        self.bin_memory = torch.full((lib.num_bins,), 1.0 / lib.num_bins, device=self.device)
-        self.max_ep_steps = min(math.ceil(env.cfg.episode_length_s / env.step_dt) + 2, cfg.max_logged_steps)
+        # Keep the library's bin numbering for diagnostics, but exclude bins containing
+        # only the final state: a reset must have a subsequent reference frame.
+        self.sample_bin_end = torch.minimum(lib.bin_end, lib.clip_last[lib.bin_clip])
+        self.sampleable_bins = lib.bin_start < self.sample_bin_end
+        self.num_sampleable_bins = int(self.sampleable_bins.sum().item())
+        if self.num_sampleable_bins == 0:
+            raise ValueError("Motion library has no reset state with a subsequent frame")
+        self.bin_return = torch.zeros(lib.num_bins, device=self.device)
+        self.bin_memory = torch.zeros_like(self.bin_return)
+        self.reset_sampler_statistics()
+        layout = [(clip.name, clip.length) for clip in lib.clips]
+        self.sampler_contract = {
+            "version": 2, "return_target": "start_bin_mean_reward_continuation",
+            "duplicate_bins": "batch_mean", "initial_return": 0.0,
+            "bin_frames": cfg.bin_frames, "gamma": cfg.gamma, "g_max": cfg.g_max,
+            "bin_ema": cfg.ema_alpha, "history_method": "ema_per_sample_call",
+            "history_ema": cfg.memory_alpha, "softmax_temp": cfg.softmax_temp,
+            "mixture": [cfg.uniform_ratio, cfg.hard_ratio, cfg.memory_ratio],
+            "reset_boundary": "frame_before_inclusive_last",
+            "clip_layout_sha256": hashlib.sha256(
+                json.dumps(layout, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
         # Evaluation hook: when >= 0, the next reset of that env starts exactly at this global frame.
         self.forced_frame = torch.full((n,), -1, dtype=torch.long, device=self.device)
-        self.ep_rewards = torch.zeros(n, self.max_ep_steps, device=self.device)
-        self.ep_bins = torch.zeros(n, self.max_ep_steps, dtype=torch.long, device=self.device)
+        self.ep_reward_sum = torch.zeros(n, dtype=torch.float64, device=self.device)
+        self.ep_discounted_return = torch.zeros_like(self.ep_reward_sum)
+        self.episode_start_bin = torch.zeros(n, dtype=torch.long, device=self.device)
         self.ep_len = torch.zeros(n, dtype=torch.long, device=self.device)
-        self._gamma_pow = cfg.gamma ** torch.arange(self.max_ep_steps, device=self.device, dtype=torch.float64)
-        self.bootstrap_fn = None  # optional: env_ids -> value estimate for truncated episodes
+        self.last_logged_step = torch.full_like(self.ep_len, env.common_step_counter)
+        self._compute_dt: float | torch.Tensor = 0.0
 
         for k in ("error_anchor_pos", "error_anchor_rot", "error_body_pos", "error_body_rot",
                   "error_joint_pos", "error_joint_vel", "sampling_entropy", "episode_return_to_go"):
@@ -193,58 +217,45 @@ class MultiClipMotionCommand(CommandTerm):
 
     # ------------------------------------------------------------------ reward bookkeeping for the sampler
 
+    def reset_sampler_statistics(self) -> None:
+        """Discard scores from a different sampler algorithm without changing networks."""
+        self.bin_return.zero_()
+        self.bin_memory.copy_(self.sampleable_bins / self.num_sampleable_bins)
+
     def _log_step_rewards(self, env_mask: torch.Tensor | None = None) -> None:
-        """Append this step's simulator reward (and the bin it was earned in) to each env's episode log."""
+        """Count each real simulator reward once, including the terminal transition."""
         reward = getattr(self._env, "reward_buf", None)
         if reward is None:
             return
-        ids = torch.arange(self.num_envs, device=self.device) if env_mask is None else env_mask.nonzero().squeeze(-1)
+        pending = self.last_logged_step < self._env.common_step_counter
+        if env_mask is not None:
+            pending = pending & env_mask
+        ids = pending.nonzero().flatten()
         if ids.numel() == 0:
             return
-        pos = self.ep_len[ids].clamp_max(self.max_ep_steps - 1)
-        self.ep_rewards[ids, pos] = reward[ids]
-        self.ep_bins[ids, pos] = self.library.bin_of_frame(self.frame[ids])
-        self.ep_len[ids] = torch.minimum(self.ep_len[ids] + 1, torch.full_like(pos, self.max_ep_steps))
+        first = ids[self.ep_len[ids] == 0]
+        self.episode_start_bin[first] = self.library.bin_of_frame(self.frame[first])
+        r = reward[ids].double()
+        self.ep_discounted_return[ids] += self.cfg.gamma ** self.ep_len[ids].double() * r
+        self.ep_reward_sum[ids] += r
+        self.ep_len[ids] += 1
+        self.last_logged_step[ids] = self._env.common_step_counter
 
     def _finalize_episodes(self, env_ids: torch.Tensor) -> None:
-        """Fold the finished episodes' discounted returns-to-go into the per-bin estimates."""
-        cfg = self.cfg
-        lens = self.ep_len[env_ids]
-        if lens.sum() == 0:
+        """Update only episode start bins, using mean-reward continuation at cutoffs."""
+        ids = env_ids[self.ep_len[env_ids] > 0]
+        if ids.numel() == 0:
             return
-        T = int(lens.max().item())
-        r = self.ep_rewards[env_ids, :T].double()
-        bins = self.ep_bins[env_ids, :T]
-        tmask = torch.arange(T, device=self.device)[None, :] < lens[:, None]
-        r = r * tmask
-        gp = self._gamma_pow[:T]
-        # Return-to-go R_t = sum_{s>=t} gamma^{s-t} r_s via a reverse cumulative sum.
-        disc = r * gp[None, :]
-        rtg = torch.flip(torch.cumsum(torch.flip(disc, [1]), 1), [1]) / gp[None, :]
-        # Truncated (timed-out) episodes: bootstrap with the critic if available, otherwise
-        # drop the steps too close to the truncation point (plan D14).
-        terminated = self._env.termination_manager.terminated[env_ids] if hasattr(self._env, "termination_manager") else torch.ones_like(lens, dtype=torch.bool)
-        truncated = ~terminated & ~self.clip_end[env_ids]
-        if truncated.any():
-            if self.bootstrap_fn is not None:
-                v = self.bootstrap_fn(env_ids).double()  # (n,)
-                remaining = (lens[:, None] - torch.arange(T, device=self.device)[None, :]).clamp_min(0).double()
-                rtg = rtg + truncated[:, None] * (cfg.gamma ** remaining) * v[:, None]
-            else:
-                remaining = lens[:, None] - torch.arange(T, device=self.device)[None, :]
-                tmask = tmask & ~(truncated[:, None] & (remaining < cfg.min_remaining_steps))
-        valid = tmask.reshape(-1)
-        b = bins.reshape(-1)[valid]
-        g = rtg.reshape(-1)[valid].float()
-        if b.numel() == 0:
-            return
-        sums = torch.zeros(self.library.num_bins, device=self.device).index_add_(0, b, g)
-        cnts = torch.zeros(self.library.num_bins, device=self.device).index_add_(0, b, torch.ones_like(g))
-        touched = cnts > 0
-        mean = sums[touched] / cnts[touched]
-        self.bin_return[touched] = (1 - cfg.ema_alpha) * self.bin_return[touched] + cfg.ema_alpha * mean
-        self.metrics["episode_return_to_go"][env_ids] = rtg[:, 0].float()
-        self.ep_len[env_ids] = 0
+        terminated = self._env.termination_manager.terminated[ids]
+        targets = mean_reward_continuation(
+            self.ep_discounted_return[ids], self.ep_reward_sum[ids],
+            self.ep_len[ids], terminated, self.cfg.gamma,
+        )
+        update_bin_returns(self.bin_return, self.episode_start_bin[ids], targets, self.cfg.ema_alpha)
+        self.metrics["episode_return_to_go"][ids] = targets.float()
+        self.ep_len[ids] = 0
+        self.ep_reward_sum[ids] = 0
+        self.ep_discounted_return[ids] = 0
 
     # ------------------------------------------------------------------ sampling
 
@@ -255,23 +266,23 @@ class MultiClipMotionCommand(CommandTerm):
             clips = torch.randint(0, lib.num_clips, (n,), device=self.device)
             return lib.clip_start[clips]
         if cfg.sampling_mode == "uniform":
-            # Uniform over frames (long clips get proportionally more starts), leaving >= 2 steps.
+            # Uniform over frames (long clips get proportionally more starts).
             f = torch.randint(0, lib.num_frames, (n,), device=self.device)
-            return torch.minimum(f, lib.last_frame_of(f) - 2).clamp_min(0)
+            return torch.minimum(f, lib.last_frame_of(f) - 1).clamp_min(lib.clip_start[lib.frame_clip[f]])
         assert cfg.sampling_mode == "return"
-        hard = torch.softmax(-cfg.softmax_temp * self.bin_return / cfg.g_max, dim=0)
-        self.bin_memory = (1 - cfg.memory_alpha) * self.bin_memory + cfg.memory_alpha * hard
+        logits = (-cfg.softmax_temp * self.bin_return / cfg.g_max).masked_fill(~self.sampleable_bins, -torch.inf)
+        hard = torch.softmax(logits, dim=0)
+        self.bin_memory.lerp_(hard, cfg.memory_alpha)
         p = (
-            cfg.uniform_ratio / lib.num_bins
+            cfg.uniform_ratio * self.sampleable_bins / self.num_sampleable_bins
             + cfg.hard_ratio * hard
             + cfg.memory_ratio * self.bin_memory / self.bin_memory.sum()
         )
         p = p / p.sum()
         b = torch.multinomial(p, n, replacement=True)
         u = torch.rand(n, device=self.device)
-        f = lib.bin_start[b] + (u * (lib.bin_end[b] - lib.bin_start[b]).float()).long()
-        f = torch.minimum(f, lib.last_frame_of(f) - 2).clamp_min(lib.clip_start[lib.frame_clip[f]])
-        ent = -(p * (p + 1e-12).log()).sum() / math.log(max(lib.num_bins, 2))
+        f = lib.bin_start[b] + (u * (self.sample_bin_end[b] - lib.bin_start[b]).float()).long()
+        ent = -(p * (p + 1e-12).log()).sum() / math.log(max(self.num_sampleable_bins, 2))
         self.metrics["sampling_entropy"][:] = ent
         return f
 
@@ -287,10 +298,11 @@ class MultiClipMotionCommand(CommandTerm):
         # Episode bookkeeping for the envs being reset (terminal reward is already in reward_buf).
         mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         mask[env_ids] = True
-        if self.ep_len.sum() > 0 or hasattr(self._env, "reward_buf"):
-            self._log_step_rewards(mask)
-            self._finalize_episodes(env_ids)
+        self._log_step_rewards(mask)
+        self._finalize_episodes(env_ids)
         self.ep_len[env_ids] = 0
+        self.ep_reward_sum[env_ids] = 0
+        self.ep_discounted_return[env_ids] = 0
 
         sampled = self._sample_frames(len(env_ids))
         forced = self.forced_frame[env_ids]
@@ -332,19 +344,28 @@ class MultiClipMotionCommand(CommandTerm):
         self.body_quat_relative_w = quat_mul(delta_ori_w, self.body_quat_w)
         self.body_pos_relative_w = delta_pos_w + quat_apply(delta_ori_w, self.body_pos_w - anchor_pos)
 
+    def compute(self, dt: float | torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
+        # mjlab uses dt=0 after explicit resets and for freshly auto-reset envs.
+        # The base class scopes timers but does not pass dt to _update_command.
+        self._compute_dt = dt
+        super().compute(dt, env_ids)
+
     def _update_command(self, env_ids: torch.Tensor | None = None):
         # Clip end must be judged against the clip of the *current* frame (frame+1 may already be
         # the first frame of the next clip in the concatenated library).
         last = self.library.last_frame_of(self.frame)
-        if env_ids is None:
-            # Per-step path: log the reward earned against the current target frame for the envs
-            # that were NOT just reset (their terminal reward was logged in _resample_command).
-            reset_buf = getattr(self._env, "reset_buf", None)
-            self._log_step_rewards(None if reset_buf is None else ~reset_buf)
-            self.frame += 1
+        dt = self._compute_dt
+        if isinstance(dt, torch.Tensor):
+            advance = dt > 0
         else:
-            self.frame[env_ids] += 1
-        over = self.frame > last
+            advance = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            if dt > 0:
+                advance[:] = env_ids is None
+                if env_ids is not None:
+                    advance[env_ids] = True
+        self._log_step_rewards(advance)
+        self.frame[advance] += 1
+        over = advance & (self.frame > last)
         if over.any():
             self.clip_end |= over
             self.frame = torch.where(over, last, self.frame)
@@ -354,6 +375,9 @@ class MultiClipMotionCommand(CommandTerm):
     def reset_to_frame(self, env_ids: torch.Tensor, frame: torch.Tensor) -> None:
         """Deterministic reset to exact reference frames (no noise); used by evaluation."""
         self.ep_len[env_ids] = 0
+        self.ep_reward_sum[env_ids] = 0
+        self.ep_discounted_return[env_ids] = 0
+        self.last_logged_step[env_ids] = self._env.common_step_counter
         self.frame[env_ids] = frame
         self.clip_end[env_ids] = False
         r = self.library.ref(frame)
@@ -410,17 +434,15 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     velocity_range: dict[str, tuple[float, float]] = field(default_factory=dict)
     joint_position_range: tuple[float, float] = (0.0, 0.0)
     sampling_mode: Literal["return", "uniform", "start"] = "return"
-    # Return-based sampling (plan D14).
+    # Return-based sampling: start-bin targets, mean-reward continuation at cutoffs.
     uniform_ratio: float = 0.5
     hard_ratio: float = 0.4
     memory_ratio: float = 0.1
     softmax_temp: float = 25.0
     g_max: float = 10.0
     gamma: float = 0.99
-    ema_alpha: float = 0.05
-    memory_alpha: float = 0.01
-    min_remaining_steps: int = 100
-    max_logged_steps: int = 1024
+    ema_alpha: float = 0.2
+    memory_alpha: float = 0.001
     compact_library: bool = False
     library_fp16: bool = True
     resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)

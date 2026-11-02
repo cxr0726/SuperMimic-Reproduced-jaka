@@ -180,3 +180,73 @@ bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan
 40次WM、4次actor、80次critic更新及模型/优化器/采样器恢复通过，参数与实际TB有限。
 本机测试显式开启激活重计算，正式服务器入口仍关闭；结果在
 `logs/khan_clean_goal_smoke/summary.json`。默认run名 `khan_lafan1_clean_goal` 的4096环境dry-run也通过。
+
+## 起始 bin 采样器（2026-11-02）
+
+当前 G1 和 Khan 共用新的采样实现；机器人的网络、观测、奖励、域随机化和正式优化参数保持原值。
+这次修改对齐 `supermimic_vibed`、`instantTrack`、`Uni-SuperMimic` 共有的正常截断平均奖励续值，
+并采用 vibed 的重复 bin 聚合和严格想象起点筛选；不复制 instantTrack/Uni 的重复索引覆盖及
+`no_sync` 固定候选不足时仍可能放入无效起点的做法。
+
+| 项目 | 原 G1 / Khan 复现实现 | 当前实现 |
+|---|---|---|
+| 正常片尾 | 不续值 | 用回合平均奖励续值 |
+| 最大回合时长截断 | critic 接口未接入，丢弃截断前不足100步的回报样本 | 同样用平均奖励续值 |
+| 真实高度/倾斜失败 | 不续值 | 不续值；与 timeout 同时发生也按失败处理 |
+| 更新对象 | 各步 RTG 对应的所有经过 bin | 只更新回合首个真实控制步的起始 bin |
+| 重复 bin | 按步骤求均值 | 同批已结束回合先按起始 bin 求均值，再更新一次 |
+| bin 新目标权重 | 0.05 | 0.2 |
+| bin 初值 | G_max | 0 |
+| 历史分布 | 每次起帧采样做 EMA，0.01 | 相同调用单位，EMA 0.001 |
+| 混合分布 | 均匀/当前困难/历史 = 0.5/0.4/0.1 | 相同 |
+| 策略想象 H=32 | 参考到末尾后重复最后一帧继续 rollout | 严格筛 `frame+H<=clip_last`，rollout 再校验 |
+
+同批并行环境可能有多个结束回合来自同一个起始 bin。例如旧 `G=1`，两个回合的目标为3和7，
+当前先求均值5，再做一次EMA：`0.8*1+0.2*5=1.8`。instantTrack/Uni直接向重复索引写入，
+未执行该均值聚合，不能将其视为相同更新；当前也不逐回合连续执行多次EMA，以免结果依赖回合排列顺序。
+
+“完整参考”要求H个想象转移和末端状态均位于原始参考内，不要求replay已经存储之后H步的真实转移。
+例如末帧100、H=32时，起点68合法，69不合法。instantTrack/Uni普通路径也用循环重采保证这一点；
+它们的 `no_sync` 路径仅从2B候选排序后取B个，有效候选不足时可能混入无效项。当前直接从全部有效
+replay起点的mask采样，无有效起点时明确报错。该保证不意味着比它们的快速路径运行更快。
+
+令 `D=sum(gamma**t * reward[t])`、`T` 为实际控制步数、`r_mean=sum(reward)/T`，
+正常片尾及时间截断用于更新 bin 的目标为：
+
+```text
+target = D + gamma**T * r_mean / (1-gamma)
+```
+
+真实失败的目标只有 `D`。补值仅用于重置采样统计，不改变真实奖励、`train_ret`、世界模型目标、
+actor 的 H 步末端 critic 续值或 termination 条件。它是假设截断后保持本回合平均质量的估计，
+并不预测实际未来奖励；不同奖励时序下与 mjlab 参考库的有限片段归一化方法不完全等价。
+
+`G_max` 仍然是正奖励上界除以 `(1-gamma)` 的 softmax 归一化常量；改为零的是 `G_b` 初始估计，
+不是 `G_max`。所有 bin 初值相等时采样都均匀；部分 bin 更新后，零初值会保留未访问 bin 的困难权重，
+而 G_max 初值将未访问区域暂视为容易。历史项平均的是 `softmax(-25 G/G_max)` 概率，而非回报或失败次数。
+
+为保持原有 bin 编号及诊断工具兼容，MotionLibrary 的 bin 表不改变；但仅含最终状态、没有后继状态的
+bin 在均匀、困难、历史三个分支中均无概率。bin 内起帧严格小于真实末帧，不把最后 singleton bin
+折叠到前一个 bin。K 帧未来 goal 保留现有末帧 padding；真实 H 步想象不会跨片尾。
+
+奖励累计改为每环境的 sum、discounted sum 和步数，不再保存整回合奖励矩阵，也没有旧1024步日志上限。
+初始化/手动 reset 的旧奖励不再被计入，terminal reward 每控制步只计一次。
+mjlab 显式 reset 的 `dt=0`、自动 reset 的逐环境零 dt 只刷新参考，不再推进帧；非重置环境正常推进。
+本次没有改变仿真侧判断 clip end 的控制步时序，也没有更改 reward 所使用的参考帧约定。
+
+新 checkpoint 保存 `sampler_contract`，包含算法、系数、bin 边界约定及有序 clip 名称/长度的哈希。
+新版本恢复时严格校验 contract 和统计张量。恢复没有该字段的旧 checkpoint 时，会明确告警并将
+旧 bin 回报归零、历史分布重置为有效 bin 上均匀分布；网络、优化器状态和迭代/LR进度继续恢复。
+因此恢复旧权重不是从零开始训练，也不会延续旧的片尾采样偏置。为比较采样算法效果，建议新建训练实验：
+
+```bash
+bash scripts/training/train_khan_server.sh \
+  --num-envs 4096 --run-name khan_lafan1_sampler_v2
+```
+
+本次全量回归为 **234 passed、1 skipped**（一项旧的观测一致性测试在短rollout发生reset时主动跳过）；另完成8环境50步的正式网络和batch训练短测，
+40次WM、4次actor、80次critic更新及模型/优化器/新采样统计恢复均通过。
+该12GB本地短测显式启用了激活重计算，正式训练入口仍默认关闭；配置与结果保存在
+`logs/khan_sampler_v2_smoke/summary.json`。50步时replay不足2048行，尚未触发独立的online NSE8评估，
+因此控制台该字段显示缺省 `nan`；实际训练损失、参数和已写出的TensorBoard标量均有限。
+短测用于验证实现及更新链路，不证明长期训练回报或benchmark已经改善。

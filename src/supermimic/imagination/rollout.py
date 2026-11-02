@@ -77,6 +77,11 @@ def imagine(
 ) -> ImagRollout:
     device = start.state.device
     n = start.state.shape[0]
+    if horizon < 1:
+        raise ValueError("imagination horizon must be positive")
+    last = lib.last_frame_of(start.frame)
+    if bool((start.frame + horizon > last).any()):
+        raise ValueError("an imagined start must have a full reference horizon within its clip")
     q0 = lib.default_joint_pos
     layout = getattr(policy.cfg, "observation_layout", "supermimic")
     if future_frames is None:
@@ -141,10 +146,9 @@ def imagine(
     states = [s]
     actions, rewards = [], []
     dhats, survivals, frames = [torch.zeros(n, device=device)], [c], [frame]
-    # All target frames of the rollout are known up front (frame + t, clamped at the clip end):
-    # gather / FK the references for every step in one batched call.
-    last = lib.last_frame_of(frame)
-    frames_all = torch.minimum(frame[None, :] + torch.arange(horizon + 1, device=device)[:, None], last[None, :])  # (H+1, n)
+    # Starts have H real reference transitions. Future goal windows retain
+    # their independent last-frame padding, including at the bootstrap state.
+    frames_all = frame[None, :] + torch.arange(horizon + 1, device=device)[:, None]  # (H+1, n)
     ref_all = reference_at(lib, frames_all.reshape(-1))
 
     def ref_at(t):

@@ -232,7 +232,8 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(n
     state[:, :3], state[:, 3:7] = lib._ref[:2, :3], lib._ref[:2, 3:7]
     state[:, 7:34] = lib.default_joint_pos
     history = state.repeat(5, 1, 1)
-    start = StartBatch(state, torch.zeros(2, 31), torch.tensor([0, 11]), torch.zeros(2, 27),
+    # H=2 can end exactly on frame 11; the K=5 goal still exercises padding.
+    start = StartBatch(state, torch.zeros(2, 31), torch.tensor([0, 9]), torch.zeros(2, 27),
                        history, torch.zeros(5, 2, 27),
                        history_valid=torch.tensor([[False, False], [False, False],
                                                    [True, True], [True, True], [True, True]]))

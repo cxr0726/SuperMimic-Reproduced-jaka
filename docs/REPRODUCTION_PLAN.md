@@ -230,11 +230,13 @@ uv run list-envs                                 # 应列出 Mjlab-Tracking-Flat
 - 理由：论文 2 卡学习率 × √2 暗示有效批翻倍，即每卡各自采集。
 
 **D14（U14）基于回报的重置采样细节。**
+- **2026-11-02 更新**：下面保留最初复现决策供追溯；当前实现已改为起始 bin 更新、正常截断的平均奖励续值、回报 EMA 0.2、历史 EMA 0.001、初始 G=0。原方案接受片尾低分的取舍已被取消。当前公式、参考实现差异及恢复训练规则见 `docs/KHAN_SERVER_TRAINING.md` 的“起始 bin 采样器”一节。
 - 决定：每条 clip 的时间线按 1 s 切 bin，全库 bin 全局编号。G_max 按论文取**单一常量** = 可达到的最大折扣回报 = 0.1 / (1 − γ) = 10。每回合结束时对回合内每一步反向计算折扣回报-to-go R_t，按步所在 bin 做 EMA 更新 G_b（α = 0.05，初值 G_max）。**截断处理**：若回合因 10 s 超时结束（D15），回报-to-go 用 critic 自举 R_T = V_ψ(s_T, g_T, ξ, e_root)（critic 输入在仿真状态上同样可得），避免临近超时的步被系统性低估为"难"；若回合因 clip 结束而止，不自举（参考真的结束了），并接受末尾 bin 的 G_b 天然偏低。混合：50% 均匀、40% softmax(−25 G_b/G_max)、10% ∝ 该 bin 的历史 softmax 权重（EMA α = 0.01）。bin 内起帧均匀。重置时加 mjlab 默认姿态噪声（关节 ±0.1 rad，根位姿 xy ±0.05 m、z ±0.01 m、roll/pitch ±0.1、yaw ±0.2，`mjlab/tasks/tracking/tracking_env_cfg.py:144-153`）。
 - 备选：不加重置噪声（配置 `reset_noise=False`）；按 bin 剩余步数归一化（配置 `gmax_mode="per_bin"`）；不自举、只用剩余步数 ≥ 100 的步更新 G_b（配置 `truncation="drop"`）。
 - 验证：`test_reset_sampler`：难 bin（低 G_b）被采到的频率显著高于均匀；超时前 1 s 内的 bin 不应因截断被标为难。
 
 **D15（U15, U19, U20）回合长度与 clip 末尾。**
+- **2026-11-02 更新**：下面的想象末帧延长方案已被替换：当前只选择满足 `frame + H <= clip_last` 的策略想象起点，并在 rollout 入口再次校验；K 帧未来 goal 仍可在真实末帧 padding。真实采集的时间截断不要求想象在该处停止，只要参考长度足够。
 - 决定：仿真回合在 clip 末尾以 **timeout**（非终止）结束，另设最大长度 10 s timeout；不做 mjlab 的"到末尾后 teleport 到新 clip"（`mjlab/tasks/tracking/mdp/commands.py:421-423`）。replay buffer 记录 episode_start 标志，k 步窗口与想象起点不跨越回合边界。想象中若超过 clip 末尾，目标保持最后一帧，继续滚动与计奖励。评测回合 = 整条 clip（无 10 s 上限）。
 - 理由：teleport 会在 buffer 中制造不可建模的跳变；想象中保持末帧最简单且动力学仍有效。
 - 备选：想象超末尾处 ĉ 置零（配置 `imag_clip_end="mask"`）。

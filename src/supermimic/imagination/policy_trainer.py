@@ -63,7 +63,10 @@ class PolicyTrainer:
 
     def update(self, buffer: ReplayBuffer, xi_norm_fn=None) -> dict[str, float]:
         cfg = self.cfg
-        start = buffer.sample_starts(cfg.batch_size, cfg.history)
+        start = buffer.sample_starts(
+            cfg.batch_size, cfg.history, horizon=cfg.horizon,
+            clip_last=self.lib.clip_last,
+        )
         xi_norm = self.wm.spec.normalize_xi(start.xi)
 
         # ---- actor: BPTT through the frozen world model ------------------------------------

@@ -131,6 +131,11 @@ the formal server command leaves it off. The linked observation document separat
 current validation from earlier noisy-goal and 287-input critic versions, and
 records the warnings and validation limits.
 
+Reset sampling now updates episode start bins with mean-reward continuation at
+normal cutoffs, zero initial scores, return/history EMA weights 0.2/0.001 and
+strict full-H reference availability. See the sampler comparison and checkpoint
+migration notes in [`docs/KHAN_SERVER_TRAINING.md`](docs/KHAN_SERVER_TRAINING.md#起始-bin-采样器2026-11-02).
+
 For server training, use
 `bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_clean_goal`.
 See [`docs/KHAN_SERVER_TRAINING.md`](docs/KHAN_SERVER_TRAINING.md) for deployment,

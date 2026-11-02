@@ -138,11 +138,35 @@ class ReplayBuffer:
         )
 
     @torch.no_grad()
-    def sample_starts(self, n: int, hist: int) -> StartBatch:
+    def sample_starts(
+        self, n: int, hist: int, *, horizon: int | None = None,
+        clip_last: torch.Tensor | None = None,
+    ) -> StartBatch:
+        """Sample logged states, optionally requiring a full reference horizon.
+
+        ``clip_last[c]`` is the inclusive global final frame of clip ``c``.
+        The stored clip IDs avoid a large per-reference-frame lookup table.
+        Eligibility concerns reference
+        availability, not future replay rows: imagination may continue beyond
+        a real collection timeout while the reference still has enough frames.
+        """
+        if (horizon is None) != (clip_last is None):
+            raise ValueError("horizon and clip_last must be provided together")
+        if horizon is not None and horizon < 1:
+            raise ValueError("imagination horizon must be positive")
+        if clip_last is not None and (
+            clip_last.ndim != 1 or clip_last.numel() == 0
+            or clip_last.device != self.frame.device
+        ):
+            raise ValueError("clip_last must be a nonempty vector on the replay device")
         mask = self.valid & ~self.terminal
         t_idx = torch.arange(self.T, device=self.device)[None, :]
         dist_to_ptr = (self.ptr[:, None] - t_idx - 1) % self.T
         mask &= dist_to_ptr < self.T - hist - 1  # keep history rows from being overwritten underneath
+        if horizon is not None:
+            mask &= self.frame + horizon <= clip_last[self.clip]
+            if not bool(mask.any()):
+                raise RuntimeError("replay buffer has no sampleable starts with a full reference horizon and valid history")
         e, t = self._sample_from_mask(mask, n)
         offs = torch.arange(hist, device=self.device) - (hist - 1)  # -(hist-1) .. 0
         tt = (t[None, :] + offs[:, None]) % self.T  # (hist, n)

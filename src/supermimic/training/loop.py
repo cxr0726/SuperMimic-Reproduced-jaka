@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from dataclasses import asdict
 from pathlib import Path
 
@@ -29,6 +30,66 @@ from supermimic.training.schedule import cosine_lr
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.wm_trainer import WorldModelTrainer
 from supermimic.world_model.world_model import WorldModel
+
+
+def load_sampler_state(command, checkpoint: dict) -> bool:
+    """Restore comparable curriculum statistics, or reset pre-v2 estimates.
+
+    Legacy checkpoints estimated returns for every visited bin without normal
+    clip-end continuation. Those estimates must not seed the new start-bin
+    curriculum. Model/optimizer state and schedule restoration are independent.
+    """
+    if "sampler_contract" not in checkpoint:
+        command.reset_sampler_statistics()
+        warnings.warn(
+            "Legacy checkpoint has no sampler_contract; reset sampler statistics "
+            "are reinitialized for the new algorithm (bin returns zero, history "
+            "uniform). Model/optimizer states and the training iteration are retained.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return False
+
+    saved_contract = checkpoint["sampler_contract"]
+    if not isinstance(saved_contract, dict) or saved_contract != command.sampler_contract:
+        raise ValueError(
+            "Checkpoint sampler_contract differs from the current reset sampler "
+            "algorithm, coefficients, or motion-bin mapping; use matching settings "
+            "and motion data, or start a new run"
+        )
+
+    # Validate both before copying either, so a malformed checkpoint cannot leave
+    # the command with a partially restored curriculum.
+    statistics = {}
+    for name in ("bin_return", "bin_memory"):
+        value = checkpoint.get(name)
+        target = getattr(command, name)
+        if not isinstance(value, torch.Tensor) or not value.is_floating_point():
+            raise ValueError(f"Checkpoint sampler {name} must be a floating-point tensor")
+        if value.shape != target.shape:
+            raise ValueError(
+                f"Checkpoint sampler {name} shape {tuple(value.shape)} differs from "
+                f"the current motion bins {tuple(target.shape)}"
+            )
+        if not torch.isfinite(value).all():
+            raise ValueError(f"Checkpoint sampler {name} contains nonfinite values")
+        converted = value.to(device=target.device, dtype=target.dtype)
+        if not torch.isfinite(converted).all():
+            raise ValueError(f"Checkpoint sampler {name} becomes nonfinite in the runtime dtype")
+        statistics[name] = converted
+    memory = statistics["bin_memory"]
+    if (memory < 0).any() or not torch.isclose(
+        memory.double().sum(), memory.new_tensor(1.0, dtype=torch.float64),
+        rtol=1e-5, atol=1e-5,
+    ):
+        raise ValueError("Checkpoint sampler bin_memory must be a nonnegative probability distribution")
+    sampleable = getattr(command, "sampleable_bins", None)
+    if sampleable is not None and (memory[~sampleable.to(memory.device)] > 0).any():
+        raise ValueError("Checkpoint sampler bin_memory assigns probability to bins with no valid reset frame")
+    with torch.no_grad():
+        command.bin_return.copy_(statistics["bin_return"])
+        command.bin_memory.copy_(memory)
+    return True
 
 
 class Trainer:
@@ -131,6 +192,7 @@ class Trainer:
                 "critic_opt": self.policy_trainer.critic_opt.state_dict(),
                 "bin_return": self.command.bin_return,
                 "bin_memory": self.command.bin_memory,
+                "sampler_contract": self.command.sampler_contract,
                 "config": asdict(self.cfg),
                 "robot_contract": robot_contract(self.cfg.robot, self.cfg.env.observation_layout),
             },
@@ -169,8 +231,7 @@ class Trainer:
         self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
         self.policy_trainer.opt.load_state_dict(ck["policy_opt"])
         self.policy_trainer.critic_opt.load_state_dict(ck["critic_opt"])
-        self.command.bin_return.copy_(ck["bin_return"])
-        self.command.bin_memory.copy_(ck["bin_memory"])
+        load_sampler_state(self.command, ck)
         self.iteration = ck["iteration"]
         self.start_iteration = self.iteration
         self.num_updates = ck["num_updates"]
