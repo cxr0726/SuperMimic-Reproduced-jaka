@@ -54,7 +54,10 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
     assert khan.terminations["root_height"].params["threshold"] == 0.25
     assert khan.terminations["root_tilt"].params["threshold"] == 0.8
     assert khan.terminations["time_out"].time_out and khan.terminations["clip_end"].time_out
-    for name in khan.events:
+    assert set(khan.events) - set(g1.events) == (
+        {"actuator_gains", "ankle_armature", "waist_mass"} if randomized else set()
+    )
+    for name in g1.events:
         a, b = asdict(khan.events[name]), asdict(g1.events[name])
         # The event operation is identical; only the selected body/geom differs.
         asset_a = a["params"].pop("asset_cfg")
@@ -65,7 +68,11 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
         assert asset_a == asset_b
         assert a == b
     if randomized:
-        assert tuple(khan.events) == ("base_com", "encoder_bias", "foot_friction")
+        assert tuple(g1.events) == ("base_com", "encoder_bias", "foot_friction")
+        assert tuple(khan.events) == (
+            "base_com", "encoder_bias", "foot_friction",
+            "actuator_gains", "ankle_armature", "waist_mass",
+        )
         assert khan.events["base_com"].mode == "startup"
         assert khan.events["base_com"].params["ranges"] == {
             0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05)
@@ -145,7 +152,7 @@ def test_robot_bindings_and_g1_compatibility_defaults():
     assert cfg.events["foot_friction"].params["asset_cfg"].geom_names == khan.foot_geom_regex
     assert cfg.recorders["replay"].params == {
         "capacity": 1000, "foot_geom_regex": khan.foot_geom_regex,
-        "com_body_name": khan.com_body,
+        "com_body_name": khan.com_body, "context_layout": "khan_dr_v1",
     }
     model = khan.load_model()
     assert all(name in [model.body(i).name for i in range(model.nbody)] for name in khan.tracked_bodies)

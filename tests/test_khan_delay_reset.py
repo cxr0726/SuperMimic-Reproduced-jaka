@@ -93,14 +93,14 @@ def test_explicit_reset_offset_and_implicit_world_model_contract():
     cfg = _cfg(reset_root_z_offset=0.0)
     assert cfg.commands["motion"].reset_root_z_offset == 0.0
     contract = robot_contract("khan_mini")
-    assert contract["version"] == 5
+    assert contract["version"] == 6
     schema = contract["simulation_schema"]
     assert schema["actuator_delay"] and schema["actuator_delay_enabled_in_training"]
     assert schema["actuator_delay_max_ms"] == 20.0
     assert schema["reset_root_z_offset"] == 0.05
     assert schema["reference_height_offset"] == 0.0
-    assert schema["xi_dim"] == 31 and schema["world_model_input_dim"] == 125
-    assert not schema["world_model_delay_queue"] and not schema["delay_in_xi"]
+    assert schema["xi_dim"] == 91 and schema["world_model_input_dim"] == 185
+    assert not schema["world_model_delay_queue"] and schema["delay_in_xi"]
     nominal = robot_contract("khan_mini", env_config={"domain_randomization": False})
     assert not nominal["simulation_schema"]["actuator_delay_enabled_in_training"]
     assert nominal["simulation_schema"]["reset_root_z_offset"] == 0.05
@@ -213,17 +213,16 @@ def test_both_reset_paths_lift_only_actual_root_and_keep_xi_unchanged(delayed_kh
         ):
             torch.testing.assert_close(actual, original, rtol=0, atol=0)
 
-        # The new stochastic hidden queue is intentionally fitted implicitly:
-        # xi remains friction + 27 encoder biases + waist COM offset, with no lag.
+        # The queue remains implicit, but xi now includes its held lag parameter.
         xi = env.recorder_manager.get_term("replay").ctx.read()
-        assert xi.shape == (8, 31)
-        spec = StateSpec(StateSpecCfg(), device=env.device, num_joints=27)
+        assert xi.shape == (8, 91)
+        spec = StateSpec(StateSpecCfg(context_layout="khan_dr_v1"), device=env.device, num_joints=27)
         assert state_after.shape == (8, spec.state_dim) == (8, 67)
         dynamics = DynamicsMLP(
             feat_dim=spec.feat_dim, act_dim=27, xi_dim=spec.xi_dim,
             hidden=(8,), out_dim=spec.delta_dim,
         ).to(env.device)
-        assert dynamics.mlp.net[0].in_features == 125
+        assert dynamics.mlp.net[0].in_features == 185
         assert dynamics(spec.canonical(state_after), torch.zeros(8, 27, device=env.device),
                         spec.normalize_xi(xi)).shape == (8, 66)
     finally:

@@ -33,7 +33,8 @@ class ReplayRecorder(RecorderTerm):
         super().__init__(cfg, env)
         p = cfg.params
         self.state_io = StateIO(env)
-        self.ctx = SimContext(env, p["foot_geom_regex"], p.get("com_body_name", "torso_link"))
+        self.ctx = SimContext(env, p["foot_geom_regex"], p.get("com_body_name", "torso_link"),
+                              context_layout=p.get("context_layout", "base"))
         self.command_name = p.get("command_name", "motion")
         self.action_name = p.get("action_name", "joint_pos")
         n = env.num_envs

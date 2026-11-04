@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 
 import torch
 
+from supermimic.sim_context import ContextKind, SimContextLayout
+
 from supermimic.kinematics.rotations import (
     heading_quat,
     quat_apply,
@@ -58,7 +60,9 @@ class StateSpecCfg:
     # Input feature scales for [root_z, rot6d, lin_vel_h, ang_vel_b, joint_pos, joint_vel] (divide by these).
     in_scale: tuple[float, ...] = (1.0, 1.0, 1.0, 2.0, 1.0, 5.0)
     explicit_integration: bool = True
-    # xi normalisation: (offset, scale) for friction, encoder bias, com offset.
+    # Training resolves the robot's layout; base preserves legacy standalone models.
+    context_layout: ContextKind = "base"
+    # Default vectors expand through the selected context layout.
     xi_offset: tuple[float, ...] = field(default_factory=lambda: DEFAULT_XI_OFFSET)
     xi_scale: tuple[float, ...] = field(default_factory=lambda: DEFAULT_XI_SCALE)
 
@@ -74,7 +78,8 @@ class StateSpec:
         self.nv = 6 + self.num_joints
         self.state_dim = self.feat_dim = self.nq + self.nv
         self.delta_dim = 12 + 2 * self.num_joints
-        self.xi_dim = self.num_joints + 4
+        self.context = SimContextLayout(self.num_joints, cfg.context_layout)
+        self.xi_dim = self.context.dim
         nj = self.num_joints
         rep = lambda scales, sizes: torch.cat([torch.full((n,), float(s)) for s, n in zip(scales, sizes)])
         self.err_scale = rep(cfg.err_scale, (3, 3, 3, 3, nj, nj)).to(device=device, dtype=dtype)
@@ -82,9 +87,9 @@ class StateSpec:
         self.in_scale = rep(cfg.in_scale, (1, 6, 3, 3, nj, nj)).to(device=device, dtype=dtype)
         # Expand the existing per-quantity defaults to this robot's joint count.
         # An explicitly customised vector must already have the correct width.
-        offset = ((0.75,) + (0.0,) * nj + (0.0,) * 3
+        offset = (self.context.offset
                   if cfg.xi_offset == DEFAULT_XI_OFFSET else cfg.xi_offset)
-        scale = ((0.45,) + (0.01,) * nj + (0.05,) * 3
+        scale = (self.context.scale
                  if cfg.xi_scale == DEFAULT_XI_SCALE else cfg.xi_scale)
         if len(offset) != self.xi_dim or len(scale) != self.xi_dim:
             raise ValueError(f"xi normalisation needs {self.xi_dim} values for {nj} joints")

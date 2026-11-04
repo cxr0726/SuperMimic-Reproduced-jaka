@@ -158,7 +158,9 @@ class Trainer:
         heads = AnalyticHeads(fk, robot_spec.tracked_bodies, robot_spec.anchor_body, robot_spec.root_body, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
         self.wm = WorldModel(cfg.world_model, heads, self.device)
         self.policy = Policy(cfg.policy).to(self.device)
-        self.critic = Critic(cfg.critic, pcfg=cfg.policy).to(self.device)
+        if self.buffer.xi.shape[-1] != self.wm.spec.xi_dim:
+            raise ValueError("Simulator replay and world model context layouts differ")
+        self.critic = Critic(cfg.critic, pcfg=cfg.policy, xi_dim=self.wm.spec.xi_dim).to(self.device)
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
         self.wm_trainer = WorldModelTrainer(self.wm, self.lib, cfg.wm_trainer)
@@ -166,6 +168,8 @@ class Trainer:
         n_params = lambda m: sum(p.numel() for p in m.parameters())
         if self.is_main:
             print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
+            print(f"[INFO] sim context: {self.wm.spec.context.kind}, xi={self.wm.spec.xi_dim}, "
+                  f"fields={self.wm.spec.context.sizes}; delay queue remains implicit")
 
         # Episode statistics of the training env (paper's "training return").
         self.ep_reward_sum = torch.zeros(env.num_envs, device=self.device)

@@ -218,14 +218,14 @@
     "Left_hip_roll_joint": 0.03,
     "Left_hip_yaw_joint": 0.03,
     "Left_knee_joint": 0.03,
-    "Left_ankle_pitch_joint": 0.3,
-    "Left_ankle_roll_joint": 0.016,
+    "Left_ankle_pitch_joint": 0.069,
+    "Left_ankle_roll_joint": 0.0066,
     "Right_hip_pitch_joint": 0.03,
     "Right_hip_roll_joint": 0.03,
     "Right_hip_yaw_joint": 0.03,
     "Right_knee_joint": 0.03,
-    "Right_ankle_pitch_joint": 0.3,
-    "Right_ankle_roll_joint": 0.016,
+    "Right_ankle_pitch_joint": 0.069,
+    "Right_ankle_roll_joint": 0.0066,
     "waist_yaw_joint": 0.03,
     "Left_shoulder_pitch_joint": 0.016,
     "Left_shoulder_roll_joint": 0.016,
@@ -512,8 +512,20 @@
         "Left_ankle_pitch_joint": 0.016,
         "Right_ankle_pitch_joint": 0.016
       },
-      "effective_value": 0.3,
-      "source": "user-specified ankle pitch armature"
+      "effective_value": 0.069,
+      "source": "user-requested zero-pose PR diagonal approximation of two AB output-shaft armatures of 0.016 kg m^2"
+    },
+    "ankle_roll_armature": {
+      "joint_names": [
+        "Left_ankle_roll_joint",
+        "Right_ankle_roll_joint"
+      ],
+      "source_config_values": {
+        "Left_ankle_roll_joint": 0.016,
+        "Right_ankle_roll_joint": 0.016
+      },
+      "effective_value": 0.0066,
+      "source": "user-requested zero-pose PR diagonal approximation of two AB output-shaft armatures of 0.016 kg m^2"
     },
     "nonfoot_sliding_friction": {
       "value": 1.0,

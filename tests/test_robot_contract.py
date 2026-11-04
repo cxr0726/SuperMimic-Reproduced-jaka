@@ -18,6 +18,18 @@ def test_unchanged_contract_is_accepted(robot):
     validate_robot_contract({"robot_contract": robot_contract(robot)}, robot)
 
 
+def test_legacy_31_dim_khan_context_cannot_resume_as_extended_dynamics():
+    contract = deepcopy(robot_contract("khan_mini"))
+    assert contract["simulation_schema"]["xi_dim"] == 91
+    assert contract["observation_schema"]["critic_input_dim"] == 605
+    contract["version"] = 5
+    contract["simulation_schema"]["xi_dim"] = 31
+    contract["simulation_schema"]["world_model_input_dim"] = 125
+    contract["simulation_schema"]["delay_in_xi"] = False
+    with pytest.raises(ValueError, match="simulation_schema"):
+        validate_robot_contract({"robot_contract": contract}, "khan_mini")
+
+
 @pytest.mark.parametrize("field,value", [
     ("anchor_body", "waist_yaw_Link"), ("com_body", "base_link"),
     ("tracked_bodies", ["base_link"]), ("model_sha256", "different"),
@@ -38,7 +50,7 @@ def test_changed_actor_scale_is_rejected_even_when_observation_widths_match():
 
 def test_noisy_reference_goal_contract_is_rejected_even_when_dimensions_match():
     contract = deepcopy(robot_contract("khan_mini"))
-    assert contract["version"] == 5
+    assert contract["version"] == 6
     assert contract["observation_schema"]["actor_goal_noise"] is False
     assert contract["observation_schema"]["noise_half_width_before_scale"]["goal_root_z"] == 0
     assert contract["observation_schema"]["noise_half_width_before_scale"]["goal_joint_pos"] == 0

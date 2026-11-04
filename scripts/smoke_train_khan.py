@@ -87,7 +87,13 @@ def verify_production_config(cfg: TrainConfig) -> dict:
     formal = TrainConfig()
     resolve_training_observations(cfg)
     resolve_training_observations(formal)
-    for name in ("world_model", "wm_trainer", "critic"):
+    wm = asdict(cfg.world_model)
+    original_wm = asdict(formal.world_model)
+    # Context is robot-specific; hidden networks and all optimizer settings match.
+    wm["state_spec"].pop("context_layout")
+    original_wm["state_spec"].pop("context_layout")
+    assert wm == original_wm, "world_model optimization parameters changed"
+    for name in ("wm_trainer", "critic"):
         assert asdict(getattr(cfg, name)) == asdict(getattr(formal, name)), name
     trainer = asdict(cfg.policy_trainer)
     original_trainer = asdict(formal.policy_trainer)

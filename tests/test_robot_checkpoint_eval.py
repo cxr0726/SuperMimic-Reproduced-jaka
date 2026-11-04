@@ -110,7 +110,7 @@ def test_khan_isaac_policy_and_critic_keep_production_hidden_layers():
     cfg = PolicyCfg(num_joints=27, goal_dim=155, history=5, future_frames=5,
                     observation_layout="isaac_khan")
     policy = Policy(cfg)
-    critic = Critic(CriticCfg(), pcfg=cfg)
+    critic = Critic(CriticCfg(), pcfg=cfg, xi_dim=91)
     encoder_layers = [layer for layer in policy.encoders["motion"].mlp.net
                       if isinstance(layer, torch.nn.Linear)]
     decoder_layers = [layer for layer in policy.decoder.mlp.net
@@ -123,7 +123,7 @@ def test_khan_isaac_policy_and_critic_keep_production_hidden_layers():
         (497, 2048), (2048, 1024), (1024, 512), (512, 256), (256, 27)
     ]
     assert [(layer.in_features, layer.out_features) for layer in critic_layers] == [
-        (545, 256), (256, 128), (128, 1)
+        (605, 256), (256, 128), (128, 1)
     ]
     for scale in (policy.encoders["motion"].scale, policy.decoder.scale):
         assert torch.equal(scale, torch.ones_like(scale)), "Isaac values must not be scaled twice"
@@ -134,7 +134,7 @@ def test_khan_isaac_policy_and_critic_keep_production_hidden_layers():
     observations, goals = torch.randn(2, 465), torch.randn(2, 155)
     action = policy(observations, goals)
     critic_goals = torch.cat((goals, torch.randn(2, 30), torch.randn(2, 180)), dim=-1)
-    value = critic(torch.randn(2, 67), critic_goals, torch.randn(2, 31),
+    value = critic(torch.randn(2, 67), critic_goals, torch.randn(2, 91),
                    torch.randn(2, 4), torch.randn(2, 78))
     assert action.shape == (2, 27) and value.shape == (2,)
     loss = action.square().mean() + value.square().mean()

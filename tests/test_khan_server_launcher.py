@@ -60,7 +60,7 @@ def test_dry_run_selects_isaac_observations_without_overriding_original_optimiza
     cfg = parse_config(result.stdout)
     assert cfg.robot == "khan_mini" and cfg.env.num_envs == num_envs
     assert cfg.data.npz_dir == root / "data/npz/khan_mini/lafan1"
-    assert cfg.run_name == "khan_lafan1_delay_convex" and cfg.log_root == root / "logs"
+    assert cfg.run_name == "khan_lafan1_dr_v6" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is cfg.data.library is None
     baseline = TrainConfig(robot="khan_mini")
     resolve_training_observations(cfg)
@@ -135,7 +135,7 @@ def test_missing_data_and_existing_checkpoint_rejected(project):
     empty.mkdir()
     result = run_launcher(project, "--dry-run", "--data-dir", str(empty))
     assert result.returncode != 0 and "No converted Khan NPZ" in result.stderr
-    run = root / "logs/khan_lafan1_delay_convex"
+    run = root / "logs/khan_lafan1_dr_v6"
     run.mkdir(parents=True)
     (run / "ckpt_latest.pt").touch()
     result = run_launcher(project, "--dry-run")

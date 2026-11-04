@@ -188,8 +188,13 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
     original_waist_velocity = profile["velocity_limit"]["waist_yaw_joint"]
     profile["velocity_limit"]["waist_yaw_joint"] = profile["urdf_limits"]["waist_yaw_joint"]["velocity"]
     ankle_pitch_names = ("Left_ankle_pitch_joint", "Right_ankle_pitch_joint")
+    ankle_roll_names = ("Left_ankle_roll_joint", "Right_ankle_roll_joint")
     original_ankle_pitch_armature = {name: profile["armature"][name] for name in ankle_pitch_names}
-    profile["armature"].update(dict.fromkeys(ankle_pitch_names, 0.3))
+    original_ankle_roll_armature = {name: profile["armature"][name] for name in ankle_roll_names}
+    # Local diagonal approximation of J_AB_PR.T @ diag(.016, .016) @ J_AB_PR
+    # at PR=(0, 0), rounded by the user to pitch=.069 and roll=.0066 kg m^2.
+    profile["armature"].update(dict.fromkeys(ankle_pitch_names, 0.069))
+    profile["armature"].update(dict.fromkeys(ankle_roll_names, 0.0066))
     profile["action_scale"] = dict.fromkeys(joint_names, 0.5)
     profile["parameter_overrides"] = {
         "waist_velocity_limit": {
@@ -201,8 +206,14 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
         "ankle_pitch_armature": {
             "joint_names": list(ankle_pitch_names),
             "source_config_values": original_ankle_pitch_armature,
-            "effective_value": 0.3,
-            "source": "user-specified ankle pitch armature",
+            "effective_value": 0.069,
+            "source": "user-requested zero-pose PR diagonal approximation of two AB output-shaft armatures of 0.016 kg m^2",
+        },
+        "ankle_roll_armature": {
+            "joint_names": list(ankle_roll_names),
+            "source_config_values": original_ankle_roll_armature,
+            "effective_value": 0.0066,
+            "source": "user-requested zero-pose PR diagonal approximation of two AB output-shaft armatures of 0.016 kg m^2",
         },
         "nonfoot_sliding_friction": {
             "value": 1.0, "source": "user-requested alignment with mjlab G1 non-foot contacts",

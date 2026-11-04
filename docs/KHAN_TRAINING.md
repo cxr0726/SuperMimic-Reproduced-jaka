@@ -6,12 +6,14 @@
 
 ```bash
 env -u PYTHONPATH uv run sm-train --robot khan_mini \
-  --run-name khan_lafan1_delay_convex
+  --run-name khan_lafan1_dr_v6
 ```
 
 当前配置为 **15个跟踪body、base anchor、独立腰部COM随机化、直接颈部位置/速度奖励**，
-并默认使用 `isaac_khan` 观测：5帧参考、5帧本体历史。当前为Khan contract v5，新增执行器延迟、完整脚凸包、reset高度余量及critic误差特征。
-包括version-4 clean-goal/100k在内的旧Khan检查点均不能直接续训、评估或导出，须使用新run。
+并默认使用 `isaac_khan` 观测：5帧参考、5帧本体历史。当前为 **Khan contract v6**：踝标称armature改为
+pitch=0.069、roll=0.0066，新增Kp/Kd、踝armature、腰部附重随机化，并将这些参数及已有delay编码到ξ91。
+已有执行器延迟、完整脚凸包、reset高度余量、critic误差特征和FK复用保留；这些DR是Khan默认设置，不需要新增CLI开关。
+包括v5和version-4 clean-goal/100k在内的旧Khan检查点均不能直接续训、评估或导出，须使用新run及匹配版本的资产。
 服务器命令、50步验证及同语义恢复见 [KHAN_SERVER_TRAINING.md](KHAN_SERVER_TRAINING.md)。
 
 `--robot` 默认仍为 `g1`。G1默认数据目录是 `data/npz/lafan1`，Khan是
@@ -26,7 +28,7 @@ env -u PYTHONPATH uv run sm-train --robot khan_mini \
   `ref_thirdparty/jaka_code/Textop/USAGE.md` 的实际mini训练命令显式覆盖成 `base_link`；当前按该用法对齐。
 - COM随机化及replay context仍绑定 `waist_yaw_Link`，由独立 `RobotSpec.com_body` 指定，不随anchor改变。
 - 原14个G1对应部位末尾追加 `Neck_pitch_Link`，共15个；该body的位姿和线/角速度进入原body跟踪奖励。
-- 27个关节均保留执行器，动作缩放均为0.5；PD、转子惯量及力矩限制沿用Khan配置。
+- 27个关节均保留执行器，动作缩放均为0.5；标称PD、力矩限制沿用Khan配置，踝armature采用0.069/0.0066并应用下述DR。
 
 | 张量或网络接口 | G1，29关节，原默认 | 当前Khan，27关节 |
 |---|---:|---:|
@@ -38,10 +40,10 @@ env -u PYTHONPATH uv run sm-train --robot khan_mini \
 | 参考窗口 | 未来10帧 | 当前参考帧至t+4，共5帧 |
 | goal | 680；可选anchor后689 | 155 |
 | policy prop输入 | 930 | 465＝未来姿态30＋历史435 |
-| context ξ | 33 | 31 |
+| context ξ | 33 | **91＝原31＋Kp27＋Kd27＋踝armature4＋附重1＋delay1** |
 | tracked bodies | 14 | 15 |
 | decoder输入（含latent32） | 962 | 497 |
-| critic输入 | 788；可选anchor后797 | **545＝原467＋当前跟踪误差78** |
+| critic输入 | 788；可选anchor后797 | **605＝v5的545＋新增context60** |
 
 Khan的goal按项拼接 `[5×root_pos_diff, 5×root_z, 5×joint_pos]`，维度为15+5+135。
 位移在**当前参考base完整姿态**下表达，首帧位移为0；root_z是世界高度，关节角是参考绝对角。
@@ -53,8 +55,8 @@ policy prop顺序为 `[5帧未来anchor姿态, 5帧历史重力, 5帧历史角�
 `isaac_khan` 标识特征布局；155维参考goal已按G1默认方式改为始终不加噪声，
 不受真实/想象的 `obs_noise` 开关影响。prop仍有本体噪声及未来朝向±0.05，
 其中gravity±0.07仍与上游±0.05不同，详见下面链接中的源码核查。
-critic输入为canonical state67＋干净参考command155＋干净未来anchor朝向30＋5帧参考速度/重力180＋context31＋root error4，
-再在原root error4后拼接当前跟踪误差78，共545维。误差依次为参考减实际关节角27、重锚后body位置误差45
+critic输入为canonical state67＋干净参考command155＋干净未来anchor朝向30＋5帧参考速度/重力180＋context91＋root error4，
+再在原root error4后拼接当前跟踪误差78，共605维。误差依次为参考减实际关节角27、重锚后body位置误差45
 （实际root heading系，15个body）、完整root相对旋转rot6d6；这78维干净且scale为1，旋转完全对齐时为单位旋转6D表示而非零向量。
 180维未来参考每帧为qd27、重力3、root系角速度3、heading系线速度3，critic入口分别乘0.2/1/0.5/1。
 保留SuperMimic结构，没有迁移Isaac整套特权观测；是否改善收敛需训练对照。
@@ -66,14 +68,31 @@ critic输入为canonical state67＋干净参考command155＋干净未来anchor�
 
 ## 世界模型输入与scale
 
-动力学MLP输入为 **125维＝canonical state67＋动作27＋标准化context31**，不包含actor的goal、
+动力学MLP输入为 **185维＝canonical state67＋动作27＋标准化context91**，不包含actor的goal、
 prop、观测历史或额外传感器白噪声。67维canonical state依次为root高度1、去yaw姿态6、heading系线速度3、
 root系角速度3、关节绝对位置27、关节速度27；对应输入除数为`1,1,1,2,1,5`，
 即角速度实际乘0.5、关节速度乘0.2，其余乘1。
 
 训练动作使用replay保存的 `a_exec=a+Gaussian(std=0.1)`，即执行器延迟队列之前的归一化命令，在模型入口不再乘机器人动作scale=0.5；
-控制端的0.5用于PD目标映射 `q_target=q_default+0.5*a_exec`。context沿用固定标准化：
-足摩擦`(mu-0.75)/0.45`、27维encoder bias除0.01、3维腰部COM偏移除0.05。
+控制端的0.5用于PD目标映射 `q_target=q_default+0.5*a_exec`。ξ使用固定schema `khan_dr_v1`，
+前31维的顺序和标准化保持原版；新增60维在其后拼接，采用 `(value-center)/scale`：
+
+| 零基切片 | 原始量 | 维度 | center | scale |
+|---|---|---:|---:|---:|
+| `[0:1]` | 足底滑动摩擦 | 1 | 0.75 | 0.45 |
+| `[1:28]` | joint encoder bias，rad | 27 | 0 | 0.01 |
+| `[28:31]` | waist COM offset，m | 3 | 0 | 0.05 |
+| `[31:58]` | 实际Kp / 标称Kp | 27 | 1 | 0.2 |
+| `[58:85]` | 实际Kd / 标称Kd | 27 | 1 | 0.2 |
+| `[85:89]` | 实际踝armature / 标称值 | 4 | 1 | 0.2 |
+| `[89:90]` | waist附加质量，kg | 1 | 0.5 | 2.5 |
+| `[90:91]` | delay物理步数，0～4 | 1 | 2 | 2 |
+
+Kp/Kd按profile的27关节顺序；四踝顺序为左pitch、左roll、右pitch、右roll。
+Kp/Kd从实际MuJoCo `actuator_gainprm/biasprm` 读回，armature和mass从实际模型字段读回，
+delay读取当前执行器缓冲区lag；不依赖可能未同步的Python gain缓存。
+关闭DR时仍使用91维schema：gain/armature倍率为1、附重和delay为0；归一化后mass为−0.2、delay为−1，
+这是区间中心标准化的结果，不代表存在负附重或负延迟。ξ只提供给WM/critic，actor接口仍为155/465。
 物理状态和下一步状态目标直接来自qpos/qvel，不混入actor观测白噪声。
 
 想象时模型接收clean策略动作，沿用原G1不额外重采执行Gaussian的名义rollout；
@@ -131,8 +150,26 @@ root高度/倾斜终止仍作用于 `base_link`，阈值分别为相对参考高
 ## 域随机化、仿真与网络参数
 
 足底摩擦每回合共享采样 `[0.3,1.2]`，encoder bias每关节 `[-0.01,0.01]`；
-startup COM偏移仍加在腰部，x为±0.025 m，y/z为±0.05 m。重置与动作执行噪声保持原配置，
+startup COM偏移仍加在 `waist_yaw_Link` 的body局部坐标中，x为±0.025 m，y/z为±0.05 m，本轮不扩大。
+这不是整机COM直接偏移同样距离。重置与动作执行噪声保持原配置，
 执行噪声std=0.1。非足底摩擦1.0，足底名义摩擦0.6；评估关闭噪声/DR并将足底固定为1.0。
+
+Khan新增的物理DR如下；均相对标称值重新采样，不在上回合数值上累乘/累加，G1默认不变：
+
+| 项目 | 分布 | 生命周期 | ξ字段 |
+|---|---|---|---|
+| 全27关节Kp | 各关节独立U[0.8,1.2]倍率 | 每次reset采样，回合内保持 | Kp factor27 |
+| 全27关节Kd | 各关节独立U[0.8,1.2]倍率，与Kp独立 | 每次reset采样，回合内保持 | Kd factor27 |
+| 四踝PR armature | 各关节独立U[0.8,1.2]倍率 | 每次reset采样，回合内保持 | ankle factor4 |
+| `waist_yaw_Link` 附加质量 | U[−2,3] kg | startup每环境采样，跨reset保持 | mass added1 |
+| actuator delay | 均匀采样0/1/2/3/4物理步 | 每次reset采样，回合内保持 | delay steps1 |
+
+标称踝pitch=0.069、roll=0.0066 kg·m²，随机范围分别为0.0552–0.0828、0.00528–0.00792。
+腰部标称质量7.1277 kg，随机后5.1277–10.1277 kg；采用 `dr.body_mass(operation="add")`，
+表示COM处点质量增减，**body_inertia保持不变**，不代表密度缩放或指定位置负载的完整惯量模型。
+COM偏移和附重共同改变动力学；现有局部COM范围先保留，是否加大应依据实际载荷和辨识误差。
+`domain_randomization=False` 的nominal eval关闭新增gain/armature/mass随机化和已有delay、encoder/COM随机化，
+使用当前标称资产；reset的root高度余量仍按下面规则保留。
 
 Khan默认启用类似MorphMimic的执行器延迟：每个环境、每个融合执行器组在episode reset时
 从0/1/2/3/4个物理步均匀采样，即0/5/10/15/20 ms，一回合保持不变；每5 ms推进目标队列。
@@ -140,7 +177,7 @@ Khan默认启用类似MorphMimic的执行器延迟：每个环境、每个融合
 `domain_randomization=False` 的nominal eval关闭延迟。清零行为保留MorphMimic方式：reset时pending target队列为
 **物理关节目标0**，没有用参考关节角或q_default预填，因此初始延迟子步可能读取零目标。
 
-ξ保持31维，WM动力学输入保持125维，不加入delay参数或历史队列；想象rollout也没有显式延迟队列。
+ξ现为91维，WM动力学输入185维，新增delay参数，但WM和想象rollout仍没有显式历史队列。
 replay的a_exec记录当前带执行噪声命令，不是每个5 ms子步实际取出的历史目标。
 因此这是按用户选择的隐式拟合近似，未显式恢复延迟系统的完整Markov状态；不能认为WM精确模拟了延迟。
 
@@ -188,21 +225,22 @@ env -u PYTHONPATH uv run python scripts/smoke_train_khan.py
 
 新检查点保存 `robot_contract`：root、anchor、COM body、tracked bodies、关节顺序、动作缩放、
 奖励配置，以及Khan `robot.xml` / `profile.json` 的SHA-256。恢复和评估在加载权重前验证这些语义。
-Khan contract格式version=5，记录干净goal、observation layout、未来偏移、拼接顺序、坐标系、prop噪声尺度、critic参考与78维误差扩展，以及延迟/reset/脚凸包语义；
+Khan contract格式version=6，记录干净goal、observation layout、未来偏移、拼接顺序、坐标系、prop噪声尺度、critic参考与78维误差扩展，
+以及延迟/reset/脚凸包、新增物理DR和ξ91的固定字段/顺序/归一化语义；
 G1 contract仍为version=1。profile的 `training_semantics_version=2` 是另一项资产语义标记。
 
 **旧Khan检查点缺少contract或采用旧观测contract都会被拒绝。**
 此前649/870输入与当前155/465输入不同；上轮同为155/465但采用Isaac scale、287维critic，
-或version-3带goal噪声、version-4 clean-goal/467维critic的检查点也不兼容。
+或version-3带goal噪声、version-4 clean-goal/467维critic、version-5 ξ31/545维critic的检查点也不兼容。
 不要通过补字段、关闭anchor或跳过校验强行加载。
 当前配置必须新run；以后仅能恢复相同contract的检查点。历史G1无contract检查点仍按原规则兼容。
 
 ```bash
 env -u PYTHONPATH uv run python scripts/play.py \
-  --ckpt logs/khan_lafan1_delay_convex/ckpt_latest.pt --clips walk1_subject1
+  --ckpt logs/khan_lafan1_dr_v6/ckpt_latest.pt --clips walk1_subject1
 
 env -u PYTHONPATH uv run python scripts/eval_benchmark.py \
-  --ckpt logs/khan_lafan1_delay_convex/ckpt_latest.pt --num-envs 36
+  --ckpt logs/khan_lafan1_dr_v6/ckpt_latest.pt --num-envs 36
 ```
 
 旧策略的36段全库benchmark及隔离运行命令见
@@ -248,7 +286,7 @@ reserved约3.41 GiB，不能据此推断默认关闭重计算或4096环境时的
 上一轮155/465观测、Isaac原scale的版本通过165项全量测试，以及critic287维的8环境50步正式网络/batch训练smoke。
 同样完成40次WM、4次actor、80次critic优化，模型参数与实际TB标量有限，恢复检查通过；
 本机12 GB测试显式开启激活重计算，正式默认仍关闭。命令、日志和一次Warp警告的复验说明见
-[KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。这些历史结果不替代当时467维critic/SuperMimic scale验证，也不代表当前v5验证；
+[KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。这些历史结果不替代当时467维critic/SuperMimic scale验证，也不代表当前v6验证；
 数值一致性和短训练均不构成长片动作稳定性的证明。
 
 上一版SuperMimic scale、467维critic、goal仍加噪的版本通过 **167项全量测试**，并完成8环境50控制步训练smoke：
@@ -263,9 +301,10 @@ goal155、prop465、decoder497、critic467实测匹配，40次WM、4次actor、8
 参数与实际TB标量有限，模型/优化器/采样器清空后恢复通过。本机12 GB测试显式开启激活重计算，
 服务器默认关闭。结果为 `logs/khan_clean_goal_smoke/summary.json`，完整命令和边界见上述观测文档的当前验证段。
 
-## 当前v5验证记录
+## 历史v5验证记录
 
-2026-11-02 当前v5通过 **269项测试、1项跳过**，包括真实CUDA fused actuator延迟、episode固定lag与部分reset，
+本节及下面FK复用的数值来自当时v5的ξ31/WM125/critic545配置，不是当前v6的验证结果。
+2026-11-02 当时v5通过 **269项测试、1项跳过**，包括真实CUDA fused actuator延迟、episode固定lag与部分reset，
 两个reset入口实际root抬升且reference不变、脚凸包/FK一致性、critic误差及末状态梯度、契约拒绝和ONNX数值一致性。
 全量命令为 `.venv/bin/python -m pytest -q`，本机结果保存在 `logs/khan_v5_pytest_20261102.log`。
 
@@ -289,4 +328,72 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MUJOCO_GL=egl TORCHINDUCTOR_COMPILE_THREADS=
 但仍有穿地帧；它不是动态轨迹结果，也不是训练实际采样比例。原NPZ和随后的参考目标未加高。
 报告为 `logs/khan_foot_convex_review/lafan_whole_foot_clearance_reset_lift.json`。
 
-正式训练须使用新run `khan_lafan1_delay_convex`；上述历史测试/旧smoke属于各自冻结配置。
+该次正式训练使用新run `khan_lafan1_delay_convex`；上述测试/旧smoke属于其冻结配置，当前v6应另建run。
+
+## Critic FK复用（2026-11-03）
+
+以下是当时v5/545维critic的实现与性能记录。当前v6继续使用同一复用方法，critic变为605维来自新增ξ60，
+不能将这些历史测试和计时当作v6的实测结果。
+
+InstantTrack的 `mdp.reward` 和 `mdp.critic_features` 分别调用FK；`train.py` 还分别构造末状态bootstrap
+与整段critic拟合输入，没有跨这些调用缓存body。其批量reward和critic拟合输入经过编译，不能据此推断它没有重复FK。
+在常规有critic、无额外demo replay的路径中，H32/B4096共涉及270336个状态的FK，
+与本库优化前的数量相同；编译器可能消除其critic不使用的速度运算。
+两者都会预先构造critic训练输入X，在5 epochs/4 minibatches中复用X，不会每个minibatch重跑FK；
+本轮消除的是reward/anchor与critic特征准备之间的重复FK。
+
+当前Khan的 `ImagStep` 可选返回奖励计算中已有的实际body世界位置/姿态，
+`ImagRollout` 仅在当前想象窗口内缓存这些几何量。critic使用自己对应的当前参考帧重新重锚并构造78维误差，
+不复用reward的误差。这里必须区分时间：本库reward保持 `(s_{t+1}, ref_t)`，
+critic保持 `(s_{t+1}, ref_{t+1})`；InstantTrack本身的reward使用推进后的参考帧，不能直接搬用其索引。
+
+初始状态复用actor anchor已需要的FK；每个后继状态复用该步reward已需要的FK。
+前H个状态的缓存逐项detach，仅末状态保留body姿态到actor的梯度，以计算可微bootstrap。
+这样critic阶段额外的 `(H+1)*B` 状态FK降为0；该次优化没有改变奖励时序、当时545维critic、actor、网络参数或训练超参数。
+G1和未提供几何输出的自定义step保留原6项接口及重新FK路径。
+这次FK优化本身属于计算等价优化、不改变机器人契约；当前v6另外改变了资产和ξ，不能据此直接恢复v5检查点。
+
+新对照测试逐项比较缓存/原FK的状态、奖励、critic误差、value、完整策略目标、bootstrap与策略参数梯度，
+并验证参考帧错位反例、prefix无策略梯度、末帧有梯度、激活重计算/RNG和FK调用次数。
+
+验证记录：完整CUDA回归 **279项通过、1项跳过**（`logs/khan_critic_body_reuse_pytest_gpu_20261103.log`）。
+8环境/50步、全部36段LAFAN的正式网络/batch训练smoke通过，完成40次WM、4次actor、80次critic优化，
+模型/优化器/采样器清空后恢复通过；state67/ξ31/WM125/goal155/prop465/critic545保持。
+结果为 `logs/khan_critic_body_reuse_smoke_20261103/summary.json`，本机12 GB测试仍显式开启激活重计算。
+该次含新图冷编译共295.53秒，不能拿首个50步窗口的it/s作为稳态性能。
+缓存编译图后的同配置smoke耗时18.59秒，训练及恢复检查同样通过，记录在
+`logs/khan_critic_body_reuse_smoke_warm_20261103/summary.json`。
+
+4070 SUPER上H32/B4096的同输入对照，预热后10次交替测量：`_critic_inputs` 平均由20.37 ms降至4.27 ms，
+每次节省16.10 ms，约4.77倍；四类输入的最大差值均为0，比较容差未调整。
+比较前需预热FK/TorchScript并重新生成缓存，避免把冷profiling阶段和融合后的FP32舍入差异混入对照。
+此处只测canonical state和critic误差准备前向，不含想象、网络、反传、优化器或物理仿真，
+也不包含缓存生成/拼接成本，因此不能当作完整训练吞吐的加速倍数。
+报告为 `logs/khan_critic_reuse_20261103/critic_inputs_benchmark.json`。
+
+## 当前v6验证（2026-11-04）
+
+完整回归 `.venv/bin/python -m pytest -q`：**284项通过、1项跳过**，耗时42.43秒。
+跳过的是原有解析观测短rollout测试在发生reset时的保护分支；25条warning包含依赖弃用提示及
+质量独立随机化保留body_inertia的提示。完整记录为 `logs/khan_dr91_pytest_20261104.log`。
+
+新增CUDA测试核对实际MuJoCo gain/bias、dof_armature、body_mass和执行器lag与ξ读回一致，
+覆盖部分reset、连续12次reset不累乘、非踝关节armature不变、startup质量/COM保持，
+以及自动reset前后的replay context边界。DR关闭时，91维context的标称值也单独验证。
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MUJOCO_GL=egl TORCHINDUCTOR_COMPILE_THREADS=1 \
+  .venv/bin/python -u scripts/smoke_train_khan.py \
+  --num-envs 8 --steps 50 --activation-checkpoint --run-name khan_dr91_smoke_recompute
+```
+
+36段LAFAN共396990帧加载成功，实测state67/action27/ξ91/WM185/goal155/prop465/critic605、15个跟踪body。
+正式隐藏层、WM batch2048、policy batch4096、H32、UTD0.4和320k学习率计划不变；
+完成40次WM、4次actor、80次critic更新，三组模型参数与实际TensorBoard标量均有限，
+模型、优化器和采样器清空后恢复检查通过。结果为 `logs/khan_dr91_smoke_recompute/summary.json`。
+包含编译共173.22秒，Torch峰值allocated约2.25 GiB；不代表稳态速度、总设备显存或4096环境需求。
+
+本机12 GB在关闭激活重计算时，8环境和1环境均在首轮policy/critic更新显存不足；
+上述通过的测试显式开启了已有激活重计算，正式服务器入口仍关闭，未缩小网络、训练batch或想象H。
+50步时独立online NSE8因buffer不足2048行尚未计算，控制台显示缺省nan；
+实际TB的WM多步NSE和训练损失均有限。短测验证运行与恢复链路，不证明收敛或实机稳定性。

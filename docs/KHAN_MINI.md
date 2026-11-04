@@ -84,16 +84,59 @@ profile的 `parameter_overrides.waist_collision_box` 记录源尺寸、有效尺
 | 关节组 | 数量 | kp | kd | armature | 力矩限额 Nm | 速度元数据 rad/s |
 |---|---:|---:|---:|---:|---:|---:|
 | 髋、膝 | 8 | 187 | 18.7 | 0.03 | 120 | 11.52 |
-| 踝 pitch | 2 | 100 | 2 | 0.3 | 96 | 14.6 |
-| 踝 roll | 2 | 50 | 0.5 | 0.016 | 96 | 14.6 |
+| 踝 pitch | 2 | 100 | 2 | 0.069 | 96 | 14.6 |
+| 踝 roll | 2 | 50 | 0.5 | 0.0066 | 96 | 14.6 |
 | 肩 pitch/roll | 4 | 102 | 10.2 | 0.016 | 96 | 11.5 |
 | 肩 yaw、肘 | 4 | 40.8 | 4 | 0.01 | 36 | 15.7 |
 | 腕 | 4 | 6.7 | 0.67 | 0.01 | 8 | 12.5 |
 | 腰 yaw | 1 | 187 | 18.7 | 0.03 | 120 | 11.519 |
 | 颈 | 2 | 6.7 | 0.67 | 0.01 | 8 | 8 |
 
-左右踝pitch的armature按用户要求从源配置的0.016改为0.3；踝roll仍为0.016。
-转换器固定应用此覆盖，profile及source.json的 `parameter_overrides.ankle_pitch_armature` 记录源值与有效值。
+当前左右踝的标称armature为 **pitch=0.069、roll=0.0066 kg·m²**。它们由两台AB电机输出轴各
+0.016 kg·m²经过机构Jacobian反射到PR零位后的对角项近似得到：准确零位值约为0.068899和0.006587。
+这是固定对角近似，不包含姿态相关惯量和PR耦合，也不等于完整显式连杆模型的总惯量。
+转换器固定应用覆盖，profile及source.json的 `parameter_overrides.ankle_pitch_armature` 和
+`ankle_roll_armature` 记录源配置值0.016及有效值。XML、profile与来源哈希同步更新。
+
+Khan训练默认对这四个踝armature每回合独立乘U[0.8,1.2]，因此pitch范围为0.0552–0.0828，
+roll范围为0.00528–0.00792 kg·m²；全27关节Kp/Kd也各自独立乘U[0.8,1.2]。
+腰部附重在startup采样−2～3 kg，作为COM处点质量增减，不修改该body的旋转惯量；
+nominal eval关闭这些随机化，使用本表标称值。完整DR、ξ91与checkpoint v6语义见
+[KHAN_TRAINING.md](KHAN_TRAINING.md)。
+
+**历史对照（2026-11-03，pitch=0.3与0.03，roll仍为0.016）：** 用 `khan_lafan1_delay_covex/ckpt_0100000.pt`
+在mixed全部480动作上进行零样本物理参数对照。固定checkpoint、0c6f13d代码、480并行环境、
+seed=0、50 Hz、足摩擦1、reset root+0.05 m；关闭DR、延迟及所有噪声，不重新训练。
+
+| 双侧踝pitch armature | benchmark均值 | 执行步加权 | 失败动作 | 完整播放率 |
+|---|---:|---:|---:|---:|
+| 0.3（原训练值，当时重跑） | 0.943249 | 0.902287 | 0/480 | 100% |
+| 0.03（当时更正值） | 0.941343 | 0.896297 | 0/480 | 100% |
+
+回报接近但不完全相同；这只测旧actor对惯量变化的敏感性，不是0.03重新训练的结果，
+也不代表当前0.069/0.0066配置的结果或实机抖动已消除。完整结果和轨迹保存在
+`logs/khan_ankle_pitch_armature_003/analysis/`。
+
+另用同一轨迹采集工具复跑0.3，仍为0/480失败、均值0.943286/步加权0.902605；
+GPU长时接触轨迹有小幅运行差异。两组完整轨迹中，双侧pitch合并的10--25 Hz角度RMS：
+walk2_subject1为0.091→0.291度，dance1_subject2为0.114→0.367度，
+jumps1_subject2为0.125→0.561度。跳跃的pitch速度RMS为1.683→1.962 rad/s。
+这些是50 Hz仿真采样的频带诊断，不覆盖25 Hz以上振动，也不是实机抖动测量。
+
+当时更改物理资产后，checkpoint guard会拒绝把旧0.3 checkpoint当作0.03训练的模型。
+当前v6也拒绝将这些旧checkpoint直接恢复到新的armature和ξ91网络。
+对照工具先在匹配的冻结版本中严格验证checkpoint，再只对双踝pitch的entity spec和actuator
+配置显式覆盖armature；检查最终CPU/Warp模型，并保留checkpoint与源资产原始hash：
+
+```bash
+.venv/bin/python scripts/analysis/compare_khan_armature.py \
+  --ckpt logs/khan_lafan1_delay_covex/ckpt_0100000.pt \
+  --npz-dir data/npz/khan_mini/mixed --num-envs 480 \
+  --armature 0.03 --out logs/khan_ankle_pitch_armature_003/analysis/recheck_0p03.json
+```
+
+把 `--armature` 改成0.3并使用另一个输出文件即可复现原惯量对照；
+`--trace-clips walk2_subject1 dance1_subject2 jumps1_subject2` 可同时保存指定动作轨迹。
 
 mjlab 1.6 的内建 position servo 不支持 Isaac Lab `velocity_limit_sim` 的硬速度约束；
 这些值保存在 profile 的 `velocity_limit` 中，`velocity_limit_enforced=false`。
@@ -168,7 +211,7 @@ action_cfg = get_khan_mini_action_cfg()  # 全关节 0.5，默认执行噪声 st
 上一轮155/465观测、Isaac原scale、287维critic通过165项全量测试及8环境50步正式网络训练smoke，详见
 [KHAN_ISAAC_OBSERVATIONS.md](KHAN_ISAAC_OBSERVATIONS.md)。
 上一版SuperMimic scale、467维critic、goal仍加噪的版本通过167项全量测试及8环境50步训练smoke；
-这些历史观测改动当时没有重建或修改机器人资产；当前v5另有本文记录的脚部凸包替换。
+这些历史观测改动当时没有重建或修改机器人资产；历史v5另有本文记录的脚部凸包替换，当前v6进一步更新踝armature及训练DR。
 历史version-4干净goal版本通过168项全量测试及8环境50步正式网络/batch训练smoke，
 15个跟踪body与模型接口确认；验证记录同见上述观测文档，不构成长片收敛或接地修复的证明。
 
@@ -231,13 +274,14 @@ env -u PYTHONPATH uv run python scripts/render_khan_collisions.py
 不改变 MJCF 或实际接触配置；淡色外观轮廓仅用于定位，不表示新增碰撞体。
 
 训练已按机器人解析状态、观测、策略、世界模型、FK与replay尺寸。Khan当前默认 `isaac_khan`：
-state=67、5帧参考goal=155、policy prop=465（未来姿态30＋5帧传感器历史435）、action=27、context=31。
-actor本体角速度/关节速度有效scale为0.5/0.2；critic为545维，其中365维是干净参考特征，另增78维当前跟踪误差。
+state=67、5帧参考goal=155、policy prop=465（未来姿态30＋5帧传感器历史435）、action=27、context=91。
+actor本体角速度/关节速度有效scale为0.5/0.2；critic为605维，其中365维是干净参考特征，另有78维当前跟踪误差。
 155维actor参考goal也在真实环境和想象训练中保持干净；prop本体/未来朝向噪声仍保留。
-anchor使用base frame；COM随机化仍显式绑定waist。当前增加0–20 ms执行器延迟随机化及实际机器人reset的5 cm高度余量；
-这些不改变关节PD/惯量、参考轨迹或actor输入维度。nominal eval关闭延迟，但保留同样的reset高度余量。
-Khan version-5 `robot_contract` 保存上述仿真语义、模型/profile SHA、actor尺度及critic扩展schema；
-旧Khan contract包括version-4 clean-goal/100k均不能直接用于当前训练、eval或export，
+anchor使用base frame；COM随机化仍显式绑定waist，范围为body-local x±0.025 m、y/z±0.05 m。
+0–20 ms执行器延迟随机化及实际机器人reset的5 cm高度余量保留；v6的PD/踝armature/附重随机化见上文。
+这些不改变参考轨迹或actor输入维度。nominal eval关闭全部DR，保留同样的reset高度余量和足底摩擦1.0。
+Khan version-6 `robot_contract` 保存上述仿真语义、模型/profile SHA、actor尺度、critic与ξ91 schema；
+旧Khan contract包括version-5和version-4 clean-goal/100k均不能直接用于当前训练、eval或export，
 应使用新run或匹配的历史源码与资产。
 G1的NPZ与检查点不能混用于Khan。已有45-body NPZ无需因本次观测、脚部碰撞或reset调整而重新转换。
 正式参数见 [KHAN_TRAINING.md](KHAN_TRAINING.md)，Isaac观测的公式和差异见

@@ -128,7 +128,7 @@ def test_khan_spaces_observation_reward_history_and_replay(setup_khan):
     assert obs["policy"].shape == (8, 465)
     assert obs["goal"].shape == (8, 155)
     assert env.action_manager.total_action_dim == 27
-    assert io.read().shape == (8, 67) and rec.ctx.read().shape == (8, 31)
+    assert io.read().shape == (8, 67) and rec.ctx.read().shape == (8, 91)
     assert tuple(robot.joint_names) == spec.joint_names
     assert cmd.cfg.body_names == spec.tracked_bodies
     assert tuple(robot.body_names[index] for index in cmd.body_indexes.tolist()) == spec.tracked_bodies
@@ -191,7 +191,7 @@ def test_khan_spaces_observation_reward_history_and_replay(setup_khan):
     window = buf.sample_windows(32, 8)
     assert window.states.shape == (9, 32, 67)
     assert window.a_exec.shape == window.a_clean.shape == (8, 32, 27)
-    assert window.xi.shape == (32, 31)
+    assert window.xi.shape == (32, 91)
     for value in (window.states, window.a_exec, window.a_clean, window.xi, window.reward):
         assert torch.isfinite(value).all()
     assert 0.05 < (window.a_exec - window.a_clean).std() < 0.2
@@ -215,12 +215,12 @@ def test_khan_domain_randomization_and_reset_noise(setup_khan):
         env.reset()
         _refresh(env, cmd)
         before = rec.ctx.read()
-        assert before.shape == (8, 31)
+        assert before.shape == (8, 91)
         assert ((before[:, 0] >= 0.3) & (before[:, 0] <= 1.2)).all()
         assert before[:, 0].std() > 0.01
         assert before[:, 1:28].abs().max() <= 0.010001
         limits = torch.tensor([0.025, 0.05, 0.05], device=env.device)
-        assert (before[:, 28:].abs() <= limits + 1e-6).all()
+        assert (before[:, 28:31].abs() <= limits + 1e-6).all()
         expected_com_id = robot.indexing.body_ids[robot.body_names.index(spec.com_body)]
         assert rec.ctx.com_body_global == int(expected_com_id)
         anchor_id = robot.indexing.body_ids[robot.body_names.index(spec.anchor_body)]
@@ -256,7 +256,7 @@ def test_khan_domain_randomization_and_reset_noise(setup_khan):
         env.reset()
         after = rec.ctx.read()
         assert not torch.equal(before[:, :28], after[:, :28])
-        torch.testing.assert_close(before[:, 28:], after[:, 28:], rtol=0, atol=0)
+        torch.testing.assert_close(before[:, 28:31], after[:, 28:31], rtol=0, atol=0)
     finally:
         cmd.forced_frame.fill_(-1)
 

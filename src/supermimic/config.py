@@ -88,6 +88,9 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
     from supermimic.robots.registry import get_robot_spec, resolve_robot_environment
 
     robot = get_robot_spec(cfg.robot)
+    from supermimic.sim_context import context_kind_for_robot
+
+    cfg.world_model.state_spec.context_layout = context_kind_for_robot(cfg.robot)
     settings = resolve_robot_environment(
         cfg.robot, actuator_delay=cfg.env.actuator_delay,
         actuator_delay_max_ms=cfg.env.actuator_delay_max_ms,

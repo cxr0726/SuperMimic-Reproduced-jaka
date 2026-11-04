@@ -10,6 +10,7 @@ Differences from mjlab's BeyondMimic re-implementation (``mjlab.tasks.tracking``
     tracks the two reference neck joint positions and velocities;
   * terminations: pelvis height / tilt vs reference, no end-effector term, clip-end time-out;
   * events: no push; friction and encoder bias re-sampled per episode; COM at startup;
+    Khan also randomizes PD gains and ankle armature per episode, and waist mass at startup;
   * a ``ReplayRecorder`` streams transitions into a GPU replay buffer.
 """
 
@@ -50,6 +51,7 @@ from supermimic.robots.registry import (
     get_robot_spec,
     resolve_robot_environment,
 )
+from supermimic.sim_context import KHAN_ANKLE_JOINTS
 
 
 class QuietSimulationCfg(SimulationCfg):
@@ -258,6 +260,38 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                 "shared_random": True,
             },
         )
+        if a.robot == "khan_mini":
+            # Sample gains independently for each joint and for Kp / Kd. The
+            # built-in position servo's actual gainprm / biasprm are randomized.
+            events["actuator_gains"] = EventTermCfg(
+                mode="reset",
+                func=dr.pd_gains,
+                params={
+                    "asset_cfg": SceneEntityCfg("robot", actuator_names=(".*",)),
+                    "operation": "scale", "kp_range": (0.8, 1.2), "kd_range": (0.8, 1.2),
+                },
+            )
+            events["ankle_armature"] = EventTermCfg(
+                mode="reset",
+                func=dr.joint_armature,
+                params={
+                    "asset_cfg": SceneEntityCfg(
+                        "robot", joint_names=KHAN_ANKLE_JOINTS, preserve_order=True,
+                    ),
+                    "operation": "scale", "ranges": (0.8, 1.2), "shared_random": False,
+                },
+            )
+            # Add/remove a point payload at the randomized waist COM, retaining
+            # the body's authored rotational inertia. This is not density DR.
+            # Nominal waist mass 7.1277 kg remains positive throughout the range.
+            events["waist_mass"] = EventTermCfg(
+                mode="startup",
+                func=dr.body_mass,
+                params={
+                    "asset_cfg": SceneEntityCfg("robot", body_names=(robot_spec.com_body,)),
+                    "operation": "add", "ranges": (-2.0, 3.0),
+                },
+            )
     else:
         # Evaluation protocol: foot friction fixed at 1.0, no other randomization.
         events["foot_friction"] = EventTermCfg(
@@ -307,7 +341,11 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
 
     recorders = {}
     if a.record_transitions:
-        recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot_spec.foot_geom_regex, "com_body_name": robot_spec.com_body})
+        recorders["replay"] = ReplayRecorderCfg(params={
+            "capacity": a.replay_capacity, "foot_geom_regex": robot_spec.foot_geom_regex,
+            "com_body_name": robot_spec.com_body,
+            "context_layout": "khan_dr_v1" if a.robot == "khan_mini" else "base",
+        })
 
     cfg = ManagerBasedRlEnvCfg(
         scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=a.num_envs, entities={"robot": entity_cfg}),

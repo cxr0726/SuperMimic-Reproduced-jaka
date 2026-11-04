@@ -8,6 +8,7 @@ from dataclasses import asdict
 from supermimic.envs.mdp.rewards import TrackingRewardCfg
 from supermimic.observation_layout import resolve_observation_layout
 from supermimic.robots.registry import RobotName, get_robot_spec, resolve_robot_environment
+from supermimic.sim_context import KHAN_ANKLE_JOINTS, SimContextLayout
 
 
 def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_config: dict | None = None) -> dict:
@@ -30,7 +31,7 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
         contract["model_sha256"] = hashlib.sha256((DEFAULT_ASSET_DIR / "robot.xml").read_bytes()).hexdigest()
         contract["profile_sha256"] = hashlib.sha256((DEFAULT_ASSET_DIR / "profile.json").read_bytes()).hexdigest()
         layout = resolve_observation_layout(robot, observation_layout)
-        contract["version"] = 5
+        contract["version"] = 6
         contract["observation_layout"] = layout
         env_config = env_config or {}
         settings = resolve_robot_environment(
@@ -38,6 +39,7 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
                       ("actuator_delay", "actuator_delay_max_ms", "reset_root_z_offset")
                       if key in env_config},
         )
+        context = SimContextLayout(spec.num_joints, "khan_dr_v1")
         contract["simulation_schema"] = {
             **settings,
             "actuator_delay_enabled_in_training": settings["actuator_delay"] and env_config.get("domain_randomization", True),
@@ -45,8 +47,21 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
             "actuator_delay_physics_dt_s": 0.005,
             "nominal_evaluation_delay": False,
             "delay_initial_pending_target": "zero_physical_target_after_robot_reset",
-            "world_model_delay_queue": False, "delay_in_xi": False,
-            "xi_dim": 31, "world_model_input_dim": 125,
+            "world_model_delay_queue": False, "delay_in_xi": True,
+            "context_layout": context.kind,
+            "xi_dim": context.dim, "world_model_input_dim": spec.state_dim + spec.num_joints + context.dim,
+            "xi_fields": context.sizes,
+            "xi_offset": list(context.offset), "xi_scale": list(context.scale),
+            "xi_readback": "applied_model_fields_in_robot_joint_order",
+            "ankle_armature_joint_order": list(KHAN_ANKLE_JOINTS),
+            "dynamics_randomization": {
+                "enabled": env_config.get("domain_randomization", True),
+                "kp_factor": {"range": [0.8, 1.2], "mode": "reset", "independent_per_joint": True},
+                "kd_factor": {"range": [0.8, 1.2], "mode": "reset", "independent_per_joint": True},
+                "ankle_armature_factor": {"range": [0.8, 1.2], "mode": "reset", "independent_per_joint": True},
+                "torso_mass_delta_kg": {"range": [-2.0, 3.0], "mode": "startup",
+                                        "body": spec.com_body, "inertia": "unchanged_COM_point_mass"},
+            },
             "reset_offset_scope": "actual_robot_only_all_resets_including_nominal_evaluation",
             "reference_height_offset": 0.0,
             "foot_collision": "one_full_CAD_convex_mesh_per_foot",
@@ -54,7 +69,7 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
         if layout == "isaac_khan":
             contract["observation_schema"] = {
                 "future_frames": 5, "history": 5, "goal_dim": 155, "policy_dim": 465,
-                "critic_goal_dim": 365, "critic_input_dim": 545,
+                "critic_goal_dim": 365, "critic_input_dim": 67 + 365 + context.dim + 4 + 78,
                 "critic_tracking_errors": {
                     "order": ["reference_minus_actual_joint_pos", "reanchored_body_position_error_heading",
                               "full_root_relative_rotation_6d"],

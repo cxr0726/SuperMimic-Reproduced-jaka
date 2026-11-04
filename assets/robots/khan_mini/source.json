@@ -70,8 +70,20 @@
         "Left_ankle_pitch_joint": 0.016,
         "Right_ankle_pitch_joint": 0.016
       },
-      "effective_value": 0.3,
-      "source": "user-specified ankle pitch armature"
+      "effective_value": 0.069,
+      "source": "user-requested zero-pose PR diagonal approximation of two AB output-shaft armatures of 0.016 kg m^2"
+    },
+    "ankle_roll_armature": {
+      "joint_names": [
+        "Left_ankle_roll_joint",
+        "Right_ankle_roll_joint"
+      ],
+      "source_config_values": {
+        "Left_ankle_roll_joint": 0.016,
+        "Right_ankle_roll_joint": 0.016
+      },
+      "effective_value": 0.0066,
+      "source": "user-requested zero-pose PR diagonal approximation of two AB output-shaft armatures of 0.016 kg m^2"
     },
     "nonfoot_sliding_friction": {
       "value": 1.0,
@@ -138,8 +150,8 @@
     "contacts": "self-collision masks retained; feet condim=3, other contacts condim=1"
   },
   "output_sha256": {
-    "robot.xml": "a25f2da6aa75dbf9b298a7cf32b7c22e71c8076861fc9eed92cd0b964af0871a",
+    "robot.xml": "0ffc8cad5dce6f95224828b5128c171fcd8ea3773dd94f4e5cb404dabd24d077",
     "source.urdf": "927cf814485ce2e2fea77aed95dd4b858e60763b785693c2f3f4b23f9940be33",
-    "profile.json": "ddc9f1ec6687515f400c22df1756a7d94cbd4fc0bade67275d12be938b99e321"
+    "profile.json": "caf3a8fda4f45a852a2787d65cbfe5be8e2c49c4cd0fb67f459d8f3012a1590f"
   }
 }
