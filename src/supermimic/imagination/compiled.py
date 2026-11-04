@@ -27,10 +27,14 @@ REWARD_TERM_NAMES = (
 
 class ImagStep:
     def __init__(self, wm: WorldModel, default_joint_pos: torch.Tensor,
-                 compile_mode: str | None = None, observation_layout: str = "supermimic"):
+                 compile_mode: str | None = None, observation_layout: str = "supermimic",
+                 return_body_poses: bool = False):
         self.wm = wm
         self.q0 = default_joint_pos
         self.observation_layout = observation_layout
+        # Optional reference-independent FK outputs for the critic. Do not
+        # reuse reward errors: its reference frame can differ from the critic's.
+        self.return_body_poses = return_body_poses
         cfg = wm.heads.reward_cfg
         self.term_names = (REWARD_TERM_NAMES
                            + (("motion_neck_pos",) if cfg.w_neck_pos else ())
@@ -52,7 +56,10 @@ class ImagStep:
         obs_clean = analytic_observation(s_next, a, xi, self.q0, self.observation_layout)
         ai = self.wm.heads.anchor_index
         anchor_pose = torch.cat([bodies["pos"][..., ai, :], bodies["quat"][..., ai, :]], dim=-1)  # (n, 7)
-        return s_next, r, term_vec, logits, obs_clean, anchor_pose
+        result = (s_next, r, term_vec, logits, obs_clean, anchor_pose)
+        if self.return_body_poses:
+            return (*result, bodies["pos"], bodies["quat"])
+        return result
 
     def __call__(self, s, a, a_prev, xi, ref: ReferenceFrame):
         return self._fn(s, a, a_prev, xi, ref.body_pos_w, ref.body_quat_w,

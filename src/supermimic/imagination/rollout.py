@@ -62,6 +62,8 @@ class ImagRollout:
     reward_terms: dict  # mean of each reward term over the rollout (diagnostics)
     critic_goals: torch.Tensor | None = None  # Khan: command155 + orientation30 + velocity/gravity180
     critic_reference: ReferenceFrame | None = None  # Khan current frames, flattened (H+1)*n
+    critic_body_pos: torch.Tensor | None = None  # (H+1, n, tracked bodies, 3), actual world poses
+    critic_body_quat: torch.Tensor | None = None  # (H+1, n, tracked bodies, 4), only final poses retain grad
 
 
 def imagine(
@@ -89,9 +91,12 @@ def imagine(
         future_frames = getattr(policy.cfg, "future_frames", 10)
     if layout == "isaac_khan":
         resolve_observation_sizes(layout, future_frames, start.hist_states.shape[0], anchor_obs)
-    step_fn = step_fn or ImagStep(wm, q0, observation_layout=layout)
+    step_fn = step_fn or ImagStep(wm, q0, observation_layout=layout,
+                                 return_body_poses=layout == "isaac_khan")
     if getattr(step_fn, "observation_layout", layout) != layout:
         raise ValueError("Imagined observation layout differs from the policy")
+    returns_body_poses = getattr(step_fn, "return_body_poses", False)
+    cache_body_poses = layout == "isaac_khan" and returns_body_poses
     term_names = getattr(step_fn, "term_names", REWARD_TERM_NAMES)
     noise_half = observation_noise_half(q0.numel(), device=device, dtype=start.state.dtype,
                                         observation_layout=layout)
@@ -166,6 +171,10 @@ def imagine(
         anchor_pose = torch.cat([b0["pos"][..., ai, :], b0["quat"][..., ai, :]], dim=-1)
     else:
         anchor_pose = None
+    # The initial FK is already needed for actor anchor observations. Store
+    # only actual geometry, never reward-specific reanchoring or ref_t errors.
+    critic_body_pos = [b0["pos"].detach()] if cache_body_poses else None
+    critic_body_quat = [b0["quat"].detach()] if cache_body_poses else None
     goal, future_orientation, critic_goal = make_inputs(frame, ref, anchor_pose)
     goals = [goal]
     critic_goals = [critic_goal] if layout == "isaac_khan" else None
@@ -183,13 +192,23 @@ def imagine(
             # as RuntimeError. Complete recomputation preserves eager compatibility.
             with set_checkpoint_early_stop(False):
                 a = checkpoint(policy, obs_flat, goals[-1], use_reentrant=False, preserve_rng_state=True)
-                s_next, r, term_vec, logits, obs_clean, anchor_pose = checkpoint(
+                step_result = checkpoint(
                     step_fn, s, a, a_prev, start.xi, ref,
                     use_reentrant=False, preserve_rng_state=True,
                 )
         else:
             a = policy(obs_flat, goals[-1])
-            s_next, r, term_vec, logits, obs_clean, anchor_pose = step_fn(s, a, a_prev, start.xi, ref)
+            step_result = step_fn(s, a, a_prev, start.xi, ref)
+        if returns_body_poses:
+            s_next, r, term_vec, logits, obs_clean, anchor_pose, body_pos, body_quat = step_result
+            if cache_body_poses:
+                # Earlier geometry is used only by detached critic fitting. Only
+                # s_H's geometry needs BPTT for V(s_H); do not retain prefix FK graphs.
+                critic_body_pos.append(body_pos if t == horizon - 1 else body_pos.detach())
+                critic_body_quat.append(body_quat if t == horizon - 1 else body_quat.detach())
+        else:
+            # Preserve the six-output custom-step/G1 interface and FK fallback.
+            s_next, r, term_vec, logits, obs_clean, anchor_pose = step_result
         d = torch.sigmoid(logits)
         c = c * (1.0 - d)
         term_sum += term_vec.detach().mean(-1)
@@ -223,4 +242,6 @@ def imagine(
         reward_terms={k: float(v / horizon) for k, v in zip(term_names, term_sum.tolist())},
         critic_goals=torch.stack(critic_goals) if critic_goals is not None else None,
         critic_reference=ref_all if layout == "isaac_khan" else None,
+        critic_body_pos=torch.stack(critic_body_pos) if critic_body_pos is not None else None,
+        critic_body_quat=torch.stack(critic_body_quat) if critic_body_quat is not None else None,
     )

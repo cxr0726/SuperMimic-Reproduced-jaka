@@ -48,7 +48,8 @@ class PolicyTrainer:
         from supermimic.imagination.compiled import ImagStep
 
         self.step_fn = ImagStep(wm, lib.default_joint_pos, compile_mode=cfg.compile,
-                               observation_layout=cfg.observation_layout)
+                               observation_layout=cfg.observation_layout,
+                               return_body_poses=cfg.use_critic and cfg.observation_layout == "isaac_khan")
 
     def set_lr(self, lr: float) -> None:
         for g in self.opt.param_groups:
@@ -64,6 +65,10 @@ class PolicyTrainer:
         errors = None
         if ro.critic_reference is not None:
             reference = ro.critic_reference
+            if (ro.critic_body_pos is None) != (ro.critic_body_quat is None):
+                raise ValueError("Critic body position and quaternion caches must both be provided")
+            body_pos = ro.critic_body_pos.flatten(0, 1) if ro.critic_body_pos is not None else None
+            body_quat = ro.critic_body_quat.flatten(0, 1) if ro.critic_body_quat is not None else None
 
             def ref_slice(sl):
                 return ReferenceFrame(
@@ -74,12 +79,20 @@ class PolicyTrainer:
                     reference.joint_vel[sl] if reference.joint_vel is not None else None,
                 )
 
+            def error_slice(sl):
+                if body_pos is None:
+                    # Custom six-output steps retain the original FK path.
+                    return self.wm.heads.critic_error_features(states[sl], ref_slice(sl))
+                return self.wm.heads.critic_error_features(
+                    states[sl], ref_slice(sl), {"pos": body_pos[sl], "quat": body_quat[sl]},
+                )
+
             # Only V(s_H) contributes to actor BPTT. Earlier errors are used
             # exclusively by the detached critic fit; do not retain H redundant
             # FK graphs for those states in a full-size training batch.
             with torch.no_grad():
-                prefix = self.wm.heads.critic_error_features(states[:-n], ref_slice(slice(None, -n)))
-            bootstrap = self.wm.heads.critic_error_features(states[-n:], ref_slice(slice(-n, None)))
+                prefix = error_slice(slice(None, -n))
+            bootstrap = error_slice(slice(-n, None))
             errors = torch.cat([prefix, bootstrap], dim=0).reshape(H1, n, -1)
         return feat, goals, ro.e_root, errors
 
