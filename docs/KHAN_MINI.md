@@ -18,6 +18,44 @@ assets/robots/khan_mini/
 
 整个目录可复制到其他位置；加载配置时传入 `asset_dir` 即可。原始 URDF、配置和网格未修改。
 
+### 从当前训练 XML 导出更新后的 URDF
+
+`source.urdf` 是原始转换输入的本地副本；当前训练碰撞体以 `robot.xml` 为准。
+执行下面的命令可以生成与当前 XML 几何、惯性和关节定义对应的 `new.urdf`：
+
+```bash
+.venv/bin/python scripts/setup/export_khan_urdf.py
+MUJOCO_GL=egl .venv/bin/python scripts/media/render_khan_urdf.py
+```
+
+输出位于 `assets/robots/khan_mini/`：
+
+- `new.urdf`：45 个 link、27 个可动关节、45 个 visual、14 个 collision。
+- `meshes/collision_hulls/`：12 个显式凸包 OBJ；包含双脚完整脚背和足底，
+  以及手臂凸包和胶囊曲面网格。腰盒全尺寸为 `0.15×0.14×0.30 m`。
+- `new.urdf.json`：输入/输出 SHA、几何和运动学验证结果，以及标准 URDF
+  无法表达的 armature、PD 增益、action scale、接触参数等。
+
+URDF 无标准 capsule 图元，因此训练中的四个 capsule 分别导出为单个凸网格，
+保持碰撞体数量为 14（12 mesh + 2 box）。曲面近似的理论最大误差小于 0.1 mm；
+当前 518 个支撑方向的最大误差约为 0.081 mm，八个 CAD 凸包误差小于 `4e-9 m`。
+导出后重新加载 URDF，核对 18 组姿态的 FK、质量、COM、完整惯量张量及碰撞外形。
+root 世界位置属于加载时的 spawn 设置，不写入 URDF 的 link/joint 结构。
+
+标准 URDF 不能独立复现训练动力学：armature、servo Kp/Kd、接触摩擦/condim/priority、
+碰撞掩码以及训练延迟/域随机化仍需在目标仿真器中配置。尤其不能把 servo Kd
+直接写成 URDF 的被动关节 damping；本导出保留 XML 的被动 damping，并把 Kd 单独记录。
+速度限额采用 `profile.json` 元数据；训练中的 builtin servo 本身不实施该速度钳制。
+
+图片直接从 **新 URDF** 加载渲染，输出为
+`exports/khan_mini_urdf/collision_views.png` 和 `foot_collision_views.png`。
+全身图上排只显示碰撞体，下排叠加半透明 visual；橙色是非脚碰撞体，蓝色是脚部凸包。
+复制模型到其他项目时须同时携带 `new.urdf` 和完整 `meshes/` 目录。
+这些导出不修改当前训练的 XML、profile 或原始 source.urdf。
+训练加载入口 `get_khan_mini_spec()` 仍只读取 `robot.xml`；XML 使用原有 STL 和原生 capsule，
+没有引用 `new.urdf` 或 `collision_hulls/`。因此导出这些 OBJ 不会改变训练碰撞几何或增加训练解算开销；
+它们用于把同样的碰撞外形交给 URDF 的加载器，只有使用 `new.urdf` 时才需要加载。
+
 | 项目 | 结果 |
 |---|---|
 | 可动关节 | 27：双腿各 6、双臂各 6、腰 1、颈 2 |
