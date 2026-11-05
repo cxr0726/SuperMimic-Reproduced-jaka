@@ -24,6 +24,8 @@ critic保留78维当前误差：q_ref−q27、重锚body位置误差45（实际r
 Khan保留0–20 ms每回合固定的执行器延迟，将delay标量加入ξ；WM/想象仍不加显式队列，使用隐式拟合近似。
 nominal eval关闭新增gain/armature/mass随机化及已有delay、encoder/COM随机化，足底摩擦固定1.0。
 这些DR是Khan默认配置，不需要在服务器命令中增加开关；G1默认配置不变。
+踝armature的部分reset现采用选择性派生量刷新，继续每回合采样；训练命令和v6 contract不变。
+刷新原版/优化路径的对照及本机事件计时见 [KHAN_TRAINING.md](KHAN_TRAINING.md#reset派生量选择性刷新2026-11-05)。
 脚部改成每脚1个完整CAD凸包，质量/惯量不变；运动跟踪所有reset对实际机器人root加0.05 m，包含eval，参考/NPZ/goal不变。
 actor本体角速度/关节速度有效scale为0.5/0.2，恢复原SuperMimic值；prop噪声保留此前范围，参考goal保持干净。
 critic除原canonical state/context/root error外，接收干净command155、未来朝向30和5帧参考速度/重力180。

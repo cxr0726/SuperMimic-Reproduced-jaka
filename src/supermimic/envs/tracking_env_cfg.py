@@ -40,6 +40,7 @@ from supermimic.envs.mdp import rewards as sm_rewards
 from supermimic.envs.mdp import terminations as sm_term
 from supermimic.envs.mdp.commands import MultiClipMotionCommandCfg
 from supermimic.envs.mdp.rewards import TrackingRewardCfg
+from supermimic.envs.partial_constants import khan_joint_armature
 from supermimic.observation_layout import (
     ObservationLayoutOption,
     resolve_observation_layout,
@@ -273,7 +274,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             )
             events["ankle_armature"] = EventTermCfg(
                 mode="reset",
-                func=dr.joint_armature,
+                func=khan_joint_armature,
                 params={
                     "asset_cfg": SceneEntityCfg(
                         "robot", joint_names=KHAN_ANKLE_JOINTS, preserve_order=True,

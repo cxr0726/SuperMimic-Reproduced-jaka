@@ -171,6 +171,9 @@ COM偏移和附重共同改变动力学；现有局部COM范围先保留，是�
 `domain_randomization=False` 的nominal eval关闭新增gain/armature/mass随机化和已有delay、encoder/COM随机化，
 使用当前标称资产；reset的root高度余量仍按下面规则保留。
 
+踝armature仍每回合重采样，reset派生量刷新现使用下文的选择性实现：只更新被reset环境的独立常量，
+无需增加命令行开关。随机分布、ξ91、网络、优化器和v6 contract不变，可继续恢复匹配的v6检查点。
+
 Khan默认启用类似MorphMimic的执行器延迟：每个环境、每个融合执行器组在episode reset时
 从0/1/2/3/4个物理步均匀采样，即0/5/10/15/20 ms，一回合保持不变；每5 ms推进目标队列。
 所有Khan builtin position执行器使用同一延迟配置并融合共享延迟组，不为每个关节独立采样。
@@ -397,3 +400,59 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MUJOCO_GL=egl TORCHINDUCTOR_COMPILE_THREADS=
 上述通过的测试显式开启了已有激活重计算，正式服务器入口仍关闭，未缩小网络、训练batch或想象H。
 50步时独立online NSE8因buffer不足2048行尚未计算，控制台显示缺省nan；
 实际TB的WM多步NSE和训练损失均有限。短测验证运行与恢复链路，不证明收敛或实机稳定性。
+
+## reset派生量选择性刷新（2026-11-05）
+
+原mjlab的 `joint_armature` 每次部分reset都会请求全量 `set_const_0`；即使只reset24个环境，
+也会在所有4096环境上刷新参考惯量、body逆惯量及执行器参考加速度。
+原实现不会重新采样其他环境的armature或开始新episode，但会重复计算派生量、临时使用live Data工作区。
+
+当前Khan的 `ankle_armature` reset事件改为 `envs/partial_constants.py` 中的包装函数：
+
+- 调用原 `dr.joint_armature`，保留相同的采样顺序、每关节独立倍率和标称值基准。
+- 部分reset时，将目标环境的参数收集到独立scratch，调用**原版** `mjwarp.set_const_0`；没有重写惯量求解公式。
+- 只将目标环境的派生常量写回原数组，不替换live Warp数组地址，也不触碰live Data中的状态、接触、warmstart或时间。
+  后续仍由mjlab正常 `sim.forward()` 更新运动学。
+- scratch容量按reset环境数向上取2的幂，padding仅重复目标环境且不写回；例如24个reset环境使用32槽，96个使用128槽。
+  缓冲区和CUDA graph缓存复用，首次构建成本不计入稳态计时。
+- 全部环境reset时仍调用原版全量路径，避免长期保留4096环境的额外scratch。
+
+当前后端 `stat.meaninertia` 是共享字段，原全量刷新按原环境0计算。
+选择性路径仅在原环境0被选中时更新它，并使用对应环境0的结果；其他共享参考输出也保留同样的world0约定。
+没有将“本次reset列表第一项”误作原环境0，也没有擅自改成逐环境solver尺度。
+该实现限定为当前刚性Khan模型的reset事件；不是通用的运行中物理参数修改API。
+
+新增测试同时覆盖原版与优化路径的派生量、非连续/乱序环境、含/不含环境0、空/全量reset、
+不同容量交替、live数组地址、未选行及live Data逐字节保持，以及显式/自动reset后的状态、观测、奖励和replay。
+常量使用独立CPU双精度 `mj_setConst` 参考，输入逐字段复制实际GPU float32参数；
+原全量与优化路径均与之比较，派生常量容差为rtol=1e-5、atol=1e-6。
+诊断中原全量/优化路径相对CPU参考的最大误差分别约6.285/6.345 ppm，矩阵条件数约4888–6950；
+COM/CRB的原子加法归约会因批次排列产生FP32舍入差异，不能宣称逐位相同。
+未选模型行、live Data和缓冲区地址仍做精确保留检查。轨迹测试另以“原版对原版”控制组测量后端浮点波动。
+
+4070 SUPER、4096环境、每项预热3次/测量25次，同进程事件微基准：
+
+| reset环境数 / scratch槽数 | 原全量常量刷新 | 选择性刷新 | 原全部reset事件 | 优化后全部reset事件 |
+|---|---:|---:|---:|---:|
+| 24 / 32 | 20.41 ms | 5.09 ms | 27.45 ms | 9.52 ms |
+| 96 / 128 | 20.23 ms | 5.69 ms | 27.39 ms | 10.90 ms |
+
+结果 `logs/khan_partial_constants/reset_benchmark_4096.json`。首次scratch/graph构建分别约216/38 ms，
+不包含在表中的预热后结果内；此处只测事件，不含真实物理步、policy、replay或训练优化，不能换算为服务器完整it/s保证。
+Kp/Kd仍使用原通用采样函数，没有在本次改变其实现或采样分布。
+
+```bash
+.venv/bin/python scripts/analysis/bench_khan_reset_constants.py \
+  --num-envs 4096 --reset-counts 24 96 --reps 25 \
+  --npz-dir data/npz/khan_mini/mixed
+```
+
+最终全量回归为 **289 passed、1 skipped**，耗时46.74秒；记录
+`logs/khan_partial_constants/full_pytest.log`。新增5项测试包含CPU双精度物理参考与原版轨迹控制组，
+诊断数值见 `constant_numerics.json`、`trajectory_control.json`（同目录）。
+
+8环境/50控制步训练短测 `logs/khan_partial_constants_smoke/summary.json` 通过：
+36段LAFAN全部载入，正式网络/batch/H/UTD保留，完成40次WM、4次actor、80次critic优化；
+模型参数和实际TB标量有限，模型/优化器/采样器状态清空后恢复通过，实测ξ91/WM185/critic605。
+本机12 GB显式开启已有激活重计算，服务器默认仍关闭。含缓存编译共20.18秒，
+不能将该短窗口吞吐当作4096环境服务器稳态结果；控制台缺省online NSE8 nan仍因replay不足2048行未评估。
