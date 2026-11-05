@@ -90,6 +90,8 @@ def main() -> None:
         "snapshot": str(snapshot), "snapshot_sha256": hashes,
         "num_envs": min(args.num_envs, len(files)), "device": args.device,
         "protocol": {"seed": 0, "noise": False, "domain_randomization": False,
+                     "actuator_delay": False,
+                     "reset_root_z_offset": cfg["env"].get("reset_root_z_offset"),
                      "foot_friction": 1.0, "start_frame": 0, "one_episode_per_clip": True,
                      "max_step_reward": max_reward},
         "waist_collision_full_size_m": (2 * model.geom_size[waist]).tolist(),
@@ -110,6 +112,8 @@ def main() -> None:
     }
     if "observation_layout" in inspect.signature(run_benchmark).parameters:
         kwargs["observation_layout"] = layout
+    if "reset_root_z_offset" in inspect.signature(run_benchmark).parameters:
+        kwargs["reset_root_z_offset"] = cfg["env"].get("reset_root_z_offset")
     started = time.monotonic()
     results = run_benchmark(policy, files, **kwargs)
     save_results(results, args.out)
@@ -119,7 +123,10 @@ def main() -> None:
     assert len(results) == len(files) == len({clip.name for clip in results})
     assert summary["failed"] == sum(clip.failed for clip in results)
     for clip in results:
-        assert 0 < clip.steps <= clip.frames
+        # Current reset starts at frame 0; clip_end is observed by the next
+        # termination check, so a complete episode may execute frames+1 steps.
+        # Older snapshots started at frame 1 and executed frames steps.
+        assert 0 < clip.steps <= clip.frames + 1
         assert clip.fail_step == (clip.steps if clip.failed else -1)
         assert math.isfinite(clip.norm_return)
         assert all(math.isfinite(value) for value in clip.terms.values())

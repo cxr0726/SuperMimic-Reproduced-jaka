@@ -95,6 +95,12 @@ def main():
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         iteration = int(checkpoint["iteration"])
         config = json_value(checkpoint["config"])
+        reward_cfg = checkpoint.get("robot_contract", {}).get("reward_config")
+        # Historical G1/14-body checkpoints used the original 0.1 cap. Modern
+        # contracts record the reward weights, including Khan's neck rewards.
+        max_step_reward = (reward_cfg["dt"] * sum(
+            max(0.0, value) for key, value in reward_cfg.items() if key.startswith("w_")
+        )) if reward_cfg else 0.1
         config_hash = hashlib.sha256(
             json.dumps(config, sort_keys=True).encode()
         ).hexdigest()
@@ -129,6 +135,7 @@ def main():
             "iteration": iteration,
             "filename_iteration_matches": int(path.stem.split("_")[-1]) == iteration,
             "num_updates": int(checkpoint["num_updates"]),
+            "max_step_reward": max_step_reward,
             "tensorboard_exact_step_available": "train/episode_norm_return" in metrics,
             "metrics_at_exact_step": metrics,
             "train_return_mean_last_1000_iterations": float(np.mean(prior_returns)),
@@ -264,8 +271,13 @@ def main():
                 "full_clip_weighted_return": extended.get("full_clip_weighted_return"),
             })
 
+    dataset_names = sorted({
+        Path(ck["config"].get("data", {}).get("npz_dir") or "dataset").name
+        for ck in checkpoints
+    })
+    dataset_label = ", ".join(dataset_names)
     report = [
-        "# Khan LAFAN1 checkpoint evaluation", "",
+        f"# Khan {dataset_label} checkpoint evaluation", "",
         f"Run directory: `{run_dir}`", "",
         ("Training return is the exact unsmoothed TensorBoard event at the checkpoint iteration. "
          "Hours are elapsed training-process wall time, not GPU-hours. Benchmark columns retain the original repository formulas."), "",
@@ -352,7 +364,6 @@ def main():
     axis.set(title="Training return: complete run", ylabel="Normalized return", ylim=(0, 1))
     axis = axes[0, 1]
     draw(axis, "train/episode_norm_return", "Training return", limit=12000)
-    axis.axvspan(1750 / 1000, 2500 / 1000, color="tab:red", alpha=0.10, label="Previously reported decline")
     axis.set(title="Initial decline and recovery", ylabel="Normalized return", ylim=(0, 1))
     axis.legend(loc="lower right")
     axis = axes[1, 0]
@@ -365,7 +376,12 @@ def main():
     draw(axis, "train/episode_len", "Finished-episode mean", factor=dt)
     axis.set(title="Training episodes", ylabel="Episode length (s)")
     axis = axes[2, 0]
-    draw(axis, "policy/imag_reward_mean", "Imagined reward / 0.1", factor=10)
+    reward_caps = {ck["max_step_reward"] for ck in checkpoints}
+    if len(reward_caps) == 1:
+        cap = next(iter(reward_caps))
+        draw(axis, "policy/imag_reward_mean", f"Imagined reward / {cap:g}", factor=1 / cap)
+    else:
+        draw(axis, "policy/imag_reward_mean", "Imagined reward (raw; reward caps differ)")
     draw(axis, "policy/imag_survival_H", "Predicted H-step survival")
     axis.set(title="Imagination diagnostics", ylabel="Value", ylim=(0, 1.05))
     axis.legend()
@@ -376,7 +392,8 @@ def main():
     axis.legend()
     for axis in axes.flat:
         axis.set_xlabel("Training iteration (thousands)")
-    fig.suptitle("Khan LAFAN1: 4096 environments, raw TensorBoard scalar events", fontsize=14)
+    num_envs = checkpoints[0]["config"]["env"]["num_envs"]
+    fig.suptitle(f"Khan {dataset_label}: {num_envs} environments, raw TensorBoard scalar events", fontsize=14)
     fig.savefig(output_dir / "training_curves.png", dpi=170)
     plt.close(fig)
 
@@ -391,6 +408,8 @@ def main():
     if evaluated:
         x = np.arange(len(evaluated))
         labels = [f"{ck['iteration'] / 1000:g}k" for ck in evaluated]
+        clip_counts = sorted({int(ck["benchmark_summary"]["clips"]) for ck in evaluated})
+        clip_count_label = "/".join(str(count) for count in clip_counts)
         fig, axes = plt.subplots(1, 2, figsize=(12, 4.2), constrained_layout=True)
         for key, label in (("mean_norm_return", "Clip mean"),
                            ("step_weighted_norm_return", "Executed-step weighted")):
@@ -400,9 +419,12 @@ def main():
                      marker="o", label="Full-clip weighted (diagnostic)")
         axes[0].set(title="Benchmark returns", ylabel="Normalized return", ylim=(0, 1.03))
         axes[0].legend(loc="lower left")
-        axes[1].bar(x, [ck["benchmark_summary"]["failed"] for ck in evaluated],
-                    color="tab:red", alpha=0.65, label="Failed clips")
-        axes[1].set(title="Full-motion stability", ylabel="Failed clips", ylim=(0, 36))
+        failures = [ck["benchmark_summary"]["failed"] for ck in evaluated]
+        bars = axes[1].bar(x, failures, color="tab:red", alpha=0.65, label="Failed clips")
+        axes[1].bar_label(bars, padding=3)
+        axes[1].set(title="Full-motion stability", ylabel=f"Failed clips (out of {clip_count_label})",
+                    ylim=(0, max(1, max(failures)) * 1.2))
+        axes[1].yaxis.get_major_locator().set_params(integer=True)
         coverage_axis = axes[1].twinx()
         coverage_axis.grid(False)
         coverage_axis.plot(x, [100 * ck["benchmark_extended"]["completion_fraction"] for ck in evaluated],
@@ -413,7 +435,7 @@ def main():
         for axis in axes:
             axis.set_xticks(x, labels)
             axis.set_xlabel("Checkpoint")
-        fig.suptitle("Khan: original benchmark on all 36 LAFAN clips", fontsize=13)
+        fig.suptitle(f"Khan {dataset_label}: original benchmark on {clip_count_label} clips", fontsize=13)
         fig.savefig(output_dir / "benchmark_comparison.png", dpi=170)
         plt.close(fig)
     print(json.dumps({
