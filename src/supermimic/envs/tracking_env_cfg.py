@@ -94,6 +94,7 @@ class SuperMimicEnvCfgArgs:
     joint_limit_weight: float = -2.0
     bin_frames: int = 50
     compact_library: bool = False
+    reference_fk_compile: bool = False
     anchor_obs: bool = False  # add BeyondMimic anchor-relative pose (9) to the goal group (plan D5 alt.)
     debug_vis: bool = False  # draw the reference ghost in the viewer (scripts/play.py)
     robot: RobotName = "g1"
@@ -229,6 +230,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             sampling_mode=a.sampling_mode,  # type: ignore[arg-type]
             reset_root_z_offset=a.reset_root_z_offset,
             compact_library=a.compact_library,
+            reference_fk_compile=a.reference_fk_compile,
             debug_vis=a.debug_vis,
             **command_kwargs,
         )

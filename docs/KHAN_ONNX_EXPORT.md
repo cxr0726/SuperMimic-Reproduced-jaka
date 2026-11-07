@@ -4,9 +4,25 @@
 
 导出时沿用训练 checkpoint 中的网络参数与固定 scale，不引入运行均值/方差归一化。世界模型、critic、优化器、replay、MuJoCo 模型和参考动作库均不进入推理图。动作可以在部署端按需加载，不必为每条动作重新导出网络。
 
-当前源码要求Khan **version-5** contract。actor仍为goal155＋prop465，因脚碰撞、延迟/reset和critic契约变化，
-已有version-4 `Khan_lafan1_clean_goal/ckpt_0100000.pt` 不能在当前源码下导出；须使用其匹配的历史checkout，或先训练新的v5策略。
-下列命令指向未来生成的新v5 checkpoint，不表示该策略已经训练完成。已有旧ONNX文件不受源码改动影响，其物理训练语义仍是历史版本。
+当前源码要求Khan **version-6** contract，并校验机器人资产哈希。已有mixed480训练检查点
+`logs/khan_mixed_dr_v6_4096/ckpt_0080000.pt` 曾在匹配的历史源码/资产下完成本文的packed导出与验证。
+actor仍为goal155＋prop465；新增ξ91、WM185、critic605是训练侧接口，不增加部署actor输入。
+本轮踝参数已改为 pitch 80/2/0.02、roll 20/1/0.01（Kp/Kd/armature），资产哈希已改变。
+因此下列80k命令须在该检查点匹配的历史checkout中运行；当前资产下需使用新训练的检查点并替换路径。
+旧版checkpoint须使用匹配的历史源码/资产导出；不能跳过机器人契约校验。当前训练配置见 [KHAN_PT_TO_NPZ.md](KHAN_PT_TO_NPZ.md)。
+
+## 历史v6/80k策略的mjlab播放
+
+```bash
+env -u PYTHONPATH .venv/bin/python scripts/play.py \
+  --ckpt logs/khan_mixed_dr_v6_4096/ckpt_0080000.pt \
+  --npz-dir data/npz/khan_mini/mixed \
+  --clips dance2_subject1 --num-envs 1 --device cuda:0 --viewer native
+```
+
+`--clips`填写NPZ文件名去掉`.npz`后的名字；mixed目录应显式指定，play的默认数据目录仍为LAFAN1。
+单动作从首帧开始，结束或提前终止后重新播放；默认显示半透明参考机器人。
+无桌面的服务器将`--viewer native`改为`--viewer viser`，浏览器连接对应机器8080端口。
 
 ## 导出命令
 
@@ -16,8 +32,8 @@
 uv sync --extra export
 
 env -u PYTHONPATH .venv/bin/python scripts/export_onnx.py \
-  --ckpt logs/khan_lafan1_delay_convex/ckpt_latest.pt \
-  --out exports/khan_mini/ckpt_latest.onnx
+  --ckpt logs/khan_mixed_dr_v6_4096/ckpt_0080000.pt \
+  --out exports/khan_mixed_dr_v6_4096/ckpt_0080000.onnx
 ```
 
 默认采用与已有 `latest_m62k_pico_base.onnx` 相同的单观测输入、单动作输出形式：
@@ -33,9 +49,9 @@ env -u PYTHONPATH .venv/bin/python scripts/export_onnx.py \
 
 ```bash
 env -u PYTHONPATH .venv/bin/python scripts/export_onnx.py \
-  --ckpt logs/khan_lafan1_delay_convex/ckpt_latest.pt \
-  --out exports/khan_mini/ckpt_latest.onnx \
-  --motion data/npz/khan_mini/lafan1/dance2_subject1.npz \
+  --ckpt logs/khan_mixed_dr_v6_4096/ckpt_0080000.pt \
+  --out exports/khan_mixed_dr_v6_4096/ckpt_0080000.onnx \
+  --motion data/npz/khan_mini/mixed/dance2_subject1.npz \
   --validation-samples 64 --overwrite
 ```
 
@@ -45,8 +61,8 @@ env -u PYTHONPATH .venv/bin/python scripts/export_onnx.py \
 
 ```bash
 env -u PYTHONPATH .venv/bin/python scripts/export_onnx.py \
-  --ckpt logs/khan_lafan1_delay_convex/ckpt_latest.pt \
-  --out exports/khan_mini/ckpt_latest_split.onnx \
+  --ckpt logs/khan_mixed_dr_v6_4096/ckpt_0080000.pt \
+  --out exports/khan_mixed_dr_v6_4096/ckpt_0080000_split.onnx \
   --input-layout split
 ```
 
@@ -143,7 +159,7 @@ q_target[j] = default_joint_pos[j] + action_scale[j] * actions[j]
 - 旧图包含学习到的 `normalizer._mean` 和除法统计；当前 SuperMimic actor 没有该 RMS。不要复制旧模型的均值、方差或外部归一化。
 - 当前角速度/关节速度系数是0.5/0.2，不能继续使用旧 Isaac 观测的0.25/0.05。
 - 当前网络为 `goal155 → encoder → latent32`，再与 `policy_obs465` 拼接后输入 decoder。不是旧 ONNX 的单一620维 PPO actor。
-- 按关节名重排后，旧 ONNX 的 Kp/Kd/q0 与当前 profile 相符；仍应读取新模型 metadata，不依赖旧数组位置。
+- 按关节名重排后，旧 ONNX 的 Kp/Kd/q0 曾与当时导出所用 profile 核对相符；当前踝参数已改变，应读取目标模型的 metadata 并核对其训练资产，不依赖旧数组位置。
 
 仅提供元数据不会自动完成真实设备的电机索引和 IMU 坐标映射；本次导出也不修改外部部署仓库。
 
@@ -156,7 +172,7 @@ import numpy as np
 import onnxruntime as ort
 
 session = ort.InferenceSession(
-    "exports/khan_mini/ckpt_latest.onnx",
+    "exports/khan_mixed_dr_v6_4096/ckpt_0080000.onnx",
     providers=["CPUExecutionProvider"],
 )
 obs = np.concatenate([goal, policy_obs], axis=-1).astype(np.float32)
@@ -183,7 +199,35 @@ actions = session.run(
 
 导出器检查 checkpoint 机器人/观测契约，保留训练网络固定 scale，并使用 ONNX checker 与 ONNX Runtime 比较 PyTorch/ONNX 输出。数值一致性覆盖随机观测及参考动作构造的输入；这验证的是图导出与输入接口，不替代实际部署控制器的闭环 sim2sim 或真机验证。
 
-以下为历史version-4配置对 `logs/Khan_lafan1_clean_goal/ckpt_0100000.pt` 的导出与验证记录，不代表当前v5新配置已训练或完成导出：
+### 历史v6/80k验证（2026-11-06，匹配当时资产）
+
+已生成`exports/khan_mixed_dr_v6_4096/ckpt_0080000.onnx`及同名JSON报告，
+文件27,475,986 bytes，FP32、IR8、opset17、全部权重内嵌，接口`obs[batch,620] → actions[batch,27]`。
+通过ONNX checker、零输入、64个随机batch1、动态batch3及64个舞蹈参考状态输入验证：
+最大归一化动作误差`5.722e-6`，换算PD目标误差`2.861e-6 rad`。
+
+另用ONNX Runtime CPU动作实际驱动mjlab三个环境（舞蹈、跑步、跳跃）各64控制步，
+每步将真实环境输入同时送入PyTorch和ONNX。最大动作误差`2.861e-6`，实际环境PD目标与
+`q0+0.5*actions`误差为0，无终止/超时。报告和可重复脚本在
+`logs/khan_mixed_dr_v6_4096/analysis/onnx_deployment/`。该1.28秒短测验证观测/PD接口，不替代C++或实机闭环验证。
+
+当前外部JAKA部署`FSMMimicJakaMiniSuperZmq.cpp`使用packed接口。
+已核对新旧模型I/O、27关节顺序、观测schema、q0及action/gyro/qd scale一致，
+当前C++无需为ξ91或v6更改观测拼接。
+**该C++部署从YAML读取硬件关节映射、q0、scale和PD，不用ONNX metadata覆盖这些参数。**
+保留现有实机已换算的PD参数；将新文件复制到部署工程`real/config/policy_mimic/`，
+再将`KpiConfig.yaml`的`jakaminimimic_superzmq.policy_path`设为新模型相对`config/`的路径，例如：
+
+```yaml
+jakaminimimic_superzmq:
+  policy_path: "policy_mimic/ckpt_0080000_khan_mixed_dr_v6.onnx"
+```
+
+本次未修改外部部署工程或启动实机程序。
+
+### 历史version-4验证
+
+以下为历史version-4配置对 `logs/Khan_lafan1_clean_goal/ckpt_0100000.pt` 的导出与验证记录：
 
 | 文件 | 图大小 | 接口 |
 |---|---:|---|

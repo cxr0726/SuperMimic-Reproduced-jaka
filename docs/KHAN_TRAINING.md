@@ -11,7 +11,7 @@ env -u PYTHONPATH uv run sm-train --robot khan_mini \
 
 当前配置为 **15个跟踪body、base anchor、独立腰部COM随机化、直接颈部位置/速度奖励**，
 并默认使用 `isaac_khan` 观测：5帧参考、5帧本体历史。当前为 **Khan contract v6**：踝标称armature改为
-pitch=0.069、roll=0.0066，新增Kp/Kd、踝armature、腰部附重随机化，并将这些参数及已有delay编码到ξ91。
+pitch=0.02、roll=0.01，标称踝PD为pitch=80/2、roll=20/1。现有Kp/Kd、踝armature、腰部附重随机化及ξ91保持不变。
 已有执行器延迟、完整脚凸包、reset高度余量、critic误差特征和FK复用保留；这些DR是Khan默认设置，不需要新增CLI开关。
 包括v5和version-4 clean-goal/100k在内的旧Khan检查点均不能直接续训、评估或导出，须使用新run及匹配版本的资产。
 服务器命令、50步验证及同语义恢复见 [KHAN_SERVER_TRAINING.md](KHAN_SERVER_TRAINING.md)。
@@ -28,7 +28,7 @@ pitch=0.069、roll=0.0066，新增Kp/Kd、踝armature、腰部附重随机化，
   `ref_thirdparty/jaka_code/Textop/USAGE.md` 的实际mini训练命令显式覆盖成 `base_link`；当前按该用法对齐。
 - COM随机化及replay context仍绑定 `waist_yaw_Link`，由独立 `RobotSpec.com_body` 指定，不随anchor改变。
 - 原14个G1对应部位末尾追加 `Neck_pitch_Link`，共15个；该body的位姿和线/角速度进入原body跟踪奖励。
-- 27个关节均保留执行器，动作缩放均为0.5；标称PD、力矩限制沿用Khan配置，踝armature采用0.069/0.0066并应用下述DR。
+- 27个关节均保留执行器，动作缩放均为0.5；踝标称PD为pitch=80/2、roll=20/1，armature为0.02/0.01；其他关节及力矩限制不变，并保留下述DR。
 
 | 张量或网络接口 | G1，29关节，原默认 | 当前Khan，27关节 |
 |---|---:|---:|
@@ -164,7 +164,8 @@ Khan新增的物理DR如下；均相对标称值重新采样，不在上回合�
 | `waist_yaw_Link` 附加质量 | U[−2,3] kg | startup每环境采样，跨reset保持 | mass added1 |
 | actuator delay | 均匀采样0/1/2/3/4物理步 | 每次reset采样，回合内保持 | delay steps1 |
 
-标称踝pitch=0.069、roll=0.0066 kg·m²，随机范围分别为0.0552–0.0828、0.00528–0.00792。
+标称踝pitch=0.02、roll=0.01 kg·m²，随机范围分别为0.016–0.024、0.008–0.012。
+踝pitch的Kp/Kd随机范围为64–96/1.6–2.4；roll为16–24/0.8–1.2，原倍率分布未改变。
 腰部标称质量7.1277 kg，随机后5.1277–10.1277 kg；采用 `dr.body_mass(operation="add")`，
 表示COM处点质量增减，**body_inertia保持不变**，不代表密度缩放或指定位置负载的完整惯量模型。
 COM偏移和附重共同改变动力学；现有局部COM范围先保留，是否加大应依据实际载荷和辨识误差。
@@ -172,7 +173,8 @@ COM偏移和附重共同改变动力学；现有局部COM范围先保留，是�
 使用当前标称资产；reset的root高度余量仍按下面规则保留。
 
 踝armature仍每回合重采样，reset派生量刷新现使用下文的选择性实现：只更新被reset环境的独立常量，
-无需增加命令行开关。随机分布、ξ91、网络、优化器和v6 contract不变，可继续恢复匹配的v6检查点。
+无需增加命令行开关。选择性刷新本身不改变随机分布、ξ91、网络和优化器。
+本轮踝标称参数更新会改变模型/profile哈希，应新建训练run；旧参数检查点不满足当前机器人契约，不能作为无差异resume。
 
 Khan默认启用类似MorphMimic的执行器延迟：每个环境、每个融合执行器组在episode reset时
 从0/1/2/3/4个物理步均匀采样，即0/5/10/15/20 ms，一回合保持不变；每5 ms推进目标队列。

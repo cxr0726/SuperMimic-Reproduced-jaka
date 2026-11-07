@@ -32,6 +32,11 @@ import torch
 
 from supermimic.kinematics.rotations import quat_apply, quat_from_angle_axis, quat_mul, quat_normalize
 
+# Dynamo dynamic tracing must compare integers with integers. Comparing a
+# symbolic joint-type integer with MuJoCo's pybind enum can incorrectly select
+# the fixed-body branch, even though the same eager/static comparison is true.
+_HINGE_TYPE = int(mujoco.mjtJoint.mjJNT_HINGE)
+
 
 @dataclass
 class _BodyLink:
@@ -83,7 +88,7 @@ class G1Kinematics:
         jnt_axis = np.zeros((self.nbody, 3))
         qpos0 = np.zeros(self.nbody)
         for i, l in enumerate(links):
-            if l.joint_type == mujoco.mjtJoint.mjJNT_HINGE:
+            if l.joint_type == _HINGE_TYPE:
                 j = int(model.body_jntadr[l.body_id])
                 jnt_pos[i] = model.jnt_pos[j]
                 jnt_axis[i] = model.jnt_axis[j]
@@ -92,7 +97,7 @@ class G1Kinematics:
         self.jnt_axis = t(jnt_axis)
         self.qpos0 = t(qpos0)
         # Hinge bookkeeping in body order (skip root / fixed bodies).
-        self.hinge_body_idx = [i for i, l in enumerate(links) if l.joint_type == mujoco.mjtJoint.mjJNT_HINGE]
+        self.hinge_body_idx = [i for i, l in enumerate(links) if l.joint_type == _HINGE_TYPE]
         self.hinge_qpos_adr = torch.tensor([links[i].qpos_adr for i in self.hinge_body_idx], device=self.device)
         self.hinge_dof_adr = torch.tensor([links[i].dof_adr for i in self.hinge_body_idx], device=self.device)
 
@@ -104,12 +109,15 @@ class G1Kinematics:
 
     # ------------------------------------------------------------------ core
 
-    def forward(self, qpos: torch.Tensor, qvel: torch.Tensor | None = None):
+    def forward(self, qpos: torch.Tensor, qvel: torch.Tensor | None = None,
+                body_indices: tuple[int, ...] | None = None):
         """FK for a batch.
 
         Args:
           qpos: (..., nq) MuJoCo generalized positions.
           qvel: (..., nv) MuJoCo generalized velocities (free joint: lin world, ang body).
+          body_indices: optional static output body order, allowing compiled
+            reference FK to eliminate unused leaf branches before stacking.
         Returns:
           dict with 'pos' (..., nb, 3), 'quat' (..., nb, 4) and, if qvel is given,
           'lin_vel' (..., nb, 3), 'ang_vel' (..., nb, 3) in world frame at the link origin.
@@ -139,7 +147,7 @@ class G1Kinematics:
             # Body frame from parent frame (fixed offset).
             b_pos = pp + quat_apply(pq, self.body_pos[i].expand(*batch, 3))
             b_quat = quat_mul(pq, self.body_quat[i].expand(*batch, 4))
-            if l.joint_type == mujoco.mjtJoint.mjJNT_HINGE:
+            if l.joint_type == _HINGE_TYPE:
                 anchor = b_pos + quat_apply(b_quat, self.jnt_pos[i].expand(*batch, 3))
                 axis_w = quat_apply(b_quat, self.jnt_axis[i].expand(*batch, 3))
                 angle = qpos[..., l.qpos_adr] - self.qpos0[i]
@@ -158,10 +166,12 @@ class G1Kinematics:
             pos[i] = b_pos
             quat[i] = b_quat
 
-        out = {"pos": torch.stack(pos, dim=-2), "quat": torch.stack(quat, dim=-2)}
+        indices = range(nb) if body_indices is None else body_indices
+        out = {"pos": torch.stack([pos[i] for i in indices], dim=-2),
+               "quat": torch.stack([quat[i] for i in indices], dim=-2)}
         if compute_vel:
-            out["lin_vel"] = torch.stack(lin, dim=-2)
-            out["ang_vel"] = torch.stack(ang, dim=-2)
+            out["lin_vel"] = torch.stack([lin[i] for i in indices], dim=-2)
+            out["ang_vel"] = torch.stack([ang[i] for i in indices], dim=-2)
         return out
 
     __call__ = forward

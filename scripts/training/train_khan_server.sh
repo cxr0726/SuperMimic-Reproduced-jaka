@@ -116,7 +116,7 @@ printf '[INFO] Khan clips: %d; parallel environments: %s; learning batch: 4096; 
     "${#NPZ_FILES[@]}" "$NUM_ENVS"
 printf '[INFO] Khan observations: future/history 5/5; clean goal 155; policy 465; activation recomputation: OFF\n'
 printf '[INFO] Khan v6: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; delay 0-20 ms\n'
-printf '[INFO] Nominal ankle armature pitch 0.069 / roll 0.0066; reset root clearance 0.05 m; full convex feet\n'
+printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; full convex feet\n'
 printf '[COMMAND]'
 printf ' %q' "${command[@]}"
 printf '\n'

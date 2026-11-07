@@ -142,6 +142,7 @@ class Trainer:
                 sampling_mode=cfg.env.sampling_mode,
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
+                reference_fk_compile=cfg.env.reference_fk_compile,
                 anchor_obs=cfg.env.anchor_obs,
                 seed=cfg.seed + 1000 * self.rank,
             ),

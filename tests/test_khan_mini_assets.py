@@ -28,13 +28,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 # Independently transcribed from Khan_mini_CFG with the user-requested URDF
-# waist velocity and ankle pitch/roll armature overrides. Each row is kp, kd,
+# waist velocity and ankle pitch/roll PD/armature overrides. Each row is kp, kd,
 # armature, effort, velocity.
 MOTOR_GROUPS = (
     (("hip_pitch_joint", "hip_roll_joint", "hip_yaw_joint", "knee_joint"),
      (187.0, 18.7, 0.03, 120.0, 11.52)),
-    (("ankle_pitch_joint",), (100.0, 2.0, 0.069, 96.0, 14.6)),
-    (("ankle_roll_joint",), (50.0, 0.5, 0.0066, 96.0, 14.6)),
+    (("ankle_pitch_joint",), (80.0, 2.0, 0.02, 96.0, 14.6)),
+    (("ankle_roll_joint",), (20.0, 1.0, 0.01, 96.0, 14.6)),
     (("shoulder_pitch_joint", "shoulder_roll_joint"), (102.0, 10.2, 0.016, 96.0, 11.5)),
     (("shoulder_yaw_joint", "elbow_joint"), (40.8, 4.0, 0.01, 36.0, 15.7)),
     (("wrist_roll_joint", "wrist_yaw_joint"), (6.7, 0.67, 0.01, 8.0, 12.5)),

@@ -57,6 +57,7 @@ class MultiClipMotionCommand(CommandTerm):
         self.library = MotionLibrary(
             cfg.npz_files, cfg.body_names, default_joint_pos, device=self.device, bin_frames=cfg.bin_frames,
             compact=cfg.compact_library, store_dtype=torch.float16 if cfg.library_fp16 else torch.float32,
+            reference_fk_compile=cfg.reference_fk_compile,
             robot_name=cfg.robot_name, root_body_name=cfg.root_body_name,
             joint_names=self.robot.joint_names,
         )
@@ -449,6 +450,7 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     ema_alpha: float = 0.2
     memory_alpha: float = 0.001
     compact_library: bool = False
+    reference_fk_compile: bool = False
     library_fp16: bool = True
     resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)
 

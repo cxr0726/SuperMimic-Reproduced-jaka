@@ -31,10 +31,60 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from supermimic.kinematics.rotations import projected_gravity, quat_apply_inverse, yaw_quat
+from supermimic.kinematics.rotations import (
+    projected_gravity, quat_apply, quat_apply_inverse, quat_normalize, yaw_quat,
+)
 
 GOAL_FEAT_DIM = 68
 REF_DIM = 71
+# Optional full-NPZ extension used when materializing an already quantized
+# compact library. Body quaternions are normalized FK outputs, whereas the
+# original reference quaternion/velocities must retain their exact values.
+PACKED_REFERENCE_FORMAT = "supermimic.compact_reference.v1"
+
+
+def _read_exact_reference(data, ref, *, n, num_joints, root_idx, path,
+                          joint_pos, joint_vel, bp, bq, blv, bav):
+    has_state = "reference_state" in data
+    has_format = "reference_state_format" in data
+    if not (has_state or has_format):
+        return ref
+    if not (has_state and has_format):
+        raise ValueError(f"{path}: reference_state and reference_state_format must appear together")
+    marker = np.asarray(data["reference_state_format"])
+    if marker.size != 1 or str(marker.reshape(-1)[0]) != PACKED_REFERENCE_FORMAT:
+        raise ValueError(f"{path}: unsupported reference_state_format")
+    exact = data["reference_state"]
+    if (exact.dtype != np.float32 or exact.shape != (n, 13 + 2*num_joints)
+            or not np.isfinite(exact).all()):
+        raise ValueError(f"{path}: reference_state must be finite float32 with the robot reference width")
+    j = 7 + num_joints
+    for label, stored, expected in (
+        ("joint_pos", exact[:, 7:j], joint_pos),
+        ("joint_vel", exact[:, j+6:], joint_vel),
+        ("root position", exact[:, :3], bp[:, root_idx]),
+        ("root linear velocity", exact[:, j:j+3], blv[:, root_idx]),
+    ):
+        if not np.array_equal(stored, expected):
+            raise ValueError(f"{path}: reference_state disagrees with {label}")
+    # This extension preserves the compact path, including its established
+    # world->body conversion before FK normalizes the quantized quaternion.
+    with torch.no_grad():
+        raw_q = torch.from_numpy(exact[:, 3:7].copy())
+        norm = raw_q.norm(dim=-1)
+        if not bool(((norm - 1).abs() <= 0.01).all()):
+            raise ValueError(f"{path}: reference_state root quaternion must be near unit length")
+        normalized = quat_normalize(raw_q)
+        world_omega = torch.from_numpy(exact[:, j+3:j+6].copy())
+        expected_omega = quat_apply(normalized, quat_apply_inverse(raw_q, world_omega)).numpy()
+    normalized = normalized.numpy()
+    root_q = bq[:, root_idx]
+    signs = np.where((normalized*root_q).sum(-1, keepdims=True) < 0, -1., 1.)
+    if not np.allclose(root_q*signs, normalized, atol=2e-5, rtol=2e-5):
+        raise ValueError(f"{path}: reference_state root quaternion disagrees with body_quat_w")
+    if not np.allclose(bav[:, root_idx], expected_omega, atol=3e-5, rtol=3e-5):
+        raise ValueError(f"{path}: reference_state root angular velocity disagrees with body_ang_vel_w")
+    return exact
 
 
 @dataclass
@@ -130,6 +180,10 @@ def read_npz_reference(
             raise ValueError(f"{path}: body_quat_w must contain unit WXYZ quaternions")
         ref = np.concatenate([bp[:, root_idx], bq[:, root_idx], joint_pos, blv[:, root_idx],
                               bav[:, root_idx], joint_vel], axis=1).astype(np.float32)
+        ref = _read_exact_reference(
+            data, ref, n=n, num_joints=spec.num_joints, root_idx=root_idx, path=path,
+            joint_pos=joint_pos, joint_vel=joint_vel, bp=bp, bq=bq, blv=blv, bav=bav,
+        )
         bodies = {"pos": bp[:, body_idx], "quat": bq[:, body_idx],
                   "lin": blv[:, body_idx], "ang": bav[:, body_idx]}
     return ref, bodies
@@ -149,6 +203,7 @@ class MotionLibrary:
         robot_name: str = "g1",
         root_body_name: str = "pelvis",
         joint_names: tuple[str, ...] | list[str] | None = None,
+        reference_fk_compile: bool = False,
     ):
         from supermimic.robots.registry import get_robot_spec
 
@@ -162,6 +217,9 @@ class MotionLibrary:
         if self.bin_frames < 1:
             raise ValueError("bin_frames must be positive")
         self.compact = compact
+        # Reference-only execution setting: never wrap the differentiable FK
+        # used by the world model / imagined robot, or change reference storage.
+        self.reference_fk_compiled = bool(compact and reference_fk_compile and self.device.type == "cuda")
         if len(npz_files) == 0:
             raise ValueError("MotionLibrary needs at least one clip")
         if isinstance(default_joint_pos, torch.Tensor):
@@ -245,6 +303,18 @@ class MotionLibrary:
 
             self._fk = G1Kinematics(robot_spec.load_model(), device=self.device, dtype=dtype)
             self._tracked_idx = self._fk.body_indices(self.body_names)
+            self._tracked_body_indices = tuple(self._fk.body_index(name) for name in self.body_names)
+            self._reference_bodies_fn = self._compact_bodies
+            if self.reference_fk_compiled:
+                # Fuse gather/cast, velocity conventions, the whole FK tree and
+                # tracked-link selection. One dynamic batch dimension covers
+                # environment and flattened imagination queries. References
+                # survive subsequent calls and enter actor backward: use
+                # no_grad (below), not inference_mode or reusable CUDA outputs.
+                self._reference_bodies_fn = torch.compile(
+                    self._compact_bodies_selected, fullgraph=True, dynamic=True,
+                    options={"triton.cudagraphs": False},
+                )
 
         self.clip_start = torch.tensor([c.start for c in clips], device=self.device, dtype=torch.long)
         self.clip_len = torch.tensor([c.length for c in clips], device=self.device, dtype=torch.long)
@@ -280,11 +350,37 @@ class MotionLibrary:
         """Tracked-body link states (world) at the given frames."""
         if not self.compact:
             return RefBodies(self.body_pos_w[frame], self.body_quat_w[frame], self.body_lin_vel_w[frame], self.body_ang_vel_w[frame])
-        qpos, qvel = self.ref_qpos_qvel(frame)
+        shape = frame.shape
+        flat = frame.reshape(-1)
         with torch.no_grad():
-            out = self._fk(qpos, qvel)
+            # PyTorch specializes sizes 0/1 even with dynamic=True. These rare
+            # diagnostic/single-robot queries stay eager instead of compiling
+            # extra large graphs; all normal training batches share one rank.
+            fn = self._reference_bodies_fn if flat.numel() > 1 else self._compact_bodies
+            out = fn(flat)
+        return RefBodies(
+            out.pos_w.reshape(*shape, len(self.body_names), 3),
+            out.quat_w.reshape(*shape, len(self.body_names), 4),
+            out.lin_vel_w.reshape(*shape, len(self.body_names), 3),
+            out.ang_vel_w.reshape(*shape, len(self.body_names), 3),
+        )
+
+    def _compact_bodies(self, frame: torch.Tensor) -> RefBodies:
+        """Pure tensor reference FK entry; callers supply flat frame indices."""
+        qpos, qvel = self.ref_qpos_qvel(frame)
+        out = self._fk(qpos, qvel)
         i = self._tracked_idx
         return RefBodies(out["pos"][..., i, :], out["quat"][..., i, :], out["lin_vel"][..., i, :], out["ang_vel"][..., i, :])
+
+    def _compact_bodies_selected(self, frame: torch.Tensor) -> RefBodies:
+        """Static output selection lets Inductor prune unused FK leaf outputs.
+
+        Selecting a GPU index tensor after stacking every body prevents this
+        elimination. Eager controls retain the original full-FK/index path.
+        """
+        qpos, qvel = self.ref_qpos_qvel(frame)
+        out = self._fk(qpos, qvel, body_indices=self._tracked_body_indices)
+        return RefBodies(out["pos"], out["quat"], out["lin_vel"], out["ang_vel"])
 
     # Convenience column accessors (full fp32 copies; prefer ``ref()`` in hot paths).
     @property
@@ -354,7 +450,8 @@ class MotionLibrary:
         mem = self._ref.numel() * self._ref.element_size() / 1e9
         if not self.compact:
             mem += sum(t.numel() * t.element_size() for t in (self.body_pos_w, self.body_quat_w, self.body_lin_vel_w, self.body_ang_vel_w, self.goal_feat)) / 1e9
-        return f"MotionLibrary({'compact' if self.compact else 'full'}): {self.num_clips} clips, {self.num_frames} frames ({hours:.3f} h @50Hz), {self.num_bins} bins, {mem:.2f} GB on {self.device}"
+        execution = f", reference FK={'compiled (dynamic batch)' if self.reference_fk_compiled else 'eager'}" if self.compact else ""
+        return f"MotionLibrary({'compact' if self.compact else 'full'}): {self.num_clips} clips, {self.num_frames} frames ({hours:.3f} h @50Hz), {self.num_bins} bins, {mem:.2f} GB on {self.device}{execution}"
 
 
 def discover_npz(directory: str | Path, limit: int | None = None, names: list[str] | None = None, manifest: str | Path | None = None) -> list[Path]:

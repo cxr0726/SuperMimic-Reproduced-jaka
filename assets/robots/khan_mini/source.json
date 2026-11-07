@@ -70,8 +70,8 @@
         "Left_ankle_pitch_joint": 0.016,
         "Right_ankle_pitch_joint": 0.016
       },
-      "effective_value": 0.069,
-      "source": "user-requested zero-pose PR diagonal approximation of two AB output-shaft armatures of 0.016 kg m^2"
+      "effective_value": 0.02,
+      "source": "user-requested alignment with audited jaka.py ankle settings"
     },
     "ankle_roll_armature": {
       "joint_names": [
@@ -82,8 +82,8 @@
         "Left_ankle_roll_joint": 0.016,
         "Right_ankle_roll_joint": 0.016
       },
-      "effective_value": 0.0066,
-      "source": "user-requested zero-pose PR diagonal approximation of two AB output-shaft armatures of 0.016 kg m^2"
+      "effective_value": 0.01,
+      "source": "user-requested alignment with audited jaka.py ankle settings"
     },
     "nonfoot_sliding_friction": {
       "value": 1.0,
@@ -137,6 +137,44 @@
       ],
       "source": "user-requested narrower torso collision box",
       "rationale": "Fit the 126--140 mm central visual shell; wider upper flanges are outside this simplified collision core. Preserve X/Z size, pose and explicit inertial properties"
+    },
+    "ankle_pitch_pd": {
+      "joint_names": [
+        "Left_ankle_pitch_joint",
+        "Right_ankle_pitch_joint"
+      ],
+      "source_config_values": {
+        "Left_ankle_pitch_joint": {
+          "stiffness": 100.0,
+          "damping": 2.0
+        },
+        "Right_ankle_pitch_joint": {
+          "stiffness": 100.0,
+          "damping": 2.0
+        }
+      },
+      "effective_stiffness": 80.0,
+      "effective_damping": 2.0,
+      "source": "user-requested alignment with audited jaka.py ankle settings"
+    },
+    "ankle_roll_pd": {
+      "joint_names": [
+        "Left_ankle_roll_joint",
+        "Right_ankle_roll_joint"
+      ],
+      "source_config_values": {
+        "Left_ankle_roll_joint": {
+          "stiffness": 50.0,
+          "damping": 0.5
+        },
+        "Right_ankle_roll_joint": {
+          "stiffness": 50.0,
+          "damping": 0.5
+        }
+      },
+      "effective_stiffness": 20.0,
+      "effective_damping": 1.0,
+      "source": "user-requested alignment with audited jaka.py ankle settings"
     }
   },
   "conversion": {
@@ -150,8 +188,8 @@
     "contacts": "self-collision masks retained; feet condim=3, other contacts condim=1"
   },
   "output_sha256": {
-    "robot.xml": "0ffc8cad5dce6f95224828b5128c171fcd8ea3773dd94f4e5cb404dabd24d077",
+    "robot.xml": "600cf20adab81c925b9a71e764e3c18ec86d8a63e79270725429c9d0273a367f",
     "source.urdf": "927cf814485ce2e2fea77aed95dd4b858e60763b785693c2f3f4b23f9940be33",
-    "profile.json": "caf3a8fda4f45a852a2787d65cbfe5be8e2c49c4cd0fb67f459d8f3012a1590f"
+    "profile.json": "30e720fc57194b63535816cbf83293239532678052ba206a7956b54ac8fe9996"
   }
 }

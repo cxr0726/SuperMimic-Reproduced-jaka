@@ -43,6 +43,7 @@ class EnvCfg:
     future_frames: int | None = None  # robot/layout default: G1=10, Khan Isaac=5
     observation_layout: Literal["auto", "supermimic", "isaac_khan"] = "auto"
     compact_library: bool = False
+    reference_fk_compile: bool = False  # Opt-in: benchmark CUDA compact FK on the target GPU
     anchor_obs: bool = False
 
 

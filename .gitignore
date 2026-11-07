@@ -15,3 +15,4 @@ wandb/
 .ruff_cache/
 experiments/**/outputs/
 /ref_thirdparty/
+/thirdparty/

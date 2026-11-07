@@ -160,14 +160,14 @@
     "Left_hip_roll_joint": 187.0,
     "Left_hip_yaw_joint": 187.0,
     "Left_knee_joint": 187.0,
-    "Left_ankle_pitch_joint": 100.0,
-    "Left_ankle_roll_joint": 50.0,
+    "Left_ankle_pitch_joint": 80.0,
+    "Left_ankle_roll_joint": 20.0,
     "Right_hip_pitch_joint": 187.0,
     "Right_hip_roll_joint": 187.0,
     "Right_hip_yaw_joint": 187.0,
     "Right_knee_joint": 187.0,
-    "Right_ankle_pitch_joint": 100.0,
-    "Right_ankle_roll_joint": 50.0,
+    "Right_ankle_pitch_joint": 80.0,
+    "Right_ankle_roll_joint": 20.0,
     "waist_yaw_joint": 187.0,
     "Left_shoulder_pitch_joint": 102.0,
     "Left_shoulder_roll_joint": 102.0,
@@ -190,13 +190,13 @@
     "Left_hip_yaw_joint": 18.7,
     "Left_knee_joint": 18.7,
     "Left_ankle_pitch_joint": 2.0,
-    "Left_ankle_roll_joint": 0.5,
+    "Left_ankle_roll_joint": 1.0,
     "Right_hip_pitch_joint": 18.7,
     "Right_hip_roll_joint": 18.7,
     "Right_hip_yaw_joint": 18.7,
     "Right_knee_joint": 18.7,
     "Right_ankle_pitch_joint": 2.0,
-    "Right_ankle_roll_joint": 0.5,
+    "Right_ankle_roll_joint": 1.0,
     "waist_yaw_joint": 18.7,
     "Left_shoulder_pitch_joint": 10.2,
     "Left_shoulder_roll_joint": 10.2,
@@ -218,14 +218,14 @@
     "Left_hip_roll_joint": 0.03,
     "Left_hip_yaw_joint": 0.03,
     "Left_knee_joint": 0.03,
-    "Left_ankle_pitch_joint": 0.069,
-    "Left_ankle_roll_joint": 0.0066,
+    "Left_ankle_pitch_joint": 0.02,
+    "Left_ankle_roll_joint": 0.01,
     "Right_hip_pitch_joint": 0.03,
     "Right_hip_roll_joint": 0.03,
     "Right_hip_yaw_joint": 0.03,
     "Right_knee_joint": 0.03,
-    "Right_ankle_pitch_joint": 0.069,
-    "Right_ankle_roll_joint": 0.0066,
+    "Right_ankle_pitch_joint": 0.02,
+    "Right_ankle_roll_joint": 0.01,
     "waist_yaw_joint": 0.03,
     "Left_shoulder_pitch_joint": 0.016,
     "Left_shoulder_roll_joint": 0.016,
@@ -512,8 +512,8 @@
         "Left_ankle_pitch_joint": 0.016,
         "Right_ankle_pitch_joint": 0.016
       },
-      "effective_value": 0.069,
-      "source": "user-requested zero-pose PR diagonal approximation of two AB output-shaft armatures of 0.016 kg m^2"
+      "effective_value": 0.02,
+      "source": "user-requested alignment with audited jaka.py ankle settings"
     },
     "ankle_roll_armature": {
       "joint_names": [
@@ -524,8 +524,8 @@
         "Left_ankle_roll_joint": 0.016,
         "Right_ankle_roll_joint": 0.016
       },
-      "effective_value": 0.0066,
-      "source": "user-requested zero-pose PR diagonal approximation of two AB output-shaft armatures of 0.016 kg m^2"
+      "effective_value": 0.01,
+      "source": "user-requested alignment with audited jaka.py ankle settings"
     },
     "nonfoot_sliding_friction": {
       "value": 1.0,
@@ -579,6 +579,44 @@
       ],
       "source": "user-requested narrower torso collision box",
       "rationale": "Fit the 126--140 mm central visual shell; wider upper flanges are outside this simplified collision core. Preserve X/Z size, pose and explicit inertial properties"
+    },
+    "ankle_pitch_pd": {
+      "joint_names": [
+        "Left_ankle_pitch_joint",
+        "Right_ankle_pitch_joint"
+      ],
+      "source_config_values": {
+        "Left_ankle_pitch_joint": {
+          "stiffness": 100.0,
+          "damping": 2.0
+        },
+        "Right_ankle_pitch_joint": {
+          "stiffness": 100.0,
+          "damping": 2.0
+        }
+      },
+      "effective_stiffness": 80.0,
+      "effective_damping": 2.0,
+      "source": "user-requested alignment with audited jaka.py ankle settings"
+    },
+    "ankle_roll_pd": {
+      "joint_names": [
+        "Left_ankle_roll_joint",
+        "Right_ankle_roll_joint"
+      ],
+      "source_config_values": {
+        "Left_ankle_roll_joint": {
+          "stiffness": 50.0,
+          "damping": 0.5
+        },
+        "Right_ankle_roll_joint": {
+          "stiffness": 50.0,
+          "damping": 0.5
+        }
+      },
+      "effective_stiffness": 20.0,
+      "effective_damping": 1.0,
+      "source": "user-requested alignment with audited jaka.py ankle settings"
     }
   },
   "contact_friction": {

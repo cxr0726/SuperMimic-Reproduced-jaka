@@ -4,6 +4,9 @@
 网络隐藏层与优化配置，选择Khan模型/动作；默认4096并行环境，采用 `isaac_khan` 观测。
 不启用激活重计算、AMP、微批或梯度累积，不缩小训练batch和想象H。
 
+紧凑 `.pt` 的编译开／关命令、`.pt` 转完整训练 NPZ 及本轮踝参数验证见
+[KHAN_PT_TO_NPZ.md](KHAN_PT_TO_NPZ.md)。该文档直接使用训练主入口；当前 shell 启动器仍接收 NPZ 目录。
+
 脚本复用 `TrainConfig` 的优化默认值，显式传入机器人、路径、环境数及Isaac观测布局和5/5帧数。
 网络隐藏层、学习率、batch、H及UTD不变；当前Khan另有明确的机器人适配：
 
@@ -11,7 +14,7 @@
 - COM随机化及replay ξ仍绑定 `waist_yaw_Link`，与anchor解耦。
 - 新增颈部位置/速度跟踪，权重0.5/0.1、尺度0.3 rad/1 rad/s；仿真与WM解析奖励同源。
 - 最大单步奖励0.112，训练/eval/record使用动态归一化，采样 `Gmax=11.2`；G1仍为0.1/10。
-- 腰部box全尺寸0.15×0.14×0.30 m；踝标称armature为pitch=0.069、roll=0.0066 kg·m²。
+- 腰部box全尺寸0.15×0.14×0.30 m；踝标称armature为pitch=0.02、roll=0.01 kg·m²，Kp/Kd分别为80/2、20/1。
 - 全27关节Kp/Kd每回合各自独立乘U[0.8,1.2]；四踝PR armature每回合独立乘U[0.8,1.2]。
 - 腰部startup附重U[−2,3] kg，标称7.1277 kg、实际5.1277–10.1277 kg；作为COM处点质量增减，body_inertia不变。
 - 腰部COM offset仍在body局部坐标中采样，x±0.025 m、y/z±0.05 m，startup每环境固定，本轮不扩大。

@@ -191,10 +191,17 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
     ankle_roll_names = ("Left_ankle_roll_joint", "Right_ankle_roll_joint")
     original_ankle_pitch_armature = {name: profile["armature"][name] for name in ankle_pitch_names}
     original_ankle_roll_armature = {name: profile["armature"][name] for name in ankle_roll_names}
-    # Local diagonal approximation of J_AB_PR.T @ diag(.016, .016) @ J_AB_PR
-    # at PR=(0, 0), rounded by the user to pitch=.069 and roll=.0066 kg m^2.
-    profile["armature"].update(dict.fromkeys(ankle_pitch_names, 0.069))
-    profile["armature"].update(dict.fromkeys(ankle_roll_names, 0.0066))
+    original_ankle_pd = {
+        name: {key: profile[key][name] for key in ("stiffness", "damping")}
+        for name in (*ankle_pitch_names, *ankle_roll_names)
+    }
+    # User-requested nominal ankle settings, aligned with the audited jaka.py.
+    profile["armature"].update(dict.fromkeys(ankle_pitch_names, 0.02))
+    profile["armature"].update(dict.fromkeys(ankle_roll_names, 0.01))
+    profile["stiffness"].update(dict.fromkeys(ankle_pitch_names, 80.0))
+    profile["stiffness"].update(dict.fromkeys(ankle_roll_names, 20.0))
+    profile["damping"].update(dict.fromkeys(ankle_pitch_names, 2.0))
+    profile["damping"].update(dict.fromkeys(ankle_roll_names, 1.0))
     profile["action_scale"] = dict.fromkeys(joint_names, 0.5)
     profile["parameter_overrides"] = {
         "waist_velocity_limit": {
@@ -206,14 +213,26 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
         "ankle_pitch_armature": {
             "joint_names": list(ankle_pitch_names),
             "source_config_values": original_ankle_pitch_armature,
-            "effective_value": 0.069,
-            "source": "user-requested zero-pose PR diagonal approximation of two AB output-shaft armatures of 0.016 kg m^2",
+            "effective_value": 0.02,
+            "source": "user-requested alignment with audited jaka.py ankle settings",
         },
         "ankle_roll_armature": {
             "joint_names": list(ankle_roll_names),
             "source_config_values": original_ankle_roll_armature,
-            "effective_value": 0.0066,
-            "source": "user-requested zero-pose PR diagonal approximation of two AB output-shaft armatures of 0.016 kg m^2",
+            "effective_value": 0.01,
+            "source": "user-requested alignment with audited jaka.py ankle settings",
+        },
+        "ankle_pitch_pd": {
+            "joint_names": list(ankle_pitch_names),
+            "source_config_values": {name: original_ankle_pd[name] for name in ankle_pitch_names},
+            "effective_stiffness": 80.0, "effective_damping": 2.0,
+            "source": "user-requested alignment with audited jaka.py ankle settings",
+        },
+        "ankle_roll_pd": {
+            "joint_names": list(ankle_roll_names),
+            "source_config_values": {name: original_ankle_pd[name] for name in ankle_roll_names},
+            "effective_stiffness": 20.0, "effective_damping": 1.0,
+            "source": "user-requested alignment with audited jaka.py ankle settings",
         },
         "nonfoot_sliding_friction": {
             "value": 1.0, "source": "user-requested alignment with mjlab G1 non-foot contacts",

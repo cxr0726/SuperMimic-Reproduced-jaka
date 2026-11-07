@@ -115,7 +115,7 @@ def _assert_readback(env, *, randomized):
     ankle_ids = torch.tensor([robot.joint_names.index(n) for n in ANKLES], device=env.device)
     ankle_dofs = joint_dofs[ankle_ids]
     torch.testing.assert_close(default_armature[ankle_dofs], torch.tensor(
-        [0.069, 0.0066, 0.069, 0.0066], device=env.device,
+        [0.02, 0.01, 0.02, 0.01], device=env.device,
     ), rtol=0, atol=1e-8)
     ratios = armature[:, ankle_dofs] / default_armature[ankle_dofs]
     torch.testing.assert_close(xi[:, SLICES["ankle_armature_factor"]], ratios, rtol=0, atol=0)

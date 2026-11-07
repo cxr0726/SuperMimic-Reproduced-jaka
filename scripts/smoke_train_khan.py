@@ -9,6 +9,7 @@ widths, batch sizes, compilation, warmup, horizon and UTD are preserved.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import time
@@ -119,6 +120,11 @@ def verify_production_config(cfg: TrainConfig) -> dict:
     reference_env = asdict(formal.env)
     env.pop("num_envs")
     reference_env.pop("num_envs")
+    # Compact storage changes how references are held, not the optimization or physics.
+    env.pop("compact_library")
+    reference_env.pop("compact_library")
+    env.pop("reference_fk_compile")
+    reference_env.pop("reference_fk_compile")
     for key in ("anchor_obs", "observation_layout", "future_frames", "actuator_delay",
                 "actuator_delay_max_ms", "reset_root_z_offset"):
         env.pop(key)
@@ -132,7 +138,9 @@ def verify_production_config(cfg: TrainConfig) -> dict:
         "history": cfg.policy.history,
         "execution_overrides": {"num_envs": cfg.env.num_envs,
                                 "stop_after_iterations": cfg.schedule.stop_after_iterations,
-                                "activation_checkpoint": cfg.policy_trainer.activation_checkpoint},
+                                "activation_checkpoint": cfg.policy_trainer.activation_checkpoint,
+                                "compact_library": cfg.env.compact_library,
+                                "reference_fk_compile": cfg.env.reference_fk_compile},
         "world_model_hidden": cfg.world_model.hidden,
         "policy_encoder_hidden": cfg.policy.encoder_hidden,
         "policy_decoder_hidden": cfg.policy.decoder_hidden,
@@ -146,16 +154,20 @@ def verify_production_config(cfg: TrainConfig) -> dict:
         "utd": cfg.schedule.updates_per_env_step,
         "warmup_iterations": cfg.schedule.warmup_iterations,
         "lr_schedule_total_iterations": cfg.schedule.total_iterations,
-        "compile": {"world_model": cfg.wm_trainer.compile,
+        "compile": {"reference_fk": cfg.env.reference_fk_compile,
+                    "world_model": cfg.wm_trainer.compile,
                     "policy": cfg.policy_trainer.compile},
     }
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-name", default="khan_training_smoke")
     parser.add_argument("--log-root", type=Path, default=ROOT / "logs")
-    parser.add_argument("--data-dir", type=Path, default=ROOT / "data/npz/khan_mini/lafan1")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--data-dir", type=Path, default=ROOT / "data/npz/khan_mini/lafan1")
+    source.add_argument("--library", type=Path,
+                        help="Packed 50 Hz Khan compact library; mutually exclusive with --data-dir")
     parser.add_argument("--num-envs", type=int, default=32)
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--observation-layout", choices=("isaac_khan", "supermimic"), default="isaac_khan")
@@ -163,19 +175,87 @@ def main() -> None:
                         help="Optional 9D goal pose for supermimic layout only; incompatible with isaac_khan")
     parser.add_argument("--activation-checkpoint", action=argparse.BooleanOptionalAction, default=False,
                         help="Optional activation recomputation; disabled to match the original training")
-    args = parser.parse_args()
+    parser.add_argument("--reference-fk-compile", action=argparse.BooleanOptionalAction, default=False,
+                        help="Compile CUDA compact reference queries; disable for eager A/B checks")
+    args = parser.parse_args(argv)
     if Path(args.run_name).name != args.run_name or args.run_name in ("", ".", ".."):
         parser.error("run-name must be one directory name")
     if args.num_envs < 1 or args.steps < 50:
         parser.error("num-envs must be positive and steps >= 50 (40 warmup + real updates)")
+    if args.library is not None and (args.library.suffix != ".pt" or not args.library.is_file()):
+        parser.error("--library must name an existing packed .pt file")
+    return args
+
+
+def configure_data_source(cfg: TrainConfig, args: argparse.Namespace) -> None:
+    if args.library is not None:
+        cfg.data.library = args.library.resolve()
+        cfg.data.npz_dir = None
+        cfg.env.compact_library = True
+    else:
+        cfg.data.npz_dir = args.data_dir.resolve()
+
+
+def dataset_summary(trainer, cfg: TrainConfig) -> dict:
+    """Report the references actually loaded, including packed storage precision."""
+    library = trainer.lib
+    names = [clip.name for clip in library.clips]
+    lengths = [int(clip.length) for clip in library.clips]
+    if len(names) != library.num_clips or len(set(names)) != len(names) or sum(lengths) != library.num_frames:
+        raise ValueError("Loaded clip names/frame metadata are inconsistent")
+    storage = library._ref
+    for start in range(0, len(storage), 65536):
+        if not bool(torch.isfinite(storage[start:start + 65536]).all().item()):
+            raise ValueError("Loaded reference contains NaN/Inf after the runtime storage cast")
+    packed = cfg.data.library is not None
+    paths = ([str(cfg.data.library.resolve())] if packed else
+             [str((cfg.data.npz_dir / (name + ".npz")).resolve()) for name in names])
+    result = {
+        "clips": library.num_clips, "frames": library.num_frames,
+        "source_type": "packed_library" if packed else "npz_directory",
+        "paths": paths, "library_path": paths[0] if packed else None,
+        "compact": bool(library.compact), "fps": float(library.fps),
+        "storage_dtype": str(storage.dtype), "reference_shape": list(storage.shape),
+        "reference_storage_bytes": storage.numel() * storage.element_size(),
+        "reference_storage_all_finite": True,
+        "clip_names": names, "clip_starts": [int(c.start) for c in library.clips],
+        "clip_lengths": lengths,
+        "clip_length_frames": {"min": min(lengths), "max": max(lengths),
+                               "mean": sum(lengths) / len(lengths)},
+        "duration_hours": (library.num_frames - library.num_clips) / library.fps / 3600,
+    }
+    if packed:
+        with cfg.data.library.open("rb") as stream:
+            result["library_sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
+    fixed_ranges = {}
+    for joint, target in (("Left_wrist_yaw_joint", .3), ("Right_wrist_yaw_joint", .3),
+                          ("Neck_yaw_joint", 0.), ("Neck_pitch_joint", 0.)):
+        if joint not in library.joint_names:
+            continue
+        joint_id = library.joint_names.index(joint)
+        position = storage[:, 7 + joint_id]
+        velocity = storage[:, 13 + library.num_joints + joint_id]
+        fixed_ranges[joint] = {
+            "target_rad": target,
+            "quantized_target_rad": float(torch.tensor(target, dtype=storage.dtype).item()),
+            "minimum_rad": float(position.min().item()), "maximum_rad": float(position.max().item()),
+            "max_abs_velocity_rad_s": float(velocity.abs().max().item()),
+        }
+    result["fixed_joint_reference_ranges"] = fixed_ranges
+    return result
+
+
+def main() -> None:
+    args = parse_args()
     if not torch.cuda.is_available():
-        parser.error("CUDA is required")
+        raise SystemExit("CUDA is required")
     run_dir = args.log_root.resolve() / args.run_name
     if list(run_dir.glob("ckpt*.pt")) or (run_dir / "summary.json").exists():
-        parser.error(f"existing run {run_dir}; choose another run-name")
+        raise SystemExit(f"existing run {run_dir}; choose another run-name")
     cfg = TrainConfig(robot="khan_mini", run_name=args.run_name, log_root=args.log_root.resolve())
-    cfg.data.npz_dir = args.data_dir.resolve()
+    configure_data_source(cfg, args)
     cfg.env.num_envs = args.num_envs
+    cfg.env.reference_fk_compile = args.reference_fk_compile
     cfg.env.observation_layout = args.observation_layout
     cfg.env.anchor_obs = args.anchor_obs
     cfg.policy_trainer.anchor_obs = args.anchor_obs
@@ -205,8 +285,7 @@ def main() -> None:
         models = {"wm": trainer.wm, "policy": trainer.policy, "critic": trainer.critic}
         before = {name: {key: value.detach().cpu().clone() for key, value in model.named_parameters()}
                   for name, model in models.items()}
-        report["dataset"] = {"clips": trainer.lib.num_clips, "frames": trainer.lib.num_frames,
-                             "paths": [str(path) for path in cfg.data.npz_dir.glob("*.npz")]}
+        report["dataset"] = dataset_summary(trainer, cfg)
         report["dimensions"] = {
             "state": trainer.buffer.s.shape[-1], "action": cfg.policy.num_joints,
             "context": trainer.wm.spec.xi_dim, "goal": cfg.policy.goal_dim,
