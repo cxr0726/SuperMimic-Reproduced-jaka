@@ -5,7 +5,10 @@
 不启用激活重计算、AMP、微批或梯度累积，不缩小训练batch和想象H。
 
 紧凑 `.pt` 的编译开／关命令、`.pt` 转完整训练 NPZ 及本轮踝参数验证见
-[KHAN_PT_TO_NPZ.md](KHAN_PT_TO_NPZ.md)。该文档直接使用训练主入口；当前 shell 启动器仍接收 NPZ 目录。
+[KHAN_PT_TO_NPZ.md](KHAN_PT_TO_NPZ.md)。现在分别提供两个启动器：
+`train_khan_server.sh --data-dir PATH` 接收 NPZ 目录，
+`train_khan_compact_server.sh --library PATH` 接收紧凑 `.pt` 文件；后者默认关闭参考 FK 编译，可加 `--reference-fk-compile` 开启。
+两者均调用本仓库同一个训练主入口，提供环境清理、路径检查、已有检查点保护和 `--dry-run`，复用正式网络及优化默认值。
 
 脚本复用 `TrainConfig` 的优化默认值，显式传入机器人、路径、环境数及Isaac观测布局和5/5帧数。
 网络隐藏层、学习率、batch、H及UTD不变；当前Khan另有明确的机器人适配：

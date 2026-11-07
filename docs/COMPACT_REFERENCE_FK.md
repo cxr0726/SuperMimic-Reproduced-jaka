@@ -33,20 +33,18 @@ packed 数据仍按原配置以 fp16 存储，读取后以 fp32 进行 FK；本�
 
 ```bash
 cd /home/jaka/Workspace/SuperMimic-Reproduced-jaka
-env -u PYTHONPATH -u PYTHONHOME OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MUJOCO_GL=egl \
-  .venv/bin/python -u -m supermimic.scripts.train \
-  --robot khan_mini --run-name khan_bones_compact \
-  --data.library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
-  --env.num-envs 4096 --env.reference-fk-compile
+bash scripts/training/train_khan_compact_server.sh \
+  --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
+  --run-name khan_bones_compact --num-envs 4096 --reference-fk-compile
 ```
 
-`--data.library` 自动开启 compact。参考 FK 编译单独选择；进行 eager 对照时，移除 `--env.reference-fk-compile` 或使用：
+启动器将 `--library` 传给训练入口的 `--data.library`，并显式开启 compact。参考 FK 编译单独选择；进行 eager 对照时，移除 `--reference-fk-compile` 或使用：
 
 ```text
---env.no-reference-fk-compile
+--no-reference-fk-compile
 ```
 
-启动时 `MotionLibrary` 摘要显示 `reference FK=compiled (dynamic batch)` 或 `reference FK=eager`。编译为惰性执行，首次参考查询会包含冷编译时间。这个开关不进入机器人语义 contract，不改变 checkpoint 的观测、动力学或奖励兼容条件。
+以上是 shell 启动器的参数；直接调用 Python 入口时仍用 `--env.reference-fk-compile`／`--env.no-reference-fk-compile`。启动器的路径检查、环境清理、检查点保护、dry-run 和恢复说明见 [KHAN_PT_TO_NPZ.md](KHAN_PT_TO_NPZ.md)。启动时 `MotionLibrary` 摘要显示 `reference FK=compiled (dynamic batch)` 或 `reference FK=eager`。编译为惰性执行，首次参考查询会包含冷编译时间。这个开关不进入机器人语义 contract，不改变 checkpoint 的观测、动力学或奖励兼容条件。
 
 ## 复现验证
 

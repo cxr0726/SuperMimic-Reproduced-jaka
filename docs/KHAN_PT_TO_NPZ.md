@@ -11,7 +11,7 @@ XML、profile、生成器及 provenance 同步更新。实际编译的 mjlab 模
 
 模型/profile 哈希随参数变更而改变。本轮应新建 run，不将旧物理配置的检查点作为相同模型继续 resume。动作库不需因此重新重定向：这些执行器参数不改变 FK 几何。
 
-## 服务器直接训练 `.pt`
+## 服务器脚本训练 `.pt`
 
 先同步本轮代码和 `assets/robots/khan_mini/`。以下使用服务器上已确认的仓库和数据绝对路径：
 
@@ -20,27 +20,33 @@ cd /home/jaka/Workspace/SuperMimic-Reproduced-jaka
 KHAN_LIBRARY=/home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt
 ```
 
-不开启参考 FK 编译：
+推荐使用新启动器 `scripts/training/train_khan_compact_server.sh`。它与 NPZ 启动器调用同一个 `supermimic.scripts.train`，提供项目虚拟环境／机器人资产／库文件检查、环境变量清理、自动切换项目目录、已有检查点保护和 `--dry-run`。原 NPZ 启动器保持不变。
+
+不开启参考 FK 编译（默认）：
 
 ```bash
-env -u PYTHONPATH -u PYTHONHOME OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MUJOCO_GL=egl \
-  .venv/bin/python -u -m supermimic.scripts.train \
-  --robot khan_mini --run-name khan_bones_pt_eager \
-  --data.library "$KHAN_LIBRARY" --env.num-envs 4096 \
-  --env.no-reference-fk-compile
+bash scripts/training/train_khan_compact_server.sh \
+  --library "$KHAN_LIBRARY" \
+  --run-name khan_bones_pt_eager --num-envs 4096 \
+  --no-reference-fk-compile
 ```
 
 开启参考 FK 编译：
 
 ```bash
-env -u PYTHONPATH -u PYTHONHOME OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MUJOCO_GL=egl \
-  .venv/bin/python -u -m supermimic.scripts.train \
-  --robot khan_mini --run-name khan_bones_pt_compiled \
-  --data.library "$KHAN_LIBRARY" --env.num-envs 4096 \
-  --env.reference-fk-compile
+bash scripts/training/train_khan_compact_server.sh \
+  --library "$KHAN_LIBRARY" \
+  --run-name khan_bones_pt_compiled --num-envs 4096 \
+  --reference-fk-compile
 ```
 
-`--data.library` 自动选择 compact，默认不开启参考 FK 编译。该开关同时控制环境当前参考和想象窗口参考的 FK，不改变预测机器人 FK、网络编译或优化器。服务器命令保留正式默认 H32、batch2048/4096、UTD0.4、320k学习率调度和关闭激活重计算的设置；编译不保证在目标 GPU 上提高完整训练吞吐。建议先用 eager 命令；对照时使用独立 run 名称。命令清除外部 `PYTHONPATH`/`PYTHONHOME`，使用本项目 `.venv`；数据无需移动，也无需传 `--data.npz-dir`。
+脚本默认库路径为项目下的 `data/pt/khan_combined_8452_compact.pt`，因此在该服务器目录布局下也可以省略 `--library`。`--library` 被转为训练入口的 `--data.library`，自动选择 compact；参考 FK 编译默认关闭。该开关同时控制环境当前参考和想象窗口参考的 FK，不改变预测机器人 FK、网络编译或优化器。服务器命令保留正式默认 H32、batch2048/4096、UTD0.4、320k学习率调度和关闭激活重计算的设置；编译不保证在目标 GPU 上提高完整训练吞吐。建议先用 eager 命令；对照时使用独立 run 名称。数据无需移动，也无需 NPZ 目录。
+
+首次运行可先在上述命令末尾添加 `--dry-run`。它仅检查文件路径并打印实际命令，不执行 Python、不读取整库、不创建训练日志；库的张量／机器人 metadata 及恢复兼容性仍由实际训练加载器验证。库文件必须为可读非空 `.pt`。从其他目录调用脚本时，相对的 `--library`／`--resume` 路径按调用目录解析。
+
+需要恢复同一数据／配置／资产的 run 时增加 `--resume logs/对应run/ckpt_latest.pt`。若 run 已有 `ckpt*.pt` 却未指定 `--resume`，脚本会拒绝启动。短时检查可加 `--stop-after-iterations 50`，它只限制执行步数，不改变320k学习率调度。
+
+脚本清理 `PYTHONPATH`、`PYTHONHOME` 和遗留 torchrun 环境变量，设置 `PYTHONNOUSERSITE=1`、`MUJOCO_GL=egl`，并与 NPZ 脚本一样将 `OMP_NUM_THREADS`、`TORCHINDUCTOR_COMPILE_THREADS` 默认设为1。选卡继续使用 `CUDA_VISIBLE_DEVICES=0 bash ...`。`--help` 显示全部参数；`.pt` 使用 `--library`，NPZ 目录继续使用原脚本的 `--data-dir`。
 
 ## 从 `.pt` 导出完整训练 NPZ
 
