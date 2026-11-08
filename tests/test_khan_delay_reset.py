@@ -37,6 +37,54 @@ def _actuators(cfg):
     return cfg.scene.entities["robot"].articulation.actuators
 
 
+@pytest.mark.slow
+@NEEDS_CUDA_DATA
+def test_new_training_has_no_delay_queue_and_preserves_first_action_rate():
+    from supermimic.config import TrainConfig, resolve_training_observations
+
+    training = TrainConfig(robot="khan_mini")
+    resolve_training_observations(training)
+    env = make_env(SuperMimicEnvCfgArgs(
+        npz_files=[str(NPZ)], robot="khan_mini", num_envs=4,
+        actuator_delay=training.env.actuator_delay,
+        merge_short_tail_bins=training.env.merge_short_tail_bins,
+        reset_noise=False, obs_noise=False, action_noise_std=0., seed=37,
+    ), device="cuda:0")
+    try:
+        command = env.command_manager.get_term("motion")
+        command.forced_frame[:] = command.library.clip_start[0] + 20
+        env.reset()
+        robot = env.scene["robot"]
+        context = env.recorder_manager.get_term("replay").ctx
+        assert context.delay_buffer is None
+        assert all(not actuator.has_delay and actuator._delay_buffer is None
+                   for actuator in robot.actuators)
+        assert context.read().shape == (4, 91)
+        assert torch.count_nonzero(context.read()[:, -1]) == 0
+        assert command.sampler_contract["version"] == 3
+        state = StateIO(env).read()
+        torch.testing.assert_close(state[:, 2]-command.root_pos_w[:, 2],
+                                   torch.full((4,), .05, device=env.device), atol=2e-6, rtol=0)
+
+        action = torch.full((4, 27), .2, device=env.device)
+        env.action_manager.process_action(action)
+        env.action_manager.apply_action()
+        env.scene.write_data_to_sim()
+        torch.testing.assert_close(env.sim.data.ctrl[:, context.ctrl_ids],
+                                   robot.data.joint_pos_target, rtol=0, atol=0)
+        # Reset again: the following step is the true episode boundary, with
+        # raw previous action zero, rather than an arbitrary imagination t0.
+        env.reset()
+        env.step(action)
+        expected_rate = -.002 * action.square().sum(-1)
+        torch.testing.assert_close(env.reward_manager.get_term("action_rate_l2"),
+                                   expected_rate, atol=1e-7, rtol=1e-6)
+        assert context.delay_buffer is None
+        assert torch.count_nonzero(context.read()[:, -1]) == 0
+    finally:
+        env.close()
+
+
 @pytest.mark.parametrize("max_ms,max_lag", [(0.0, 0), (5.0, 1), (10.0, 2), (20.0, 4)])
 def test_delay_configuration_matches_morphmimic_physics_steps(max_ms, max_lag):
     cfg = _cfg(actuator_delay_max_ms=max_ms)

@@ -2,7 +2,8 @@
 
 Every clip is played once from its first frame with the deterministic policy:
 no observation/action noise, no reset noise, no domain randomization (foot friction 1.0),
-deterministic physics. A clip *fails* if the training termination (pelvis height /
+nominal physics. This does not promise bitwise-repeatable GPU contact dynamics.
+A clip *fails* if the training termination (pelvis height /
 tilt vs reference) fires before the clip ends. Normalised return = sum of per-step
 rewards / (max step reward * number of steps).
 """
@@ -35,6 +36,33 @@ class ClipResult:
     failed: bool
     fail_step: int  # -1 if not failed
     terms: dict | None = None  # per-term mean reward per step (dt-scaled)
+
+
+def benchmark_source(npz_files: list[str], num_envs: int | None) -> tuple[int, bool]:
+    """Size the scene by motion count, including motions inside one packed file.
+
+    Read packed metadata through a CPU memory map, so selecting the scene size
+    does not copy the reference tensor or perform any reference FK. The runtime
+    MotionLibrary remains responsible for validating the full robot/data layout.
+    """
+    if not npz_files:
+        raise ValueError("run_benchmark needs at least one motion clip")
+    requested = 1024 if num_envs is None else num_envs
+    if requested < 1:
+        raise ValueError("num_envs must be positive")
+    packed = len(npz_files) == 1 and Path(npz_files[0]).suffix == ".pt"
+    if any(Path(path).suffix == ".pt" for path in npz_files) and not packed:
+        raise ValueError("Use one packed .pt library or a list of NPZ files")
+    if packed:
+        pack = torch.load(npz_files[0], map_location="cpu", weights_only=False, mmap=True)
+        if not isinstance(pack, dict) or "names" not in pack:
+            raise ValueError("Packed library needs clip names")
+        count = len(pack["names"])
+        if count < 1 or len(set(pack["names"])) != count:
+            raise ValueError("Packed library needs nonempty, unique clip names")
+    else:
+        count = len(npz_files)
+    return min(requested, count), packed
 
 
 def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, dict]:
@@ -72,13 +100,11 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
 
 
 @torch.no_grad()
-def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int | None = None, verbose: bool = True, anchor_obs: bool = False, robot: RobotName = "g1", history_length: int | None = None, observation_layout: str | None = None, reset_root_z_offset: float | None = None) -> list[ClipResult]:
+def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int | None = None, verbose: bool = True, anchor_obs: bool = False, robot: RobotName = "g1", history_length: int | None = None, observation_layout: str | None = None, reset_root_z_offset: float | None = None, reference_fk_compile: bool = False) -> list[ClipResult]:
     robot_spec = get_robot_spec(robot)
     if policy.cfg.num_joints != robot_spec.num_joints:
         raise ValueError(f"Policy joint count differs from benchmark robot {robot}")
-    if not npz_files:
-        raise ValueError("run_benchmark needs at least one motion clip")
-    num_envs = min(num_envs or 1024, len(npz_files))
+    num_envs, compact = benchmark_source(npz_files, num_envs)
     layout = observation_layout or policy.cfg.observation_layout
     if layout != policy.cfg.observation_layout:
         raise ValueError("Policy and benchmark observation layouts differ")
@@ -104,12 +130,16 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
         record_transitions=False,
         seed=0,
         anchor_obs=anchor_obs,
+        compact_library=compact,
+        reference_fk_compile=reference_fk_compile,
     )
     env = make_env(args, device=device)
     try:
         cmd = env.command_manager.get_term("motion")
         lib = cmd.library
         n_clips = lib.num_clips
+        if n_clips < num_envs:
+            raise ValueError("Motion count changed after benchmark scene sizing")
         max_r = env.step_dt * sum(max(0.0, term.weight) for term in env.cfg.rewards.values())
 
         # Clip queue: env e plays clips e, e+N, e+2N, ...

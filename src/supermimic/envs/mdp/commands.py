@@ -31,7 +31,11 @@ from mjlab.utils.lab_api.math import (
 )
 
 from supermimic.envs.mdp.motion_library import MotionLibrary
-from supermimic.envs.mdp.reset_sampling import mean_reward_continuation, update_bin_returns
+from supermimic.envs.mdp.reset_sampling import (
+    ResetEpisodeDiagnostics,
+    mean_reward_continuation,
+    update_bin_returns,
+)
 
 if TYPE_CHECKING:
     from mjlab.entity import Entity
@@ -60,6 +64,7 @@ class MultiClipMotionCommand(CommandTerm):
             reference_fk_compile=cfg.reference_fk_compile,
             robot_name=cfg.robot_name, root_body_name=cfg.root_body_name,
             joint_names=self.robot.joint_names,
+            merge_short_tail_bins=cfg.merge_short_tail_bins,
         )
         print(f"[INFO] {self.library.summary()}")
         lib = self.library
@@ -96,6 +101,10 @@ class MultiClipMotionCommand(CommandTerm):
                 json.dumps(layout, separators=(",", ":")).encode()
             ).hexdigest(),
         }
+        if cfg.merge_short_tail_bins:
+            self.sampler_contract.update(
+                version=3, tail_bin_policy="merge_remainder_strictly_less_than_half_reference_bin",
+            )
         # Evaluation hook: when >= 0, the next reset of that env starts exactly at this global frame.
         self.forced_frame = torch.full((n,), -1, dtype=torch.long, device=self.device)
         self.ep_reward_sum = torch.zeros(n, dtype=torch.float64, device=self.device)
@@ -103,6 +112,7 @@ class MultiClipMotionCommand(CommandTerm):
         self.episode_start_bin = torch.zeros(n, dtype=torch.long, device=self.device)
         self.ep_len = torch.zeros(n, dtype=torch.long, device=self.device)
         self.last_logged_step = torch.full_like(self.ep_len, env.common_step_counter)
+        self.reset_diagnostics = ResetEpisodeDiagnostics(n, self.device, cfg.gamma)
         self._compute_dt: float | torch.Tensor = 0.0
 
         for k in ("error_anchor_pos", "error_anchor_rot", "error_body_pos", "error_body_rot",
@@ -237,6 +247,13 @@ class MultiClipMotionCommand(CommandTerm):
         first = ids[self.ep_len[ids] == 0]
         self.episode_start_bin[first] = self.library.bin_of_frame(self.frame[first])
         r = reward[ids].double()
+        reward_manager = getattr(self._env, "reward_manager", None)
+        if reward_manager is not None and "action_rate_l2" in reward_manager.active_terms:
+            # Public API includes the same term weight and dt as reward_buf.
+            action_rate = reward_manager.get_term("action_rate_l2")[ids]
+        else:
+            action_rate = torch.zeros_like(r)
+        self.reset_diagnostics.record(ids, r, action_rate, self.ep_len[ids])
         self.ep_discounted_return[ids] += self.cfg.gamma ** self.ep_len[ids].double() * r
         self.ep_reward_sum[ids] += r
         self.ep_len[ids] += 1
@@ -252,6 +269,7 @@ class MultiClipMotionCommand(CommandTerm):
             self.ep_discounted_return[ids], self.ep_reward_sum[ids],
             self.ep_len[ids], terminated, self.cfg.gamma,
         )
+        self.reset_diagnostics.finalize(ids, self.ep_reward_sum[ids], self.ep_len[ids], terminated, targets)
         update_bin_returns(self.bin_return, self.episode_start_bin[ids], targets, self.cfg.ema_alpha)
         self.metrics["episode_return_to_go"][ids] = targets.float()
         self.ep_len[ids] = 0
@@ -435,6 +453,7 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     robot_name: str = "g1"
     future_frames: int = 10
     bin_frames: int = 50
+    merge_short_tail_bins: bool = False
     pose_range: dict[str, tuple[float, float]] = field(default_factory=dict)
     velocity_range: dict[str, tuple[float, float]] = field(default_factory=dict)
     joint_position_range: tuple[float, float] = (0.0, 0.0)

@@ -48,6 +48,18 @@ def test_matching_sampler_roundtrip_restores_statistics():
     torch.testing.assert_close(command.bin_memory, saved["bin_memory"], rtol=0, atol=0)
 
 
+def test_unmerged_v2_scores_cannot_seed_merged_v3_curriculum():
+    command = FakeCommand()
+    saved = checkpoint(command)
+    command.sampler_contract.update(
+        version=3, tail_bin_policy="merge_remainder_strictly_less_than_half_reference_bin",
+    )
+    with pytest.raises(ValueError, match="sampler_contract differs"):
+        load_sampler_state(command, saved)
+    assert command.reset_calls == 0
+    torch.testing.assert_close(command.bin_return, torch.tensor([1.0, 2.0, 3.0]))
+
+
 def test_legacy_sampler_is_reset_even_if_old_bins_have_different_shape():
     command = FakeCommand()
     saved = {

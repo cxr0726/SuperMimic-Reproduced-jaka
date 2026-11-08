@@ -77,6 +77,8 @@ def test_default_compact_run_preserves_original_training_configuration(project, 
     assert cfg.run_name == "khan_bones_pt" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is None
     assert cfg.env.compact_library and not cfg.env.reference_fk_compile
+    assert cfg.env.actuator_delay is False and cfg.env.merge_short_tail_bins is True
+    assert "actuator delay OFF" in result.stdout
     baseline = TrainConfig(robot="khan_mini")
     resolve_training_observations(cfg)
     resolve_training_observations(baseline)

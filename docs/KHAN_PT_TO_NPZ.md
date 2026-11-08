@@ -1,5 +1,7 @@
 # Khan 踝参数与紧凑库／完整 NPZ 训练
 
+当前训练默认配置已在2026-11-08更新为无actuator delay、合并不足半bin的尾部，并新增首步／后续跟踪统计；reset抬高0.05m与首步action-rate保持不变。mixed480子集提取、全量训练及本轮验证见 [Khan无延迟与短尾对照训练](KHAN_RESET_SAMPLING.md)。以下踝参数及早期验证记录继续适用；恢复训练须匹配新的sampler合同。
+
 本轮按要求仅调整左右踝的标称执行器参数。其余关节、几何、质量与惯量、力矩限额、动作缩放、观测、奖励、DR 分布、ξ91、网络和优化参数保持不变。
 
 | 双侧关节 | Kp | Kd | armature，kg·m² |
@@ -47,6 +49,24 @@ bash scripts/training/train_khan_compact_server.sh \
 需要恢复同一数据／配置／资产的 run 时增加 `--resume logs/对应run/ckpt_latest.pt`。若 run 已有 `ckpt*.pt` 却未指定 `--resume`，脚本会拒绝启动。短时检查可加 `--stop-after-iterations 50`，它只限制执行步数，不改变320k学习率调度。
 
 脚本清理 `PYTHONPATH`、`PYTHONHOME` 和遗留 torchrun 环境变量，设置 `PYTHONNOUSERSITE=1`、`MUJOCO_GL=egl`，并与 NPZ 脚本一样将 `OMP_NUM_THREADS`、`TORCHINDUCTOR_COMPILE_THREADS` 默认设为1。选卡继续使用 `CUDA_VISIBLE_DEVICES=0 bash ...`。`--help` 显示全部参数；`.pt` 使用 `--library`，NPZ 目录继续使用原脚本的 `--data-dir`。
+
+## 直接对紧凑 `.pt` 做 GPU benchmark
+
+无需先导出 NPZ，可在服务器仓库根目录运行：
+
+```bash
+env -u PYTHONPATH -u PYTHONHOME OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MUJOCO_GL=egl \
+  .venv/bin/python -u scripts/eval_benchmark.py \
+  --ckpt logs/khan_bones_pt_eager/ckpt_0100000.pt \
+  --library "$KHAN_LIBRARY" --num-envs 2048 --device cuda:0 \
+  --out logs/khan_bones_pt_eager/analysis/benchmark_0100000_pt.json
+```
+
+`--library` 与 `--npz-dir`／动作筛选参数互斥，评估库内全部动作。并行数按 `.pt` 内部动作数量确定，不把一个文件误当一条动作；默认1024，可指定2048等，显存预算由目标GPU决定。参考FK默认eager，可加 Python 入口的 `--reference-fk-compile` 开启。原 NPZ 的 `--npz-dir` 评估方式保持不变。
+
+沿用原 benchmark 协议：每条动作首帧开始、使用确定性策略跑一次完整回合，关闭观测／动作／reset噪声、域随机化和执行器延迟，保留检查点的实际root reset offset。GPU接触动力学及后端数值仍可能有运行间差异，不承诺逐bit复现。`failed` 是训练的根高度／倾斜终止触发，不等同所有视觉失误。均值按动作等权，step-weighted按实际执行步数加权；摔倒后未执行的参考帧不补零，所以应同时看失败数和完成比例。它与训练时随机起点、难例采样和DR下的 `train_ret` 不是同一统计量。
+
+输出结果JSON及同名 `.manifest.json`，记录数据／检查点SHA256、设备、实际并行数、参考FK设置、时间与协议。Torch显存计数不包含MuJoCo Warp分配，不能将该数值当作整张GPU的显存峰值。
 
 ## 从 `.pt` 导出完整训练 NPZ
 

@@ -19,10 +19,11 @@ Single GPU, Khan_mini, original single-GPU LAFAN training parameters.
 Networks, optimization, H=32, UTD=0.4 and LR schedule reuse
 the repository defaults. Khan uses the Isaac observation layout: 5 reference
 frames, 5 history frames, clean goal 155 and policy input 465. Activation
-recomputation remains disabled. Khan adds episode-held 0-20 ms actuator delay,
-full CAD convex feet, actual root reset clearance 0.05 m, and a 605-dim critic.
-Khan dynamics DR (PD, ankle armature, waist mass, delay) uses a 91-dim context.
-No dataset is downloaded. v5 and older Khan checkpoints need a new training run.
+recomputation remains disabled. Actuator delay is OFF for this comparison.
+Khan uses full CAD convex feet, actual root reset clearance 0.05 m and a 605-dim
+critic. Dynamics DR (PD, ankle armature, waist mass) retains the 91-dim context
+with zero delay. Tails shorter than half a bin are merged into the preceding bin.
+No dataset is downloaded. Use a fresh run for the changed sampler layout.
 
 Options:
   --num-envs N                Parallel robot environments (default: 4096)
@@ -105,6 +106,7 @@ command=(
     --robot khan_mini --run-name "$RUN_NAME" --log-root "$PROJECT_DIR/logs"
     --data.npz-dir "$DATA_DIR" --env.num-envs "$NUM_ENVS"
     --env.observation-layout isaac_khan --env.future-frames 5 --policy.history 5
+    --env.actuator-delay False --env.merge-short-tail-bins True
 )
 if [[ -n "$STOP_AFTER" ]]; then
     command+=(--schedule.stop-after-iterations "$STOP_AFTER")
@@ -115,7 +117,8 @@ fi
 printf '[INFO] Khan clips: %d; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "${#NPZ_FILES[@]}" "$NUM_ENVS"
 printf '[INFO] Khan observations: future/history 5/5; clean goal 155; policy 465; activation recomputation: OFF\n'
-printf '[INFO] Khan v6: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; delay 0-20 ms\n'
+printf '[INFO] Khan: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; actuator delay OFF\n'
+printf '[INFO] Reset bins: merge tails shorter than half a bin; first-step action-rate unchanged; separate reset/continuing reward diagnostics\n'
 printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; full convex feet\n'
 printf '[COMMAND]'
 printf ' %q' "${command[@]}"

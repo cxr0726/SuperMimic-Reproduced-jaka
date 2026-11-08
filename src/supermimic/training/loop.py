@@ -14,6 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from supermimic.config import TrainConfig, resolve_training_observations
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
+from supermimic.envs.mdp.reset_sampling import reset_diagnostic_metrics
 from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.observation_layout import goal_dimension
@@ -143,6 +144,7 @@ class Trainer:
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
                 reference_fk_compile=cfg.env.reference_fk_compile,
+                merge_short_tail_bins=cfg.env.merge_short_tail_bins,
                 anchor_obs=cfg.env.anchor_obs,
                 seed=cfg.seed + 1000 * self.rank,
             ),
@@ -323,6 +325,14 @@ class Trainer:
             if self.iteration % sch.log_interval == 0:
                 it = self.iteration
                 elapsed = time.time() - t_start
+                diagnostic_totals = self.command.reset_diagnostics.consume()
+                if self.world > 1:
+                    # Every rank contributes sums/counts, even with no completed
+                    # episodes. Only the log interval converts these to CPU.
+                    torch.distributed.all_reduce(diagnostic_totals)
+                if self.is_main:
+                    for key, value in reset_diagnostic_metrics(diagnostic_totals, self.max_step_reward).items():
+                        self.writer.add_scalar(key, value, it)
                 if self.world > 1:
                     # Every rank must issue the same collectives: reduce (sum, count) unconditionally.
                     tot = allreduce_mean(float(sum(finished_returns))) * self.world

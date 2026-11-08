@@ -35,7 +35,7 @@ class EnvCfg:
     obs_noise: bool = True
     reset_noise: bool = True
     domain_randomization: bool = True
-    actuator_delay: bool | None = None  # Khan on, G1 off; nominal evaluation disables it
+    actuator_delay: bool | None = None  # New training defaults off; True restores episode-held delay
     actuator_delay_max_ms: float = 20.0
     reset_root_z_offset: float | None = None  # Actual robot only: Khan .05 m, G1 zero
     sampling_mode: str = "return"
@@ -44,6 +44,7 @@ class EnvCfg:
     observation_layout: Literal["auto", "supermimic", "isaac_khan"] = "auto"
     compact_library: bool = False
     reference_fk_compile: bool = False  # Opt-in: benchmark CUDA compact FK on the target GPU
+    merge_short_tail_bins: bool | None = None  # Training default: Khan on, original G1 off
     anchor_obs: bool = False
 
 
@@ -93,12 +94,14 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
 
     cfg.world_model.state_spec.context_layout = context_kind_for_robot(cfg.robot)
     settings = resolve_robot_environment(
-        cfg.robot, actuator_delay=cfg.env.actuator_delay,
+        cfg.robot, actuator_delay=False if cfg.env.actuator_delay is None else cfg.env.actuator_delay,
         actuator_delay_max_ms=cfg.env.actuator_delay_max_ms,
         reset_root_z_offset=cfg.env.reset_root_z_offset,
     )
     for name, value in settings.items():
         setattr(cfg.env, name, value)
+    if cfg.env.merge_short_tail_bins is None:
+        cfg.env.merge_short_tail_bins = cfg.robot == "khan_mini"
     layout = resolve_observation_layout(cfg.robot, cfg.env.observation_layout)
     future, history = resolve_observation_sizes(
         layout, cfg.env.future_frames, cfg.policy.history, cfg.env.anchor_obs,

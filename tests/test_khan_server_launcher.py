@@ -62,6 +62,8 @@ def test_dry_run_selects_isaac_observations_without_overriding_original_optimiza
     assert cfg.data.npz_dir == root / "data/npz/khan_mini/lafan1"
     assert cfg.run_name == "khan_lafan1_dr_v6" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is cfg.data.library is None
+    assert cfg.env.actuator_delay is False and cfg.env.merge_short_tail_bins is True
+    assert "actuator delay OFF" in result.stdout
     baseline = TrainConfig(robot="khan_mini")
     resolve_training_observations(cfg)
     resolve_training_observations(baseline)

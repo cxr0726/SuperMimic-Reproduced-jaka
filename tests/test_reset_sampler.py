@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from supermimic.envs.mdp.commands import MultiClipMotionCommand, MultiClipMotionCommandCfg
+from supermimic.envs.mdp.reset_sampling import ResetEpisodeDiagnostics, reset_diagnostic_metrics
 
 
 def _command(n=4):
@@ -56,6 +57,7 @@ def _command(n=4):
     cmd.ep_discounted_return = torch.zeros(n, dtype=torch.float64)
     cmd.episode_start_bin = torch.zeros(n, dtype=torch.long)
     cmd.last_logged_step = torch.zeros(n, dtype=torch.long)
+    cmd.reset_diagnostics = ResetEpisodeDiagnostics(n, "cpu", cmd.cfg.gamma)
     cmd.metrics = {
         "sampling_entropy": torch.zeros(n), "episode_return_to_go": torch.zeros(n),
     }
@@ -261,3 +263,90 @@ def test_zero_initialization_and_invalid_tail_bin_are_excluded_from_all_mixture_
     assert (frames < 150).all()
     assert seen[0][3] == 0
     torch.testing.assert_close(seen[0][:3], torch.full((3,), 1 / 3))
+
+
+def test_first_step_diagnostics_use_actual_weighted_rewards_and_preserve_sampler_target():
+    cmd = _command(2)
+    rates = torch.zeros(2)
+    cmd._env.reward_manager = SimpleNamespace(
+        active_terms=["action_rate_l2"], get_term=lambda name: rates,
+    )
+    # Env0 has a one-step real failure; env1 has a three-step normal cutoff.
+    for step, (rewards, action_rates) in enumerate([
+        ([-0.02, -0.04], [-0.12, -0.14]),
+        ([8.0, 0.08], [-9.0, -0.02]),
+        ([8.0, 0.10], [-9.0, 0.0]),
+    ], 1):
+        cmd._env.common_step_counter = step
+        cmd._env.reward_buf[:] = torch.tensor(rewards)
+        rates[:] = torch.tensor(action_rates)
+        mask = torch.tensor([step == 1, True])
+        cmd._log_step_rewards(mask)
+        # Repeated calls must not count a transition twice.
+        cmd._log_step_rewards(mask)
+    cmd._env.termination_manager.terminated[0] = True
+    cmd._finalize_episodes(torch.tensor([0, 1]))
+    totals = cmd.reset_diagnostics.consume()
+    stats = reset_diagnostic_metrics(totals, max_step_reward=0.112)
+    assert stats["reset/completed_episodes"] == 2
+    assert stats["tracking/post_first_step_episodes"] == 1
+    assert stats["reset/first_step_reward"] == pytest.approx(-0.03)
+    assert stats["reset/first_step_action_rate_reward"] == pytest.approx(-0.13)
+    assert stats["tracking/post_first_step_reward"] == pytest.approx(0.09)
+    assert stats["tracking/post_first_step_action_rate_reward"] == pytest.approx(-0.01)
+    assert stats["tracking/post_first_step_norm_return"] == pytest.approx(0.09 / 0.112)
+    factor = 1 + 0.99 ** 3 / (3 * (1 - 0.99))
+    assert stats["reset/first_step_action_rate_target_contribution"] == pytest.approx(
+        (-0.12 - 0.14 * factor) / 2,
+    )
+    assert stats["reset/first_step_target_contribution"] + stats[
+        "tracking/post_first_step_target_contribution"
+    ] == pytest.approx(stats["sampler/completed_episode_target"])
+    # Diagnostics remain observational: production G still uses all rewards.
+    target1 = -0.04 + 0.99 * 0.08 + 0.99**2 * 0.10 + 0.99**3 * (0.14 / 3) / 0.01
+    torch.testing.assert_close(cmd.bin_return[:2], torch.tensor([-0.004, 0.2 * target1]))
+    assert cmd.reset_diagnostics.consume().count_nonzero() == 0
+    cmd._finalize_episodes(torch.tensor([0, 1]))
+    assert cmd.reset_diagnostics.consume().count_nonzero() == 0
+
+
+def test_single_step_episodes_do_not_fabricate_post_first_means():
+    cmd = _command(1)
+    cmd._env.common_step_counter = 1
+    cmd._log_step_rewards()
+    cmd._finalize_episodes(torch.tensor([0]))
+    metrics = reset_diagnostic_metrics(cmd.reset_diagnostics.consume(), 0.112)
+    assert metrics["reset/completed_episodes"] == 1
+    assert metrics["tracking/post_first_step_episodes"] == 0
+    assert "tracking/post_first_step_reward" not in metrics
+    assert "tracking/post_first_step_norm_return" not in metrics
+
+
+def test_partial_reset_preserves_other_episode_diagnostics_and_clear_does_not_clear_live_state():
+    cmd = _command(2)
+    cmd._env.common_step_counter = 1
+    cmd._env.reward_buf[:] = torch.tensor([0.02, 0.04])
+    cmd._log_step_rewards()
+    cmd._resample_command(torch.tensor([0]))
+    stats = reset_diagnostic_metrics(cmd.reset_diagnostics.consume(), 0.112)
+    assert stats["reset/first_step_reward"] == pytest.approx(0.02)
+    assert cmd.reset_diagnostics.first_reward[1] == pytest.approx(0.04)
+    cmd._env.common_step_counter = 2
+    cmd._env.reward_buf[:] = torch.tensor([0.06, 0.08])
+    cmd._log_step_rewards()
+    cmd._resample_command(torch.tensor([1]))
+    stats = reset_diagnostic_metrics(cmd.reset_diagnostics.consume(), 0.112)
+    assert stats["reset/first_step_reward"] == pytest.approx(0.04)
+    assert stats["tracking/post_first_step_reward"] == pytest.approx(0.08)
+
+
+def test_rank_sums_keep_episode_and_step_weighted_diagnostic_denominators():
+    rank0, rank1 = ResetEpisodeDiagnostics(1, "cpu", 0.99), ResetEpisodeDiagnostics(1, "cpu", 0.99)
+    ids = torch.tensor([0])
+    for diag, steps, first, total in [(rank0, 2, 0.01, 0.05), (rank1, 4, 0.02, 0.20)]:
+        diag.record(ids, torch.tensor([first]), torch.tensor([-0.03]), torch.tensor([0]))
+        diag.finalize(ids, torch.tensor([total]), torch.tensor([steps]), torch.tensor([False]), torch.tensor([1.0]))
+    metrics = reset_diagnostic_metrics(rank0.consume() + rank1.consume(), 0.1)
+    assert metrics["reset/completed_episodes"] == 2
+    assert metrics["tracking/post_first_step_reward"] == pytest.approx((0.04 + 0.18 / 3) / 2)
+    assert metrics["tracking/post_first_step_norm_return_step_weighted"] == pytest.approx(0.22 / (4 * 0.1))

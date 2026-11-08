@@ -32,7 +32,11 @@ import numpy as np
 import torch
 
 from supermimic.kinematics.rotations import (
-    projected_gravity, quat_apply, quat_apply_inverse, quat_normalize, yaw_quat,
+    projected_gravity,
+    quat_apply,
+    quat_apply_inverse,
+    quat_normalize,
+    yaw_quat,
 )
 
 GOAL_FEAT_DIM = 68
@@ -204,6 +208,7 @@ class MotionLibrary:
         root_body_name: str = "pelvis",
         joint_names: tuple[str, ...] | list[str] | None = None,
         reference_fk_compile: bool = False,
+        merge_short_tail_bins: bool = False,
     ):
         from supermimic.robots.registry import get_robot_spec
 
@@ -216,6 +221,7 @@ class MotionLibrary:
         self.bin_frames = int(bin_frames)
         if self.bin_frames < 1:
             raise ValueError("bin_frames must be positive")
+        self.merge_short_tail_bins = bool(merge_short_tail_bins)
         self.compact = compact
         # Reference-only execution setting: never wrap the differentiable FK
         # used by the world model / imagined robot, or change reference storage.
@@ -321,13 +327,27 @@ class MotionLibrary:
         self.clip_last = self.clip_start + self.clip_len - 1
         self.frame_clip = torch.repeat_interleave(torch.arange(self.num_clips, device=self.device), self.clip_len)
         # Bins of `bin_frames` frames inside each clip (plan D14), numbered globally.
+        # Tiny final bins otherwise get the same uniform-bin probability as a
+        # full bin, but can only produce very short reset episodes. Fold a tail
+        # shorter than half a bin into its preceding full bin, never across clips.
+        # A clip shorter than half a bin is necessarily a single short bin.
         bins_per_clip = (self.clip_len + self.bin_frames - 1) // self.bin_frames
+        remainder = self.clip_len % self.bin_frames
+        merged_tail = (
+            (remainder > 0) & (2 * remainder < self.bin_frames)
+            & (self.clip_len >= self.bin_frames)
+        ) if self.merge_short_tail_bins else torch.zeros_like(self.clip_len, dtype=torch.bool)
+        bins_per_clip = bins_per_clip - merged_tail.long()
+        self.bins_per_clip = bins_per_clip
+        self.num_merged_tail_bins = int(merged_tail.sum().item())
         self.clip_bin_offset = torch.cumsum(bins_per_clip, 0) - bins_per_clip
         self.num_bins = int(bins_per_clip.sum().item())
         bin_clip = torch.repeat_interleave(torch.arange(self.num_clips, device=self.device), bins_per_clip)
         local_bin = torch.arange(self.num_bins, device=self.device) - self.clip_bin_offset[bin_clip]
         self.bin_start = self.clip_start[bin_clip] + local_bin * self.bin_frames
-        self.bin_end = torch.minimum(self.bin_start + self.bin_frames, self.clip_start[bin_clip] + self.clip_len[bin_clip])
+        clip_end = self.clip_start[bin_clip] + self.clip_len[bin_clip]
+        last_bin = local_bin == bins_per_clip[bin_clip] - 1
+        self.bin_end = torch.where(last_bin, clip_end, self.bin_start + self.bin_frames)
         self.bin_clip = bin_clip
 
     # ------------------------------------------------------------------ per-frame access
@@ -411,7 +431,12 @@ class MotionLibrary:
 
     def bin_of_frame(self, frame: torch.Tensor) -> torch.Tensor:
         clip = self.frame_clip[frame]
-        return self.clip_bin_offset[clip] + (frame - self.clip_start[clip]) // self.bin_frames
+        local_bin = (frame - self.clip_start[clip]) // self.bin_frames
+        if self.merge_short_tail_bins:
+            # A merged tail keeps its original frame indices, but belongs to the
+            # preceding bin. This also maps terminal reference states correctly.
+            local_bin = torch.minimum(local_bin, self.bins_per_clip[clip] - 1)
+        return self.clip_bin_offset[clip] + local_bin
 
     def last_frame_of(self, frame: torch.Tensor) -> torch.Tensor:
         return self.clip_last[self.frame_clip[frame]]
@@ -451,7 +476,8 @@ class MotionLibrary:
         if not self.compact:
             mem += sum(t.numel() * t.element_size() for t in (self.body_pos_w, self.body_quat_w, self.body_lin_vel_w, self.body_ang_vel_w, self.goal_feat)) / 1e9
         execution = f", reference FK={'compiled (dynamic batch)' if self.reference_fk_compiled else 'eager'}" if self.compact else ""
-        return f"MotionLibrary({'compact' if self.compact else 'full'}): {self.num_clips} clips, {self.num_frames} frames ({hours:.3f} h @50Hz), {self.num_bins} bins, {mem:.2f} GB on {self.device}{execution}"
+        tail = f", {self.num_merged_tail_bins} short tail bins merged" if self.merge_short_tail_bins else ""
+        return f"MotionLibrary({'compact' if self.compact else 'full'}): {self.num_clips} clips, {self.num_frames} frames ({hours:.3f} h @50Hz), {self.num_bins} bins, {mem:.2f} GB on {self.device}{execution}{tail}"
 
 
 def discover_npz(directory: str | Path, limit: int | None = None, names: list[str] | None = None, manifest: str | Path | None = None) -> list[Path]:

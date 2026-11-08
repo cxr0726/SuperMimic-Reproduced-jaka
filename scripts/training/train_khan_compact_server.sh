@@ -20,7 +20,10 @@ Single GPU, Khan_mini, packed compact .pt motion library.
 Uses the same training entry point and original network/optimization defaults
 as train_khan_server.sh: H=32, batch=2048/4096, UTD=0.4, 320k LR schedule,
 Isaac observation layout with future/history 5/5, clean goal 155, policy 465.
-Activation recomputation remains disabled. Reference FK compilation is opt-in;
+Actuator delay is disabled for this training comparison; reset clearance remains
+0.05 m and first-step action-rate is unchanged. Tails shorter than half a bin
+are merged into the previous bin. Activation recomputation remains disabled.
+Reference FK compilation is opt-in;
 its effect on total training throughput depends on the target GPU.
 
 Options:
@@ -112,6 +115,7 @@ command=(
     --robot khan_mini --run-name "$RUN_NAME" --log-root "$PROJECT_DIR/logs"
     --data.library "$LIBRARY" --env.num-envs "$NUM_ENVS" --env.compact-library
     --env.observation-layout isaac_khan --env.future-frames 5 --policy.history 5
+    --env.actuator-delay False --env.merge-short-tail-bins True
 )
 REFERENCE_FK_MODE=eager
 if ((REFERENCE_FK_COMPILE)); then
@@ -131,7 +135,8 @@ printf '[INFO] Khan compact library: %s\n' "$LIBRARY"
 printf '[INFO] Reference FK: %s; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "$REFERENCE_FK_MODE" "$NUM_ENVS"
 printf '[INFO] Khan observations: future/history 5/5; clean goal 155; policy 465; activation recomputation: OFF\n'
-printf '[INFO] Khan v6: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; delay 0-20 ms\n'
+printf '[INFO] Khan: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; actuator delay OFF\n'
+printf '[INFO] Reset bins: merge tails shorter than half a bin; first-step action-rate unchanged; separate reset/continuing reward diagnostics\n'
 printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; full convex feet\n'
 printf '[COMMAND]'
 printf ' %q' "${command[@]}"
