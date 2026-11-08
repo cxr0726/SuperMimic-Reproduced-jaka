@@ -159,6 +159,19 @@ Legacy full-clip benchmarks use an isolated Git snapshot, leaving the current tr
 checkout unchanged; commands and the 100k comparison are in
 [`docs/KHAN_LEGACY_BENCHMARK.md`](docs/KHAN_LEGACY_BENCHMARK.md).
 
+Play a named motion directly from a compact PT library with online reference FK:
+
+```bash
+env -u PYTHONPATH -u PYTHONHOME MUJOCO_GL=glfw .venv/bin/python scripts/play_pt.py \
+  --ckpt logs/khan_bones_seed_pt/ckpt_0100000.pt \
+  --library data/pt/khan_combined_8452_compact.pt \
+  --clips lafan1__fightAndSports1_subject4 --viewer native
+```
+
+Only selected motions are loaded onto the GPU; no NPZ conversion is needed.
+See [`docs/KHAN_PT_TO_NPZ.md`](docs/KHAN_PT_TO_NPZ.md) for multiple motions,
+browser playback and bounded smoke tests. The existing NPZ `scripts/play.py` is unchanged.
+
 Export the current Khan actor and ordered robot parameters as a single FP32 ONNX:
 
 ```bash

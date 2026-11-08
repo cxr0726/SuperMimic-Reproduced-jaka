@@ -1,6 +1,6 @@
 # Khan 踝参数与紧凑库／完整 NPZ 训练
 
-当前训练默认配置已在2026-11-08更新为无actuator delay、合并不足半bin的尾部，并新增首步／后续跟踪统计；reset抬高0.05m与首步action-rate保持不变。mixed480子集提取、全量训练及本轮验证见 [Khan无延迟与短尾对照训练](KHAN_RESET_SAMPLING.md)。以下踝参数及早期验证记录继续适用；恢复训练须匹配新的sampler合同。
+当前训练默认配置已在2026-11-09更新为0–20 ms actuator delay且reset首控制步立即执行、合并不足一个bin的尾部、物理reset至少剩余H32；reset抬高0.05m与首步action-rate保持不变。mixed480子集提取、全量训练及验证见 [Khan reset边界与采样](KHAN_RESET_SAMPLING.md)。以下踝参数及早期验证记录继续适用；新配置应新建run，恢复训练须匹配采样与机器人合同。
 
 本轮按要求仅调整左右踝的标称执行器参数。其余关节、几何、质量与惯量、力矩限额、动作缩放、观测、奖励、DR 分布、ξ91、网络和优化参数保持不变。
 
@@ -49,6 +49,25 @@ bash scripts/training/train_khan_compact_server.sh \
 需要恢复同一数据／配置／资产的 run 时增加 `--resume logs/对应run/ckpt_latest.pt`。若 run 已有 `ckpt*.pt` 却未指定 `--resume`，脚本会拒绝启动。短时检查可加 `--stop-after-iterations 50`，它只限制执行步数，不改变320k学习率调度。
 
 脚本清理 `PYTHONPATH`、`PYTHONHOME` 和遗留 torchrun 环境变量，设置 `PYTHONNOUSERSITE=1`、`MUJOCO_GL=egl`，并与 NPZ 脚本一样将 `OMP_NUM_THREADS`、`TORCHINDUCTOR_COMPILE_THREADS` 默认设为1。选卡继续使用 `CUDA_VISIBLE_DEVICES=0 bash ...`。`--help` 显示全部参数；`.pt` 使用 `--library`，NPZ 目录继续使用原脚本的 `--data-dir`。
+
+## 直接播放紧凑 `.pt` 中的指定动作
+
+`scripts/play_pt.py` 与 NPZ 的 `scripts/play.py` 使用相同的策略观测和查看器，直接使用训练/benchmark 的 compact reference FK，不需要先转 NPZ：
+
+```bash
+env -u PYTHONPATH -u PYTHONHOME MUJOCO_GL=glfw \
+  .venv/bin/python scripts/play_pt.py \
+  --ckpt logs/khan_bones_seed_pt/ckpt_0100000.pt \
+  --library "$KHAN_LIBRARY" \
+  --clips lafan1__fightAndSports1_subject4 \
+  --num-envs 1 --device cuda:0 --viewer native
+```
+
+`--clips` 是 PT 中的精确动作名，保留 `lafan1__` / `mixed__` 前缀；可在同一参数后填写多个名字。加载时在 CPU mmap 源文件、按库顺序选取参考，仅将所选动作送到 GPU；保持源 tensor 的存储精度与数值，不写临时 PT、不做重采样、接地修正或 NPZ 转换。运行时按检查点的参考精度设置载入，由参考 FK 计算 body 状态。
+
+默认 `--sampling start` 从首帧开始，单动作循环；选择多个动作时，每次 reset 都在所选集合内随机取动作，规则与 NPZ play 相同。播放使用无噪声、无 DR、无延迟的评估条件，保留检查点的 reset root z offset；默认显示蓝色半透明参考机器人。原 NPZ play 和训练默认加载路径不变。
+
+无桌面的服务器改用 `MUJOCO_GL=egl` 和 `--viewer viser`，连接该机器的8080端口。参考 FK 默认 eager，可显式增加 `--reference-fk-compile`；单环境播放通常无需编译。`--steps 100` 可在执行100个控制步后自动关闭，适合播放 smoke test。
 
 ## 直接对紧凑 `.pt` 做 GPU benchmark
 

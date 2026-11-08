@@ -84,6 +84,7 @@ class SuperMimicEnvCfgArgs:
     domain_randomization: bool = True
     actuator_delay: bool | None = None
     actuator_delay_max_ms: float = 20.0
+    delay_reset_first_step_no_delay: bool = False  # Historical direct/evaluation API default
     reset_root_z_offset: float | None = None
     sampling_mode: str = "return"  # return | uniform | start
     replay_capacity: int = 1000
@@ -94,7 +95,10 @@ class SuperMimicEnvCfgArgs:
     joint_limit_weight: float = -2.0
     bin_frames: int = 50
     merge_short_tail_bins: bool = False
+    tail_bin_merge_fraction: float = 0.5
+    reset_min_remaining_steps: int = 1
     compact_library: bool = False
+    packed_clip_names: tuple[str, ...] | None = None
     reference_fk_compile: bool = False
     anchor_obs: bool = False  # add BeyondMimic anchor-relative pose (9) to the goal group (plan D5 alt.)
     debug_vis: bool = False  # draw the reference ghost in the viewer (scripts/play.py)
@@ -204,6 +208,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             scale=robot_spec.action_scale,
             use_default_offset=True,
             noise_std=a.action_noise_std,
+            delay_reset_first_step_no_delay=a.delay_reset_first_step_no_delay,
         )
     }
 
@@ -226,12 +231,15 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             future_frames=a.future_frames,
             bin_frames=a.bin_frames,
             merge_short_tail_bins=a.merge_short_tail_bins,
+            tail_bin_merge_fraction=a.tail_bin_merge_fraction,
+            reset_min_remaining_steps=a.reset_min_remaining_steps,
             pose_range=pose_range if a.reset_noise else {},
             velocity_range=vel_range if a.reset_noise else {},
             joint_position_range=(-0.1, 0.1) if a.reset_noise else (0.0, 0.0),
             sampling_mode=a.sampling_mode,  # type: ignore[arg-type]
             reset_root_z_offset=a.reset_root_z_offset,
             compact_library=a.compact_library,
+            packed_clip_names=a.packed_clip_names,
             reference_fk_compile=a.reference_fk_compile,
             debug_vis=a.debug_vis,
             **command_kwargs,

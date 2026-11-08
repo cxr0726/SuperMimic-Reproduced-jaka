@@ -139,12 +139,15 @@ class Trainer:
                 domain_randomization=cfg.env.domain_randomization,
                 actuator_delay=cfg.env.actuator_delay,
                 actuator_delay_max_ms=cfg.env.actuator_delay_max_ms,
+                delay_reset_first_step_no_delay=cfg.env.delay_reset_first_step_no_delay,
                 reset_root_z_offset=cfg.env.reset_root_z_offset,
                 sampling_mode=cfg.env.sampling_mode,
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
                 reference_fk_compile=cfg.env.reference_fk_compile,
                 merge_short_tail_bins=cfg.env.merge_short_tail_bins,
+                tail_bin_merge_fraction=cfg.env.tail_bin_merge_fraction,
+                reset_min_remaining_steps=cfg.env.reset_min_remaining_steps,
                 anchor_obs=cfg.env.anchor_obs,
                 seed=cfg.seed + 1000 * self.rank,
             ),
@@ -173,6 +176,14 @@ class Trainer:
             print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
             print(f"[INFO] sim context: {self.wm.spec.context.kind}, xi={self.wm.spec.xi_dim}, "
                   f"fields={self.wm.spec.context.sizes}; delay queue remains implicit")
+            delay_active = cfg.env.actuator_delay and cfg.env.domain_randomization
+            print(f"[INFO] actuator delay: {'ON' if delay_active else 'OFF'}, "
+                  f"range=0..{cfg.env.actuator_delay_max_ms if delay_active else 0:g} ms; "
+                  f"first control step immediate={cfg.env.delay_reset_first_step_no_delay}")
+            print(f"[INFO] reset sampler: min remaining={cfg.env.reset_min_remaining_steps} steps; "
+                  f"merge tails={cfg.env.merge_short_tail_bins}, fraction={cfg.env.tail_bin_merge_fraction:g}; "
+                  f"eligible bins={self.command.num_sampleable_bins}/{self.lib.num_bins}; "
+                  "first-step action-rate and return continuation unchanged")
 
         # Episode statistics of the training env (paper's "training return").
         self.ep_reward_sum = torch.zeros(env.num_envs, device=self.device)

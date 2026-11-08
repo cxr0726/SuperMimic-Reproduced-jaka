@@ -10,6 +10,7 @@ DATA_DIR="$PROJECT_DIR/data/npz/khan_mini/lafan1"
 RESUME=''
 STOP_AFTER=''
 DRY_RUN=0
+ACTUATOR_DELAY=True
 
 usage() {
     cat <<'HELP'
@@ -19,16 +20,20 @@ Single GPU, Khan_mini, original single-GPU LAFAN training parameters.
 Networks, optimization, H=32, UTD=0.4 and LR schedule reuse
 the repository defaults. Khan uses the Isaac observation layout: 5 reference
 frames, 5 history frames, clean goal 155 and policy input 465. Activation
-recomputation remains disabled. Actuator delay is OFF for this comparison.
+recomputation remains disabled. Actuator delay is held at 0–20 ms per episode;
+the first control step after reset is immediate.
 Khan uses full CAD convex feet, actual root reset clearance 0.05 m and a 605-dim
 critic. Dynamics DR (PD, ankle armature, waist mass) retains the 91-dim context
-with zero delay. Tails shorter than half a bin are merged into the preceding bin.
+including delay. Every incomplete final bin is merged into the preceding bin.
+Physical reset requires at least 32 remaining reference steps.
 No dataset is downloaded. Use a fresh run for the changed sampler layout.
 
 Options:
   --num-envs N                Parallel robot environments (default: 4096)
   --run-name NAME             Directory under project logs/ (default: khan_lafan1_dr_v6)
   --data-dir PATH             Converted Khan NPZ directory (default: project data/npz/khan_mini/lafan1)
+  --no-actuator-delay        Disable delay for an otherwise identical H32/full-tail ablation
+  --actuator-delay           Enable held 0–20 ms delay (default); first control step is immediate
   --resume PATH               Restore a Khan checkpoint with the same data/configuration
   --stop-after-iterations N   Optional execution limit; retains the 320k LR schedule
   --dry-run                  Validate paths and print the command without importing CUDA or training
@@ -51,6 +56,8 @@ while (($#)); do
         --resume) need_value "$@"; RESUME="$2"; shift 2 ;;
         --stop-after-iterations) need_value "$@"; STOP_AFTER="$2"; shift 2 ;;
         --no-anchor-obs|--anchor-obs) die 'The Isaac layout already includes 5-frame anchor orientation in policy observations; remove the old anchor flag' ;;
+        --no-actuator-delay) ACTUATOR_DELAY=False; shift ;;
+        --actuator-delay) ACTUATOR_DELAY=True; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown option: $1 (use --help)" ;;
@@ -106,7 +113,9 @@ command=(
     --robot khan_mini --run-name "$RUN_NAME" --log-root "$PROJECT_DIR/logs"
     --data.npz-dir "$DATA_DIR" --env.num-envs "$NUM_ENVS"
     --env.observation-layout isaac_khan --env.future-frames 5 --policy.history 5
-    --env.actuator-delay False --env.merge-short-tail-bins True
+    --env.actuator-delay "$ACTUATOR_DELAY" --env.delay-reset-first-step-no-delay True
+    --env.merge-short-tail-bins True --env.tail-bin-merge-fraction 1.0
+    --env.reset-min-remaining-steps 32
 )
 if [[ -n "$STOP_AFTER" ]]; then
     command+=(--schedule.stop-after-iterations "$STOP_AFTER")
@@ -117,8 +126,8 @@ fi
 printf '[INFO] Khan clips: %d; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "${#NPZ_FILES[@]}" "$NUM_ENVS"
 printf '[INFO] Khan observations: future/history 5/5; clean goal 155; policy 465; activation recomputation: OFF\n'
-printf '[INFO] Khan: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; actuator delay OFF\n'
-printf '[INFO] Reset bins: merge tails shorter than half a bin; first-step action-rate unchanged; separate reset/continuing reward diagnostics\n'
+printf '[INFO] Khan: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; actuator delay %s (0–20 ms, first control step immediate)\n' "$ACTUATOR_DELAY"
+printf '[INFO] Reset bins: merge every incomplete final bin; require >=32 remaining reference steps; first-step action-rate unchanged\n'
 printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; full convex feet\n'
 printf '[COMMAND]'
 printf ' %q' "${command[@]}"

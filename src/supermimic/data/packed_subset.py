@@ -125,6 +125,43 @@ def _sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def load_packed_selection(library: str | Path, names: list[str] | tuple[str, ...]) -> dict:
+    """Read selected compact references into CPU memory without writing a cache.
+
+    Metadata is checked through a CPU memory map; only selected frame ranges are
+    copied. Keep packed order and the original storage dtype/values. No FK,
+    resampling, grounding or joint clipping is performed here.
+    """
+    library = Path(library).resolve()
+    if library.suffix != ".pt":
+        raise ValueError("Packed motion selection requires a .pt library")
+    if isinstance(names, str):
+        raise TypeError("Motion names must be a nonempty list or tuple")
+    pack, clips = _load_pack(library)
+    selected = _select(clips, subset=None, motion_list_dir=None, names=names)
+    chunks, starts, lengths, offset = [], [], [], 0
+    for name, source_start, length in selected:
+        chunk = pack["ref"][source_start:source_start + length]
+        if not bool(torch.isfinite(chunk).all()):
+            raise ValueError(f"Selected motion {name!r} contains NaN/Inf")
+        if not bool(((chunk[:, 3:7].float().norm(dim=-1) - 1).abs() <= .01).all()):
+            raise ValueError(f"Selected motion {name!r} root quaternions must be near unit length")
+        chunks.append(chunk)
+        starts.append(offset)
+        lengths.append(length)
+        offset += length
+    result = {k: v for k, v in pack.items()
+              if k not in ("ref", "names", "starts", "lengths", "source_inventory_sha256")}
+    result.update(ref=torch.cat(chunks, dim=0), names=[c[0] for c in selected],
+                  starts=starts, lengths=lengths)
+    result["selection_provenance"] = {
+        "parent_library": str(library),
+        "parent_source_inventory_sha256": pack.get("source_inventory_sha256"),
+        "operation": "Exact in-memory compact frame selection; no conversion or FK",
+    }
+    return result
+
+
 def subset_library(library: Path, out: Path, *, subset: str | None = None,
                    motion_list_dir: Path | None = None, names: list[str] | None = None,
                    reuse_existing: bool = False, chunk_size: int = 8192) -> dict:

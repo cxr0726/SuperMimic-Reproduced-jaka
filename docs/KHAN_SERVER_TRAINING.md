@@ -1,6 +1,6 @@
 # Khan 服务器训练：Isaac观测布局、SuperMimic尺度与原优化参数
 
-2026-11-08更新：新训练及两个Khan服务器脚本默认关闭actuator delay，启用不足半bin的尾部合并；root reset余量仍为0.05m，首步action-rate保持原定义。新建run以匹配v3采样布局。紧凑PT的mixed480子集／全量命令、新TensorBoard统计及验证范围见 [本轮对照训练说明](KHAN_RESET_SAMPLING.md)。下文的v6延迟机制属于此前配置，保留供旧检查点核查。
+2026-11-09更新：新训练及两个Khan服务器脚本启用0–20 ms actuator delay且reset首控制步立即执行、整bin尾段合并、物理reset至少剩余H32；root reset余量仍为0.05m，首步action-rate保持原定义。新建run以匹配v4采样布局与v7机器人合同。紧凑PT的mixed480子集／全量命令、无延迟对照开关及验证范围见 [本轮训练说明](KHAN_RESET_SAMPLING.md)。下文v6延迟机制属于此前配置，保留供旧检查点核查。
 
 本文件对应 `scripts/training/train_khan_server.sh`。脚本采用原仓库的单GPU LAFAN
 网络隐藏层与优化配置，选择Khan模型/动作；默认4096并行环境，采用 `isaac_khan` 观测。

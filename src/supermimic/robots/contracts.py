@@ -66,6 +66,15 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
             "reference_height_offset": 0.0,
             "foot_collision": "one_full_CAD_convex_mesh_per_foot",
         }
+        # Missing/False preserves v6 byte-for-byte for historical checkpoint
+        # validation. New training records its distinct reset queue semantics.
+        if env_config.get("delay_reset_first_step_no_delay", False):
+            contract["version"] = 7
+            contract["simulation_schema"].update({
+                "delay_reset_first_step_no_delay": True,
+                "delay_initial_pending_target": "first_processed_command_after_encoder_bias",
+                "delay_reset_scope": "only_reset_worlds_first_control_step_all_substeps",
+            })
         if layout == "isaac_khan":
             contract["observation_schema"] = {
                 "future_frames": 5, "history": 5, "goal_dim": 155, "policy_dim": 465,

@@ -65,6 +65,8 @@ class MultiClipMotionCommand(CommandTerm):
             robot_name=cfg.robot_name, root_body_name=cfg.root_body_name,
             joint_names=self.robot.joint_names,
             merge_short_tail_bins=cfg.merge_short_tail_bins,
+            packed_clip_names=cfg.packed_clip_names,
+            tail_bin_merge_fraction=cfg.tail_bin_merge_fraction,
         )
         print(f"[INFO] {self.library.summary()}")
         lib = self.library
@@ -78,33 +80,11 @@ class MultiClipMotionCommand(CommandTerm):
         self.body_quat_relative_w[:, :, 0] = 1.0
 
         # Return-based reset sampling state.
-        # Keep the library's bin numbering for diagnostics, but exclude bins containing
-        # only the final state: a reset must have a subsequent reference frame.
-        self.sample_bin_end = torch.minimum(lib.bin_end, lib.clip_last[lib.bin_clip])
-        self.sampleable_bins = lib.bin_start < self.sample_bin_end
-        self.num_sampleable_bins = int(self.sampleable_bins.sum().item())
-        if self.num_sampleable_bins == 0:
-            raise ValueError("Motion library has no reset state with a subsequent frame")
+        self._configure_reset_sampling()
         self.bin_return = torch.zeros(lib.num_bins, device=self.device)
         self.bin_memory = torch.zeros_like(self.bin_return)
         self.reset_sampler_statistics()
-        layout = [(clip.name, clip.length) for clip in lib.clips]
-        self.sampler_contract = {
-            "version": 2, "return_target": "start_bin_mean_reward_continuation",
-            "duplicate_bins": "batch_mean", "initial_return": 0.0,
-            "bin_frames": cfg.bin_frames, "gamma": cfg.gamma, "g_max": cfg.g_max,
-            "bin_ema": cfg.ema_alpha, "history_method": "ema_per_sample_call",
-            "history_ema": cfg.memory_alpha, "softmax_temp": cfg.softmax_temp,
-            "mixture": [cfg.uniform_ratio, cfg.hard_ratio, cfg.memory_ratio],
-            "reset_boundary": "frame_before_inclusive_last",
-            "clip_layout_sha256": hashlib.sha256(
-                json.dumps(layout, separators=(",", ":")).encode()
-            ).hexdigest(),
-        }
-        if cfg.merge_short_tail_bins:
-            self.sampler_contract.update(
-                version=3, tail_bin_policy="merge_remainder_strictly_less_than_half_reference_bin",
-            )
+        self.sampler_contract = self._make_sampler_contract()
         # Evaluation hook: when >= 0, the next reset of that env starts exactly at this global frame.
         self.forced_frame = torch.full((n,), -1, dtype=torch.long, device=self.device)
         self.ep_reward_sum = torch.zeros(n, dtype=torch.float64, device=self.device)
@@ -118,6 +98,56 @@ class MultiClipMotionCommand(CommandTerm):
         for k in ("error_anchor_pos", "error_anchor_rot", "error_body_pos", "error_body_rot",
                   "error_joint_pos", "error_joint_vel", "sampling_entropy", "episode_return_to_go"):
             self.metrics[k] = torch.zeros(n, device=self.device)
+
+    def _configure_reset_sampling(self) -> None:
+        """Precompute admissible starts; runtime sampling stays entirely on-device."""
+        lib, horizon = self.library, self.cfg.reset_min_remaining_steps
+        if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon < 1:
+            raise ValueError("reset_min_remaining_steps must be a positive integer")
+        # clip_last is inclusive: frame + H <= clip_last, so the exclusive
+        # bound is clip_last - H + 1. Retain global bin IDs for diagnostics.
+        self.sample_bin_end = torch.minimum(lib.bin_end, lib.clip_last[lib.bin_clip] - horizon + 1)
+        self.sampleable_bins = lib.bin_start < self.sample_bin_end
+        self.num_sampleable_bins = int(self.sampleable_bins.sum().item())
+        if self.num_sampleable_bins == 0:
+            raise ValueError(f"Motion library has no reset state with {horizon} subsequent reference steps")
+        if horizon > 1:
+            counts = (lib.clip_last - lib.clip_start + 1 - horizon).clamp_min(0)
+            self.sampleable_clip_ids = (counts > 0).nonzero().flatten()
+            self.sampleable_frame_cumsum = counts.cumsum(0)
+            self.sampleable_frame_offsets = self.sampleable_frame_cumsum - counts
+            self.num_sampleable_frames = int(self.sampleable_frame_cumsum[-1].item())
+
+    def _make_sampler_contract(self) -> dict:
+        cfg = self.cfg
+        layout = [(clip.name, clip.length) for clip in self.library.clips]
+        contract = {
+            "version": 2, "return_target": "start_bin_mean_reward_continuation",
+            "duplicate_bins": "batch_mean", "initial_return": 0.0,
+            "bin_frames": cfg.bin_frames, "gamma": cfg.gamma, "g_max": cfg.g_max,
+            "bin_ema": cfg.ema_alpha, "history_method": "ema_per_sample_call",
+            "history_ema": cfg.memory_alpha, "softmax_temp": cfg.softmax_temp,
+            "mixture": [cfg.uniform_ratio, cfg.hard_ratio, cfg.memory_ratio],
+            "reset_boundary": "frame_before_inclusive_last",
+            "clip_layout_sha256": hashlib.sha256(
+                json.dumps(layout, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+        if cfg.merge_short_tail_bins:
+            contract.update(
+                version=3, tail_bin_policy="merge_remainder_strictly_less_than_half_reference_bin",
+            )
+        if cfg.reset_min_remaining_steps > 1 or (cfg.merge_short_tail_bins and cfg.tail_bin_merge_fraction != 0.5):
+            contract.update(
+                version=4,
+                merge_short_tail_bins=cfg.merge_short_tail_bins,
+                tail_bin_merge_fraction=cfg.tail_bin_merge_fraction,
+                tail_bin_policy="merge_remainder_strictly_less_than_fraction_of_reference_bin"
+                if cfg.merge_short_tail_bins else "keep_all_remainders",
+                reset_boundary="frame_plus_min_remaining_steps_le_inclusive_last",
+                reset_min_remaining_steps=cfg.reset_min_remaining_steps,
+            )
+        return contract
 
     # ------------------------------------------------------------------ reference (mjlab MotionCommand API)
 
@@ -282,10 +312,17 @@ class MultiClipMotionCommand(CommandTerm):
         lib = self.library
         cfg = self.cfg
         if cfg.sampling_mode == "start":
+            if cfg.reset_min_remaining_steps > 1:
+                indices = torch.randint(0, self.sampleable_clip_ids.numel(), (n,), device=self.device)
+                return lib.clip_start[self.sampleable_clip_ids[indices]]
             clips = torch.randint(0, lib.num_clips, (n,), device=self.device)
             return lib.clip_start[clips]
         if cfg.sampling_mode == "uniform":
             # Uniform over frames (long clips get proportionally more starts).
+            if cfg.reset_min_remaining_steps > 1:
+                rank = torch.randint(0, self.num_sampleable_frames, (n,), device=self.device)
+                clips = torch.searchsorted(self.sampleable_frame_cumsum, rank, right=True)
+                return lib.clip_start[clips] + rank - self.sampleable_frame_offsets[clips]
             f = torch.randint(0, lib.num_frames, (n,), device=self.device)
             return torch.minimum(f, lib.last_frame_of(f) - 1).clamp_min(lib.clip_start[lib.frame_clip[f]])
         assert cfg.sampling_mode == "return"
@@ -329,7 +366,12 @@ class MultiClipMotionCommand(CommandTerm):
 
         sampled = self._sample_frames(len(env_ids))
         forced = self.forced_frame[env_ids]
-        self.frame[env_ids] = torch.where(forced >= 0, forced, sampled)
+        selected = torch.where(forced >= 0, forced, sampled)
+        if self.cfg.reset_min_remaining_steps > 1:
+            # forced_frame is a public evaluation hook. Assert on-device so
+            # regular GPU resets do not add a CPU synchronization point.
+            torch._assert_async(self._valid_reset_frames(selected).all(), self._reset_frame_error())
+        self.frame[env_ids] = selected
         self.clip_end[env_ids] = False
 
         r = self.library.ref(self.frame[env_ids])
@@ -397,6 +439,8 @@ class MultiClipMotionCommand(CommandTerm):
 
     def reset_to_frame(self, env_ids: torch.Tensor, frame: torch.Tensor) -> None:
         """Deterministic reference-frame reset plus configured actual-root clearance."""
+        if self.cfg.reset_min_remaining_steps > 1 and not bool(self._valid_reset_frames(frame).all()):
+            raise ValueError(self._reset_frame_error())
         self.ep_len[env_ids] = 0
         self.ep_reward_sum[env_ids] = 0
         self.ep_discounted_return[env_ids] = 0
@@ -407,6 +451,16 @@ class MultiClipMotionCommand(CommandTerm):
         self._write_reference_state_to_sim(
             env_ids, r.root_pos_w + self._env.scene.env_origins[env_ids], r.root_quat_w, r.root_lin_vel_w, r.root_ang_vel_w, r.joint_pos, r.joint_vel
         )
+
+    def _valid_reset_frames(self, frame: torch.Tensor) -> torch.Tensor:
+        lib = self.library
+        last = lib.last_frame_of(frame.clamp(0, lib.num_frames - 1))
+        return (frame >= 0) & (frame < lib.num_frames) & (frame + self.cfg.reset_min_remaining_steps <= last)
+
+    def _reset_frame_error(self) -> str:
+        return ("Reset frame must be inside its clip with at least "
+                f"{self.cfg.reset_min_remaining_steps} subsequent reference steps; "
+                "set reset_min_remaining_steps=1 explicitly for unrestricted evaluation starts")
 
     # ------------------------------------------------------------------ debug visualization (viewer only)
 
@@ -454,6 +508,8 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     future_frames: int = 10
     bin_frames: int = 50
     merge_short_tail_bins: bool = False
+    tail_bin_merge_fraction: float = 0.5
+    reset_min_remaining_steps: int = 1
     pose_range: dict[str, tuple[float, float]] = field(default_factory=dict)
     velocity_range: dict[str, tuple[float, float]] = field(default_factory=dict)
     joint_position_range: tuple[float, float] = (0.0, 0.0)
@@ -469,6 +525,7 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     ema_alpha: float = 0.2
     memory_alpha: float = 0.001
     compact_library: bool = False
+    packed_clip_names: tuple[str, ...] | None = None
     reference_fk_compile: bool = False
     library_fp16: bool = True
     resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)

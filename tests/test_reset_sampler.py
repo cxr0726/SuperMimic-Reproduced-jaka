@@ -350,3 +350,107 @@ def test_rank_sums_keep_episode_and_step_weighted_diagnostic_denominators():
     assert metrics["reset/completed_episodes"] == 2
     assert metrics["tracking/post_first_step_reward"] == pytest.approx((0.04 + 0.18 / 3) / 2)
     assert metrics["tracking/post_first_step_norm_return_step_weighted"] == pytest.approx(0.22 / (4 * 0.1))
+
+
+def _horizon_command(horizon=32):
+    cmd = _command(1)
+    # Include short clips before and between eligible clips, and bins that
+    # contain frames but no admissible H32 reset state.
+    lengths = torch.tensor([10, 33, 32, 101, 125])
+    starts = lengths.cumsum(0) - lengths
+    bins_per_clip = (lengths + 49) // 50
+    bin_clip = torch.repeat_interleave(torch.arange(len(lengths)), bins_per_clip)
+    offsets = bins_per_clip.cumsum(0) - bins_per_clip
+    bin_start = starts[bin_clip] + (torch.arange(bin_clip.numel()) - offsets[bin_clip]) * 50
+    lib = cmd.library
+    lib.num_clips, lib.num_frames, lib.num_bins = len(lengths), int(lengths.sum()), bin_clip.numel()
+    lib.clip_start, lib.clip_last = starts, starts + lengths - 1
+    lib.frame_clip = torch.repeat_interleave(torch.arange(len(lengths)), lengths)
+    lib.bin_clip, lib.bin_start = bin_clip, bin_start
+    lib.bin_end = torch.minimum(bin_start + 50, (starts + lengths)[bin_clip])
+    lib.last_frame_of = lambda frames: lib.clip_last[lib.frame_clip[frames]]
+    lib.clips = [SimpleNamespace(name=f"clip{i}", length=int(length)) for i, length in enumerate(lengths)]
+    cmd.cfg.reset_min_remaining_steps = horizon
+    cmd._configure_reset_sampling()
+    cmd.bin_return = torch.zeros(lib.num_bins)
+    cmd.bin_memory = torch.zeros(lib.num_bins)
+    cmd.reset_sampler_statistics()
+    return cmd
+
+
+@pytest.mark.parametrize("mode", ["start", "uniform", "return"])
+def test_all_physical_sampling_modes_require_full_horizon(mode):
+    torch.manual_seed(54)
+    cmd = _horizon_command()
+    cmd.cfg.sampling_mode = mode
+    frames = cmd._sample_frames(10000)
+    clips = cmd.library.frame_clip[frames]
+    assert set(clips.tolist()) == {1, 3, 4}
+    assert (frames + 32 <= cmd.library.last_frame_of(frames)).all()
+    assert cmd.num_sampleable_frames == (33 - 32) + (101 - 32) + (125 - 32)
+    assert (cmd.bin_memory[~cmd.sampleable_bins] == 0).all()
+    if mode == "start":
+        torch.testing.assert_close(frames, cmd.library.clip_start[clips])
+
+
+def test_uniform_horizon_sampler_reaches_every_admissible_frame(monkeypatch):
+    cmd = _horizon_command()
+    cmd.cfg.sampling_mode = "uniform"
+    monkeypatch.setattr(torch, "randint", lambda low, high, size, device: torch.arange(high))
+    frames = cmd._sample_frames(cmd.num_sampleable_frames)
+    all_frames = torch.arange(cmd.library.num_frames)
+    expected = all_frames[all_frames + 32 <= cmd.library.last_frame_of(all_frames)]
+    torch.testing.assert_close(frames, expected)
+
+
+def test_horizon_reset_allows_exact_boundary_and_rejects_overrides_past_it():
+    cmd = _horizon_command()
+    valid = cmd.library.clip_last[3] - 32
+    cmd.forced_frame[0] = valid
+    cmd._resample_command(torch.tensor([0]))
+    assert cmd.frame[0] == valid
+    cmd.forced_frame[0] = valid + 1
+    with pytest.raises(RuntimeError, match="32 subsequent"):
+        cmd._resample_command(torch.tensor([0]))
+    for bad in [valid + 1, torch.tensor(-1), torch.tensor(cmd.library.num_frames)]:
+        before = cmd.frame.clone()
+        with pytest.raises(ValueError, match="32 subsequent"):
+            cmd.reset_to_frame(torch.tensor([0]), bad.reshape(1))
+        torch.testing.assert_close(cmd.frame, before)
+    cmd.reset_to_frame(torch.tensor([0]), valid.reshape(1))
+    assert cmd.frame[0] == valid
+
+
+@pytest.mark.parametrize("horizon", [0, -1, 1.5, True])
+def test_invalid_reset_horizon_rejected(horizon):
+    with pytest.raises(ValueError, match="positive integer"):
+        _horizon_command(horizon)
+
+
+def test_no_full_horizon_reset_state_is_reported_instead_of_silently_clamping():
+    with pytest.raises(ValueError, match="125 subsequent"):
+        _horizon_command(125)
+
+
+@pytest.mark.parametrize("merge,fraction,horizon,version", [
+    (False, .5, 1, 2), (True, .5, 1, 3),
+    (True, 1., 1, 4), (True, .5, 32, 4), (False, .5, 32, 4), (True, 1., 32, 4),
+])
+def test_sampler_contract_versions_distinguish_boundary_semantics(merge, fraction, horizon, version):
+    cmd = _horizon_command(horizon)
+    cmd.cfg.merge_short_tail_bins = merge
+    cmd.cfg.tail_bin_merge_fraction = fraction
+    contract = cmd._make_sampler_contract()
+    assert contract["version"] == version
+    if version <= 3:
+        assert "tail_bin_merge_fraction" not in contract
+        assert "reset_min_remaining_steps" not in contract
+        assert contract["reset_boundary"] == "frame_before_inclusive_last"
+        if version == 2:
+            assert "tail_bin_policy" not in contract
+        else:
+            assert contract["tail_bin_policy"] == "merge_remainder_strictly_less_than_half_reference_bin"
+    else:
+        assert contract["merge_short_tail_bins"] == merge
+        assert contract["tail_bin_merge_fraction"] == fraction
+        assert contract["reset_min_remaining_steps"] == horizon

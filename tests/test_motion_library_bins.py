@@ -45,12 +45,13 @@ def _inputs(tmp_path, lengths):
     return files, packed
 
 
-def _load(inputs, storage, *, merge, bin_frames=50):
+def _load(inputs, storage, *, merge, bin_frames=50, fraction=0.5):
     files, packed = inputs
     return MotionLibrary([packed] if storage == "compact_pt" else files,
                          ("pelvis",), torch.zeros(29), device="cpu",
                          compact=storage != "full_npz", store_dtype=torch.float32,
-                         merge_short_tail_bins=merge, bin_frames=bin_frames)
+                         merge_short_tail_bins=merge, bin_frames=bin_frames,
+                         tail_bin_merge_fraction=fraction)
 
 
 @pytest.mark.parametrize("storage", ["full_npz", "compact_npz", "compact_pt"])
@@ -83,10 +84,11 @@ def test_half_tail_layout_and_all_frame_mappings(tmp_path, storage):
 
 
 @pytest.mark.parametrize("storage", ["full_npz", "compact_npz", "compact_pt"])
-def test_merging_preserves_reference_goals_and_body_queries(tmp_path, storage):
+@pytest.mark.parametrize("fraction", [0.5, 1.0])
+def test_merging_preserves_reference_goals_and_body_queries(tmp_path, storage, fraction):
     inputs = _inputs(tmp_path, [101, 125, 51])
     legacy = _load(inputs, storage, merge=False)
-    merged = _load(inputs, storage, merge=True)
+    merged = _load(inputs, storage, merge=True, fraction=fraction)
     frames = torch.tensor([0, 49, 50, 99, 100, 101, 225, 226, 276, 100])
     for query in ("ref71", "ref_qpos_qvel"):
         expected, actual = getattr(legacy, query)(frames), getattr(merged, query)(frames)
@@ -130,3 +132,27 @@ def test_merge_threshold_and_small_bin_widths(tmp_path, bin_frames, lengths, exp
     assert ids.shape == frames.shape
     assert (library.bin_start[ids] <= frames).all()
     assert (frames < library.bin_end[ids]).all()
+
+
+@pytest.mark.parametrize("storage", ["full_npz", "compact_npz", "compact_pt"])
+def test_full_tail_merges_all_nonempty_remainders_within_each_clip(tmp_path, storage):
+    lengths = [1, 24, 49, 50, 51, 74, 75, 99, 100, 101, 125, 149, 150]
+    library = _load(_inputs(tmp_path, lengths), storage, merge=True, fraction=1.0)
+    expected = [[1], [24], [49], [50], [51], [74], [75], [99], [50, 50],
+                [50, 51], [50, 75], [50, 99], [50, 50, 50]]
+    assert library.num_merged_tail_bins == 7
+    assert library.bins_per_clip.tolist() == [len(bins) for bins in expected]
+    for clip, bins in enumerate(expected):
+        mask = library.bin_clip == clip
+        assert (library.bin_end - library.bin_start)[mask].tolist() == bins
+    frames = torch.arange(library.num_frames)
+    ids = library.bin_of_frame(frames)
+    torch.testing.assert_close(library.bin_clip[ids], library.frame_clip)
+    assert (library.bin_start[ids] <= frames).all()
+    assert (frames < library.bin_end[ids]).all()
+
+
+@pytest.mark.parametrize("fraction", [0, -0.5, 1.1, float("nan"), float("inf")])
+def test_invalid_merge_fraction_rejected(tmp_path, fraction):
+    with pytest.raises(ValueError, match="tail_bin_merge_fraction"):
+        _load(_inputs(tmp_path, [51]), "full_npz", merge=True, fraction=fraction)

@@ -77,8 +77,10 @@ def test_default_compact_run_preserves_original_training_configuration(project, 
     assert cfg.run_name == "khan_bones_pt" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is None
     assert cfg.env.compact_library and not cfg.env.reference_fk_compile
-    assert cfg.env.actuator_delay is False and cfg.env.merge_short_tail_bins is True
-    assert "actuator delay OFF" in result.stdout
+    assert cfg.env.actuator_delay is True and cfg.env.merge_short_tail_bins is True
+    assert cfg.env.delay_reset_first_step_no_delay is True
+    assert cfg.env.tail_bin_merge_fraction == 1.0 and cfg.env.reset_min_remaining_steps == 32
+    assert "actuator delay True" in result.stdout
     baseline = TrainConfig(robot="khan_mini")
     resolve_training_observations(cfg)
     resolve_training_observations(baseline)
@@ -229,3 +231,13 @@ def test_actual_exec_cleans_environment_preserves_gpu_selection_and_changes_dire
     assert env["OMP_NUM_THREADS"] == env["TORCHINDUCTOR_COMPILE_THREADS"] == "1"
     assert env["CUDA_VISIBLE_DEVICES"] == "3"
     assert not (root / "logs").exists()
+
+
+def test_no_delay_ablation_keeps_h32_and_full_tail_merge(project):
+    result = run_launcher(project, "--dry-run", "--no-actuator-delay")
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    assert cfg.env.actuator_delay is False
+    assert cfg.env.delay_reset_first_step_no_delay is True
+    assert cfg.env.reset_min_remaining_steps == 32
+    assert cfg.env.tail_bin_merge_fraction == 1.0

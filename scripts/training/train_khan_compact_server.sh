@@ -11,6 +11,7 @@ REFERENCE_FK_COMPILE=0
 RESUME=''
 STOP_AFTER=''
 DRY_RUN=0
+ACTUATOR_DELAY=True
 
 usage() {
     cat <<'HELP'
@@ -20,9 +21,10 @@ Single GPU, Khan_mini, packed compact .pt motion library.
 Uses the same training entry point and original network/optimization defaults
 as train_khan_server.sh: H=32, batch=2048/4096, UTD=0.4, 320k LR schedule,
 Isaac observation layout with future/history 5/5, clean goal 155, policy 465.
-Actuator delay is disabled for this training comparison; reset clearance remains
-0.05 m and first-step action-rate is unchanged. Tails shorter than half a bin
-are merged into the previous bin. Activation recomputation remains disabled.
+Actuator delay is held at 0–20 ms per episode; the first control step is immediate.
+Reset clearance remains 0.05 m and first-step action-rate is unchanged. Every
+incomplete final bin is merged into the previous bin. Physical reset requires
+at least 32 remaining reference steps. Activation recomputation remains disabled.
 Reference FK compilation is opt-in;
 its effect on total training throughput depends on the target GPU.
 
@@ -32,6 +34,8 @@ Options:
   --run-name NAME            Directory under project logs/ (default: khan_bones_pt)
   --reference-fk-compile     Compile current/imagination reference FK on CUDA
   --no-reference-fk-compile  Use eager reference FK (default)
+  --no-actuator-delay        Disable delay for an otherwise identical H32/full-tail ablation
+  --actuator-delay           Enable held 0–20 ms delay (default); first control step is immediate
   --resume PATH              Restore a Khan checkpoint with matching data/configuration/assets
   --stop-after-iterations N  Optional execution limit; retains the 320k LR schedule
   --dry-run                 Check paths and print command without executing Python or training
@@ -59,6 +63,8 @@ while (($#)); do
         --stop-after-iterations) need_value "$@"; STOP_AFTER="$2"; shift 2 ;;
         --data-dir) die 'Use --library PATH for a compact .pt file; for NPZ use train_khan_server.sh --data-dir PATH' ;;
         --no-anchor-obs|--anchor-obs) die 'The Isaac layout already includes 5-frame anchor orientation in policy observations; remove the old anchor flag' ;;
+        --no-actuator-delay) ACTUATOR_DELAY=False; shift ;;
+        --actuator-delay) ACTUATOR_DELAY=True; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown option: $1 (use --help)" ;;
@@ -115,7 +121,9 @@ command=(
     --robot khan_mini --run-name "$RUN_NAME" --log-root "$PROJECT_DIR/logs"
     --data.library "$LIBRARY" --env.num-envs "$NUM_ENVS" --env.compact-library
     --env.observation-layout isaac_khan --env.future-frames 5 --policy.history 5
-    --env.actuator-delay False --env.merge-short-tail-bins True
+    --env.actuator-delay "$ACTUATOR_DELAY" --env.delay-reset-first-step-no-delay True
+    --env.merge-short-tail-bins True --env.tail-bin-merge-fraction 1.0
+    --env.reset-min-remaining-steps 32
 )
 REFERENCE_FK_MODE=eager
 if ((REFERENCE_FK_COMPILE)); then
@@ -135,8 +143,8 @@ printf '[INFO] Khan compact library: %s\n' "$LIBRARY"
 printf '[INFO] Reference FK: %s; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "$REFERENCE_FK_MODE" "$NUM_ENVS"
 printf '[INFO] Khan observations: future/history 5/5; clean goal 155; policy 465; activation recomputation: OFF\n'
-printf '[INFO] Khan: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; actuator delay OFF\n'
-printf '[INFO] Reset bins: merge tails shorter than half a bin; first-step action-rate unchanged; separate reset/continuing reward diagnostics\n'
+printf '[INFO] Khan: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; actuator delay %s (0–20 ms, first control step immediate)\n' "$ACTUATOR_DELAY"
+printf '[INFO] Reset bins: merge every incomplete final bin; require >=32 remaining reference steps; first-step action-rate unchanged\n'
 printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; full convex feet\n'
 printf '[COMMAND]'
 printf ' %q' "${command[@]}"

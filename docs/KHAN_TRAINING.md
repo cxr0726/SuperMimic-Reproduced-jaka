@@ -179,8 +179,10 @@ COM偏移和附重共同改变动力学；现有局部COM范围先保留，是�
 Khan默认启用类似MorphMimic的执行器延迟：每个环境、每个融合执行器组在episode reset时
 从0/1/2/3/4个物理步均匀采样，即0/5/10/15/20 ms，一回合保持不变；每5 ms推进目标队列。
 所有Khan builtin position执行器使用同一延迟配置并融合共享延迟组，不为每个关节独立采样。
-`domain_randomization=False` 的nominal eval关闭延迟。清零行为保留MorphMimic方式：reset时pending target队列为
-**物理关节目标0**，没有用参考关节角或q_default预填，因此初始延迟子步可能读取零目标。
+`domain_randomization=False` 的nominal eval关闭延迟。2026-11-09起，新训练在首个动作完成噪声、缩放、clip和encoder bias处理后，
+用本次实际目标回填刚reset环境的队列，因此首个20 ms控制步全部子步立即执行，第二控制步恢复已采样延迟。
+旧版本清零物理目标的语义只在底层兼容模式保留；首步raw action差分仍是a0−0，没有免除action-rate。
+本轮同时采用整bin尾段合并与物理reset剩余H32限制，详见 [reset与采样说明](KHAN_RESET_SAMPLING.md)。
 
 ξ现为91维，WM动力学输入185维，新增delay参数，但WM和想象rollout仍没有显式历史队列。
 replay的a_exec记录当前带执行噪声命令，不是每个5 ms子步实际取出的历史目标。

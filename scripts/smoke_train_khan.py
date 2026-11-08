@@ -126,7 +126,8 @@ def verify_production_config(cfg: TrainConfig) -> dict:
     env.pop("reference_fk_compile")
     reference_env.pop("reference_fk_compile")
     for key in ("anchor_obs", "observation_layout", "future_frames", "actuator_delay",
-                "actuator_delay_max_ms", "reset_root_z_offset", "merge_short_tail_bins"):
+                "actuator_delay_max_ms", "reset_root_z_offset", "merge_short_tail_bins",
+                "delay_reset_first_step_no_delay", "tail_bin_merge_fraction", "reset_min_remaining_steps"):
         env.pop(key)
         reference_env.pop(key)
     assert env == reference_env, "observation/reward/randomization settings changed"
@@ -142,7 +143,10 @@ def verify_production_config(cfg: TrainConfig) -> dict:
                                 "compact_library": cfg.env.compact_library,
                                 "reference_fk_compile": cfg.env.reference_fk_compile,
                                 "actuator_delay": cfg.env.actuator_delay,
-                                "merge_short_tail_bins": cfg.env.merge_short_tail_bins},
+                                "merge_short_tail_bins": cfg.env.merge_short_tail_bins,
+                                "delay_reset_first_step_no_delay": cfg.env.delay_reset_first_step_no_delay,
+                                "tail_bin_merge_fraction": cfg.env.tail_bin_merge_fraction,
+                                "reset_min_remaining_steps": cfg.env.reset_min_remaining_steps},
         "world_model_hidden": cfg.world_model.hidden,
         "policy_encoder_hidden": cfg.policy.encoder_hidden,
         "policy_decoder_hidden": cfg.policy.decoder_hidden,

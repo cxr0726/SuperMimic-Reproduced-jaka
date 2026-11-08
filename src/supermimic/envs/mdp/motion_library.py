@@ -209,6 +209,8 @@ class MotionLibrary:
         joint_names: tuple[str, ...] | list[str] | None = None,
         reference_fk_compile: bool = False,
         merge_short_tail_bins: bool = False,
+        packed_clip_names: tuple[str, ...] | list[str] | None = None,
+        tail_bin_merge_fraction: float = 0.5,
     ):
         from supermimic.robots.registry import get_robot_spec
 
@@ -222,12 +224,19 @@ class MotionLibrary:
         if self.bin_frames < 1:
             raise ValueError("bin_frames must be positive")
         self.merge_short_tail_bins = bool(merge_short_tail_bins)
+        self.tail_bin_merge_fraction = float(tail_bin_merge_fraction)
+        if not 0 < self.tail_bin_merge_fraction <= 1:
+            raise ValueError("tail_bin_merge_fraction must be in (0, 1]")
         self.compact = compact
         # Reference-only execution setting: never wrap the differentiable FK
         # used by the world model / imagined robot, or change reference storage.
         self.reference_fk_compiled = bool(compact and reference_fk_compile and self.device.type == "cuda")
         if len(npz_files) == 0:
             raise ValueError("MotionLibrary needs at least one clip")
+        if packed_clip_names is not None and not (
+            compact and len(npz_files) == 1 and str(npz_files[0]).endswith(".pt")
+        ):
+            raise ValueError("packed_clip_names requires a single compact .pt library")
         if isinstance(default_joint_pos, torch.Tensor):
             q0 = default_joint_pos.detach().to(device=self.device, dtype=dtype).reshape(-1)
         else:
@@ -251,7 +260,12 @@ class MotionLibrary:
         if len(npz_files) == 1 and str(npz_files[0]).endswith(".pt"):
             if not compact:
                 raise ValueError("packed .pt libraries are compact-only")
-            pack = torch.load(npz_files[0], map_location="cpu", weights_only=False)
+            if packed_clip_names is None:
+                pack = torch.load(npz_files[0], map_location="cpu", weights_only=False)
+            else:
+                from supermimic.data.packed_subset import load_packed_selection
+
+                pack = load_packed_selection(npz_files[0], packed_clip_names)
             packed_ref = pack["ref"]
             if packed_ref.ndim != 2 or packed_ref.shape[1] != self.ref_dim:
                 raise ValueError(f"Packed reference must have {self.ref_dim} columns for {robot_name}")
@@ -329,12 +343,12 @@ class MotionLibrary:
         # Bins of `bin_frames` frames inside each clip (plan D14), numbered globally.
         # Tiny final bins otherwise get the same uniform-bin probability as a
         # full bin, but can only produce very short reset episodes. Fold a tail
-        # shorter than half a bin into its preceding full bin, never across clips.
-        # A clip shorter than half a bin is necessarily a single short bin.
+        # shorter than the configured fraction into its preceding full bin,
+        # never across clips. A clip shorter than one bin stays a single bin.
         bins_per_clip = (self.clip_len + self.bin_frames - 1) // self.bin_frames
         remainder = self.clip_len % self.bin_frames
         merged_tail = (
-            (remainder > 0) & (2 * remainder < self.bin_frames)
+            (remainder > 0) & (remainder < self.tail_bin_merge_fraction * self.bin_frames)
             & (self.clip_len >= self.bin_frames)
         ) if self.merge_short_tail_bins else torch.zeros_like(self.clip_len, dtype=torch.bool)
         bins_per_clip = bins_per_clip - merged_tail.long()

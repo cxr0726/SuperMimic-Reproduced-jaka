@@ -62,8 +62,10 @@ def test_dry_run_selects_isaac_observations_without_overriding_original_optimiza
     assert cfg.data.npz_dir == root / "data/npz/khan_mini/lafan1"
     assert cfg.run_name == "khan_lafan1_dr_v6" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is cfg.data.library is None
-    assert cfg.env.actuator_delay is False and cfg.env.merge_short_tail_bins is True
-    assert "actuator delay OFF" in result.stdout
+    assert cfg.env.actuator_delay is True and cfg.env.merge_short_tail_bins is True
+    assert cfg.env.delay_reset_first_step_no_delay is True
+    assert cfg.env.tail_bin_merge_fraction == 1.0 and cfg.env.reset_min_remaining_steps == 32
+    assert "actuator delay True" in result.stdout
     baseline = TrainConfig(robot="khan_mini")
     resolve_training_observations(cfg)
     resolve_training_observations(baseline)
@@ -158,3 +160,13 @@ def test_missing_robot_asset_rejected_before_execution(project):
     (root / "assets/robots/khan_mini/robot.xml").unlink()
     result = run_launcher(project, "--dry-run")
     assert result.returncode != 0 and "Missing Khan asset" in result.stderr
+
+
+def test_no_delay_ablation_keeps_h32_and_full_tail_merge(project):
+    result = run_launcher(project, "--dry-run", "--no-actuator-delay")
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    assert cfg.env.actuator_delay is False
+    assert cfg.env.delay_reset_first_step_no_delay is True
+    assert cfg.env.reset_min_remaining_steps == 32
+    assert cfg.env.tail_bin_merge_fraction == 1.0
