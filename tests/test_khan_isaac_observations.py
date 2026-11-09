@@ -226,12 +226,18 @@ def _tiny_library():
 
 
 @pytest.mark.parametrize("noise", [False, True])
-def test_imagination_builds_current_future_orientation_and_five_term_histories(noise):
+@pytest.mark.parametrize("action_mode", ["default", "reference_residual"])
+def test_imagination_builds_current_future_orientation_and_five_term_histories(noise, action_mode):
     torch.manual_seed(101)
     lib = _tiny_library()
+    policy_args = ({"default_joint_pos": lib.default_joint_pos,
+                    "action_scale": torch.full((27,), .5)}
+                   if action_mode == "reference_residual" else {})
     policy = Policy(PolicyCfg(encoder_hidden=(12,), decoder_hidden=(12,), latent_dim=4,
                               history=5, future_frames=5, num_joints=27, goal_dim=155,
-                              observation_layout="isaac_khan", num_tracked_bodies=1))
+                              observation_layout="isaac_khan", num_tracked_bodies=1,
+                              action_mode=action_mode, goal_noise_z=.01, goal_noise_joint_pos=.05),
+                    **policy_args)
     state = torch.zeros(2, 67)
     state[:, :3], state[:, 3:7] = lib._ref[:2, :3], lib._ref[:2, 3:7]
     state[:, 7:34] = lib.default_joint_pos
@@ -249,6 +255,9 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(n
     heads.critic_error_features = lambda state, ref: AnalyticHeads.critic_error_features(heads, state, ref)
     captured = []
     hook = policy.register_forward_pre_hook(lambda module, args: captured.append(args))
+    encoder_inputs = []
+    encoder_hook = policy.encoders["motion"].register_forward_pre_hook(
+        lambda module, args: encoder_inputs.append(args[0].detach().clone()))
 
     def transition(current, action, previous, context, ref):
         next_joint = current[:, 7:34] + action * 0.1
@@ -265,6 +274,7 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(n
     rollout = imagine(SimpleNamespace(heads=heads), policy, lib, start, 2, 5,
                       obs_noise=noise, step_fn=transition)
     hook.remove()
+    encoder_hook.remove()
     assert len(captured) == 2 and captured[0][0].shape == (2, 465)
     assert rollout.goals.shape == (3, 2, 155)
     assert rollout.critic_goals.shape == (3, 2, 365)
@@ -280,6 +290,14 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(n
         # its appended future-orientation information at every imagined step.
         torch.testing.assert_close(rollout.critic_goals[time], expected_critic, rtol=0, atol=1e-6)
         torch.testing.assert_close(rollout.goals[time], expected_critic[:, :155], rtol=0, atol=0)
+        if time < 2:
+            delta = encoder_inputs[time] - rollout.goals[time]
+            assert torch.equal(delta[:, :15], torch.zeros_like(delta[:, :15]))
+            assert delta[:, 15:20].abs().max() <= (.010001 if noise else 0.)
+            assert delta[:, 20:].abs().max() <= (.050001 if noise else 0.)
+            if noise:
+                assert delta[:, 15:20].abs().max() > 0
+                assert delta[:, 20:].abs().max() > .025
     if noise:
         assert not torch.equal(captured[0][0][:, :30], rollout.critic_goals[0, :, 155:185])
     trainer = SimpleNamespace(wm=SimpleNamespace(

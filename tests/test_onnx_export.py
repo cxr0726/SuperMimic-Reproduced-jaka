@@ -257,3 +257,109 @@ def test_export_rejects_unknown_layout_and_zero_validation(checkpoint, tmp_path)
         export_policy(ckpt, tmp_path / "bad_layout.onnx", input_layout="legacy")
     with pytest.raises(ValueError):
         export_policy(ckpt, tmp_path / "no_validation.onnx", validation_samples=0)
+
+
+def _reference_residual_checkpoint(checkpoint, *, zero_decoder=False):
+    """Use the real robot's ordered baseline, without constructing a simulator."""
+    path, _, saved = checkpoint
+    cfg = PolicyCfg(**saved["config"]["policy"])
+    cfg.action_mode = "reference_residual"
+    cfg.reference_residual_beta = 1.0
+    cfg.reference_frame_offset = 1
+    cfg.goal_noise_z = .01
+    cfg.goal_noise_joint_pos = .05
+    profile = load_profile()
+    names = profile["joint_names"]
+    q0 = torch.tensor([profile["default_joint_pos"][name] for name in names])
+    alpha = torch.tensor([profile["action_scale"][name] for name in names])
+    policy = Policy(cfg, default_joint_pos=q0, action_scale=alpha).eval()
+    if zero_decoder:
+        with torch.no_grad():
+            for parameter in policy.decoder.parameters():
+                parameter.zero_()
+    saved["config"]["policy"] = asdict(cfg)
+    saved["policy"] = policy.state_dict()
+    torch.save(saved, path)
+    return path, policy, saved, q0, alpha
+
+
+@pytest.mark.parametrize("layout", ["packed", "split"])
+@pytest.mark.parametrize("zero_decoder", [False, True])
+def test_reference_residual_export_composes_next_reference_without_noise(
+    checkpoint, tmp_path, layout, zero_decoder,
+):
+    from supermimic.deployment.onnx_export import export_policy
+
+    ckpt, policy, _, q0, alpha = _reference_residual_checkpoint(
+        checkpoint, zero_decoder=zero_decoder,
+    )
+    output = tmp_path / f"residual_{layout}_{zero_decoder}.onnx"
+    report = export_policy(ckpt, output, input_layout=layout, validation_samples=2)
+    model, metadata = _metadata(output)
+    assert not any(node.op_type.startswith(("Random", "Bernoulli", "Dropout"))
+                   for node in model.graph.node)
+    schema = json.loads(metadata["onnx_deployment_schema"])
+    assert report["schema"] == schema
+    action_schema = schema["action"]
+    assert action_schema["parameterization"] == "reference_residual"
+    assert action_schema["reference_residual_beta"] == 1.0
+    assert action_schema["reference_frame_offset"] == 1
+    assert action_schema["reference_skip_embedded"]
+    assert action_schema["pd_target"] == "default_joint_pos + action_scale * actions"
+    assert action_schema["clip"] is None
+    assert not schema["observation_noise"]
+    assert schema["training_goal_noise"]["root_z_half_width_m"] == .01
+    assert schema["training_goal_noise"]["joint_pos_half_width_rad"] == .05
+    assert not schema["training_goal_noise"]["enabled_in_export"]
+    session = ort.InferenceSession(str(output), providers=["CPUExecutionProvider"])
+    for batch in (1, 3):
+        obs = torch.randn(batch, 465)
+        goal = torch.randn(batch, 155)
+        # Each of the five q frames differs; selecting current instead of next
+        # reference must fail even for a zero-residual network.
+        goal[:, 20:] = torch.arange(5 * 27).reshape(1, -1) * .01
+        feeds = ({"obs": torch.cat([goal, obs], -1).numpy()} if layout == "packed"
+                 else {"policy_obs": obs.numpy(), "goal": goal.numpy()})
+        output_a = session.run(["actions"], feeds)[0]
+        with torch.no_grad():
+            expected_a = policy(obs, goal).numpy()
+        np.testing.assert_allclose(output_a, expected_a, rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(output_a, session.run(["actions"], feeds)[0])
+        if zero_decoder:
+            target = q0.numpy() + alpha.numpy() * output_a
+            np.testing.assert_allclose(target, goal[:, 47:74].numpy(), rtol=0, atol=1e-6)
+
+
+@pytest.mark.parametrize("buffer_name", ["reference_q_default", "reference_action_scale"])
+@pytest.mark.parametrize("corruption", ["changed", "missing", "wrong_dtype"])
+def test_residual_checkpoint_rejects_inconsistent_physical_baseline(
+    checkpoint, buffer_name, corruption,
+):
+    from supermimic.eval.benchmark import load_policy_from_checkpoint
+
+    path, _, saved, _, _ = _reference_residual_checkpoint(checkpoint)
+    if corruption == "missing":
+        del saved["policy"][buffer_name]
+    elif corruption == "wrong_dtype":
+        saved["policy"][buffer_name] = saved["policy"][buffer_name].double()
+    else:
+        saved["policy"][buffer_name][0] += .01
+    torch.save(saved, path)
+    with pytest.raises(ValueError, match=buffer_name):
+        load_policy_from_checkpoint(path, "cpu")
+
+
+def test_checkpoint_without_action_configuration_remains_exactly_legacy(checkpoint):
+    from supermimic.eval.benchmark import load_policy_from_checkpoint
+
+    path, original, saved = checkpoint
+    for field in ("action_mode", "reference_residual_beta", "reference_frame_offset",
+                  "goal_noise_z", "goal_noise_joint_pos"):
+        saved["config"]["policy"].pop(field)
+    torch.save(saved, path)
+    loaded, _ = load_policy_from_checkpoint(path, "cpu")
+    assert loaded.cfg.action_mode == "default"
+    assert loaded.cfg.goal_noise_z == loaded.cfg.goal_noise_joint_pos == 0.0
+    assert set(loaded.state_dict()) == set(original.state_dict())
+    obs, goal = torch.randn(3, 465), torch.randn(3, 155)
+    torch.testing.assert_close(loaded(obs, goal), original(obs, goal), rtol=0, atol=0)

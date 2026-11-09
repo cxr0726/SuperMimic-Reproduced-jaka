@@ -107,7 +107,8 @@ def verify_production_config(cfg: TrainConfig) -> dict:
     policy = asdict(cfg.policy)
     original = asdict(formal.policy)
     for key in ("num_joints", "num_tracked_bodies", "goal_dim", "observation_layout", "history", "future_frames",
-                "obs_term_scale", "goal_term_scale"):
+                "obs_term_scale", "goal_term_scale", "action_mode", "reference_residual_beta",
+                "reference_frame_offset", "goal_noise_z", "goal_noise_joint_pos"):
         policy.pop(key)
         original.pop(key)
     assert policy == original, "policy hidden architecture changed"
@@ -137,6 +138,11 @@ def verify_production_config(cfg: TrainConfig) -> dict:
         "observation_layout": cfg.env.observation_layout,
         "future_frames": cfg.env.future_frames,
         "history": cfg.policy.history,
+        "action_mode": cfg.policy.action_mode,
+        "reference_residual_beta": cfg.policy.reference_residual_beta,
+        "reference_frame_offset": cfg.policy.reference_frame_offset,
+        "encoder_goal_noise": {"z": cfg.policy.goal_noise_z,
+                               "joint_pos": cfg.policy.goal_noise_joint_pos},
         "execution_overrides": {"num_envs": cfg.env.num_envs,
                                 "stop_after_iterations": cfg.schedule.stop_after_iterations,
                                 "activation_checkpoint": cfg.policy_trainer.activation_checkpoint,

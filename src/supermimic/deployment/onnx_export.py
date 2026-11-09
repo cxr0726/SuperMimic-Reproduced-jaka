@@ -54,8 +54,11 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def deployment_schema(input_layout: InputLayout) -> dict:
+def deployment_schema(input_layout: InputLayout, policy_config: dict | None = None) -> dict:
     """Half-open offsets refer to flat tensors, never frame-major histories."""
+    policy_config = policy_config or {}
+    action_mode = policy_config.get("action_mode", "default")
+    residual = action_mode == "reference_residual"
     goal_terms = [
         ("reference_root_displacement_b", 0, 15, 3, 1.0),
         ("reference_world_z", 15, 20, 1, 1.0),
@@ -107,7 +110,21 @@ def deployment_schema(input_layout: InputLayout) -> dict:
         "action": {"meaning": "raw normalized joint-position action", "clip": None,
                    "tanh": False, "smoothing": False, "execution_noise": False,
                    "pd_target": "default_joint_pos + action_scale * actions",
-                   "last_action": "previous raw actions, not PD target or scaled action"},
+                   "last_action": "previous raw actions, not PD target or scaled action",
+                   "parameterization": action_mode,
+                   "reference_residual_beta": policy_config.get("reference_residual_beta", 1.0) if residual else 0.0,
+                   "reference_frame_offset": policy_config.get("reference_frame_offset", 1) if residual else None,
+                   "residual_scale": "action_scale" if residual else None,
+                   "reference_skip_embedded": residual,
+                   "reference_skip_input": "supplied clean goal, before encoder-only training noise" if residual else None},
+        "training_goal_noise": {
+            "distribution": "independent additive uniform",
+            "root_displacement_half_width": 0.0,
+            "root_z_half_width_m": policy_config.get("goal_noise_z", 0.0),
+            "joint_pos_half_width_rad": policy_config.get("goal_noise_joint_pos", 0.0),
+            "scope": "motion encoder only; critic, reward and reference skip remain clean",
+            "enabled_in_export": False,
+        },
         "control_dt": 0.02, "control_frequency_hz": 50,
         "training_physics_dt": 0.005, "training_decimation": 4,
     }
@@ -141,7 +158,7 @@ def _metadata(ckpt: Path, cfg: dict, input_layout: InputLayout) -> dict[str, str
         "anchor_body_name": profile["anchor_body"], "root_body_name": profile["root_body"],
         "com_body_name": profile["com_body"], "body_names": ",".join(profile["tracked_bodies"]),
         "observation_layout": "isaac_khan", "input_layout": input_layout,
-        "onnx_deployment_schema": json.dumps(deployment_schema(input_layout), sort_keys=True),
+        "onnx_deployment_schema": json.dumps(deployment_schema(input_layout, cfg["policy"]), sort_keys=True),
         "robot_contract": json.dumps(contract, sort_keys=True),
         "policy_config": json.dumps(cfg["policy"], sort_keys=True),
     }
@@ -307,7 +324,7 @@ def export_policy(ckpt: Path, out: Path, input_layout: InputLayout = "packed",
             "onnx": str(out), "onnx_sha256": _sha256(temporary),
             "checkpoint": str(ckpt), "iteration": iteration,
             "input_layout": input_layout, "opset": 17, "dtype": "float32",
-            "metadata": metadata, "schema": deployment_schema(input_layout),
+            "metadata": metadata, "schema": deployment_schema(input_layout, cfg["policy"]),
             "validation": validation,
             "versions": {"torch": torch.__version__, "onnx": onnx.__version__,
                          "onnxruntime": onnxruntime.__version__},

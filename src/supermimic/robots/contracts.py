@@ -86,6 +86,10 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
                     "tracked_body_count": 15,
                     "append_after_original_root_error4": True,
                 },
+                # Historical key: corruption in the environment-produced goal.
+                # Policy encoder-only augmentation is separate, recorded in
+                # config.policy and ONNX training_goal_noise. Keep this clean
+                # reference contract stable for legacy checkpoint validation.
                 "actor_goal_noise": False,
                 "critic_reference_noise": False, "critic_future_orientation": True,
                 "critic_reference_order": ["command", "future_anchor_ori_b", "extra_reference_frames"],

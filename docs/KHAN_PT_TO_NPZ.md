@@ -1,5 +1,10 @@
 # Khan 踝参数与紧凑库／完整 NPZ 训练
 
+2026-11-09参考残差更新：以下两个训练启动器默认启用参考残差动作和隔离直通分支的goal噪声。
+网络、优化器、数据加载与FK设置不变。新run及旧模式对照开关见
+[参考残差与goal噪声](KHAN_REFERENCE_RESIDUAL.md)。
+本次服务器实验的两个 `.sh` 启动器默认关闭执行器延迟；显式添加 `--actuator-delay` 可恢复0–20 ms延迟。
+
 当前训练默认配置已在2026-11-09更新为0–20 ms actuator delay且reset首控制步立即执行、合并不足一个bin的尾部、物理reset至少剩余H32；reset抬高0.05m与首步action-rate保持不变。mixed480子集提取、全量训练及验证见 [Khan reset边界与采样](KHAN_RESET_SAMPLING.md)。以下踝参数及早期验证记录继续适用；新配置应新建run，恢复训练须匹配采样与机器人合同。
 
 本轮按要求仅调整左右踝的标称执行器参数。其余关节、几何、质量与惯量、力矩限额、动作缩放、观测、奖励、DR 分布、ξ91、网络和优化参数保持不变。
@@ -29,7 +34,7 @@ KHAN_LIBRARY=/home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combin
 ```bash
 bash scripts/training/train_khan_compact_server.sh \
   --library "$KHAN_LIBRARY" \
-  --run-name khan_bones_pt_eager --num-envs 4096 \
+  --run-name khan_bones_pt_residual_goal_eager --num-envs 4096 \
   --no-reference-fk-compile
 ```
 
@@ -38,7 +43,7 @@ bash scripts/training/train_khan_compact_server.sh \
 ```bash
 bash scripts/training/train_khan_compact_server.sh \
   --library "$KHAN_LIBRARY" \
-  --run-name khan_bones_pt_compiled --num-envs 4096 \
+  --run-name khan_bones_pt_residual_goal_compiled --num-envs 4096 \
   --reference-fk-compile
 ```
 

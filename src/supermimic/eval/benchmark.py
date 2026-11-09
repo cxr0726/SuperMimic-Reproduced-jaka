@@ -93,7 +93,28 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
     pc.update(observation_layout=layout, future_frames=future, history=history)
     validate_robot_contract(ck, robot.name, layout)
     pcfg = PolicyCfg(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in pc.items()})
-    policy = Policy(pcfg).to(device)
+    reference_parameters = {}
+    if pcfg.action_mode == "reference_residual":
+        if robot.name != "khan_mini" or layout != "isaac_khan":
+            raise ValueError("Reference-residual checkpoints require the Khan Isaac observation layout")
+        from supermimic.robots.khan_mini import load_profile
+
+        profile = load_profile()
+        # These buffers define physical target semantics. Validate the saved
+        # values before load_state_dict, which would otherwise overwrite the
+        # correct robot values with a stale or corrupted checkpoint baseline.
+        for argument, buffer_name, profile_key in (
+            ("default_joint_pos", "reference_q_default", "default_joint_pos"),
+            ("action_scale", "reference_action_scale", "action_scale"),
+        ):
+            expected = torch.tensor([profile[profile_key][name] for name in robot.joint_names],
+                                    dtype=torch.float32, device=device)
+            saved = ck["policy"].get(buffer_name)
+            if (not isinstance(saved, torch.Tensor) or saved.dtype != expected.dtype
+                    or saved.shape != expected.shape or not torch.equal(saved.to(device), expected)):
+                raise ValueError(f"Checkpoint {buffer_name} differs from the robot's joint-order {profile_key}")
+            reference_parameters[argument] = expected
+    policy = Policy(pcfg, **reference_parameters).to(device)
     policy.load_state_dict(ck["policy"])
     policy.eval()
     return policy, cfg

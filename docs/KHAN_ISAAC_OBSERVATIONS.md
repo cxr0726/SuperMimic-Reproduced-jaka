@@ -6,8 +6,10 @@
 显式覆盖anchor为 `base_link`、future_steps为5。
 
 当前仍采用SuperMimic世界模型与想象训练。actor观测的内容、顺序、坐标系沿用Isaac布局，
-本体有效scale按要求改回SuperMimic；155维参考goal在真实环境和想象rollout中均不加噪声，
-与原G1默认参考窗口一致。prop本体和未来朝向保留此前噪声，下面逐项比较差异。
+本体有效scale按要求改回SuperMimic。2026-11-09起新Khan训练采用参考残差动作，
+155维参考goal仅在actor编码器副本中加入Isaac高度／关节噪声，参考直通分支、critic及奖励保持干净。
+prop本体和未来朝向保留此前噪声。动作公式、旧checkpoint兼容及训练开关见
+[参考残差与goal噪声](KHAN_REFERENCE_RESIDUAL.md)。
 没有把训练算法改成Isaac端的PPO，也没有迁移PPO的running观测归一化。
 15个跟踪body、base anchor、腰部COM随机化、颈部奖励保持已有设置。当前v5另外加入执行器延迟、完整脚凸包、实际机器人reset高度余量和critic当前误差；actor接口仍为155/465，历史观测验证记录保留在文末。
 
@@ -59,16 +61,18 @@ root_z保留世界高度；当前平地的环境origin z为0。参考关节角�
 | 顺序 | 分量 | 维度 | 加性均匀噪声半宽 | scale |
 |---|---|---:|---:|---:|
 | 1 | 5帧root_pos_diff | 15 | 0 | 1 |
-| 2 | 5帧root_z | 5 | 0 | 1 |
-| 3 | 5帧joint_pos | 135 | 0 | 1 |
+| 2 | 5帧root_z | 5 | 0.01 m，仅编码器 | 1 |
+| 3 | 5帧joint_pos | 135 | 0.05 rad，仅编码器 | 1 |
 | 合计 | | **155** | | |
 
 拼接按分量分组，每组内部按未来时间排列，不是每帧31维交错。
 与上一版相比，goal不再包含参考关节速度、参考重力、参考角速度、参考线速度或末尾9维anchor扩展。
 未来越过当前clip末帧时重复末帧，不跨到下一段。
-这155维在训练中也始终保持干净：真实环境的goal group关闭corruption且term没有noise，
-想象rollout直接使用参考command，不再采样goal噪声。`obs_noise=True`仍控制prop的本体和未来朝向，
-不重新开启goal噪声。Isaac原配置中的高度±0.01、参考q±0.05已按本次要求移除。
+环境的goal group仍返回干净command；训练调用和想象rollout使用同一个噪声函数生成
+encoder专用副本，每环境／未来帧／关节独立采样。参考残差分支始终取干净参考的第二帧q，
+避免将噪声直接送入PD基准。实际采集／想象各自的 `obs_noise` 控制该侧增强；
+`policy.goal_noise_z=0` 和 `policy.goal_noise_joint_pos=0` 可独立关闭goal噪声，保留prop噪声。
+旧检查点缺少这些字段时保持旧的无goal噪声行为。
 
 ## policy prop：465维
 
@@ -136,11 +140,11 @@ G1仍沿用原网络侧的分量除数。世界模型与critic的canonical state
 | 实际base angular velocity | 0.2 rad/s | 0.2 rad/s | 0.1 |
 | 实际projected gravity | **0.05** | **0.07** | 0.07 |
 | last action | 0 | 0 | 0 |
-| 默认goal中的参考特征 | **不加噪** | **155维全部不加噪** | 0 |
+| 默认goal中的参考特征 | **不加噪** | 编码器高度±0.01 m、q±0.05 rad；直通分支干净 | 相同 |
 | 可选anchor扩展 | 单帧pos 0.25 m、ori 0.05 | 无该9维扩展；5帧future orientation为0.05 | 0.05 |
 
 原仓库默认 `anchor_obs=False`，因此默认goal整个参考窗口都是干净的；只有显式开启的
-额外anchor项加噪。当前goal已按原G1方式保持干净；gravity的0.07及prop未来朝向0.05仍保留，
+额外anchor项加噪。当前Khan编码器goal按上表增强，参考直通分支保持干净；gravity的0.07及prop未来朝向0.05仍保留，
 本次没有关闭整个actor的观测噪声，也没有把gravity范围改成原版0.05。
 critic的全部参考输入始终保持干净，包含本次增加的180维。
 
@@ -308,7 +312,7 @@ xi沿用上述31维固定标准化：足摩擦 `(mu-0.75)/0.45`、encoder bias `
 | actor观测信息 | 按上述顺序合为620维 | 同样155+465的信息，分别输入goal encoder和decoder |
 | 算法 / actor结构 | PPO-MNMLP；USAGE隐藏层2048/1024/512 | 可微世界模型＋想象优化；encoder/decoder各2048/1024/512/256，latent32 |
 | actor本体有效scale | 角速度0.25、关节速度0.05 | 按SuperMimic恢复为0.5、0.2；其余1 |
-| goal参考噪声 | 高度±0.01、参考q±0.05 | 155维全部不加噪，与G1默认参考窗口一致 |
+| goal参考噪声 | 高度±0.01、参考q±0.05 | 编码器幅度相同，残差参考直通分支保持干净 |
 | critic输入 | 无噪声特权观测：command、未来anchor位置/姿态、body位姿、根速度、q/qd/action等 | canonical state67＋干净参考365＋context31＋root error4＋当前跟踪误差78，共545；隐藏层256/128 |
 | running观测归一化 | `empirical_normalization=True`，运行均值/方差，eps=0.01 | 无running mean/std；仅上述单位scale |
 | 关节零点随机化 | startup改default q，且同时改action offset | 每回合encoder bias使观测为q+bias−nominal q0；不改控制offset |
@@ -319,7 +323,7 @@ xi沿用上述31维固定标准化：足摩擦 `(mu-0.75)/0.45`、encoder bias `
 
 critic保留SuperMimic的canonical state、context和root error结构，参考部分增加5帧速度/重力并保留
 干净command和未来anchor朝向，另加上述当前跟踪误差78；未迁移Isaac整套特权观测。
-actor的prop仍按上表加入观测噪声，goal保持干净。
+actor的prop仍按上表加入观测噪声，goal仅编码器副本加噪，参考直通分支保持干净。
 
 Isaac的running归一化由本地 `deps/rsl_rl-modular-normed/rsl_rl/runners/on_policy_runner.py`
 及 `modules/normalizer.py` 实现，作用于已拼接、已缩放的观测，统计更新到1e8样本。

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
 import torch
 from torch import nn
 
-from supermimic.observation_layout import policy_observation_dimension
+from supermimic.observation_layout import (
+    goal_noise_half,
+    policy_observation_dimension,
+    reference_joint_positions,
+)
 from supermimic.world_model.dynamics import MLP
 from supermimic.world_model.heads import observation_terms
 
@@ -33,6 +38,13 @@ class PolicyCfg:
     goal_dim: int = GOAL_DIM  # G1:680 (+9 anchor); Khan Isaac:155
     num_joints: int = ACT_DIM
     num_tracked_bodies: int | None = None  # Training resolves this from RobotSpec.
+    # Standalone/old checkpoint defaults preserve the original actor exactly.
+    # TrainConfig resolves "auto" and unspecified noise widths for fresh runs.
+    action_mode: Literal["auto", "default", "reference_residual"] = "default"
+    reference_residual_beta: float = 1.0
+    reference_frame_offset: int = 1
+    goal_noise_z: float | None = 0.0  # Uniform half-width in meters, encoder only.
+    goal_noise_joint_pos: float | None = 0.0  # Uniform half-width in radians.
 
 
 @dataclass
@@ -127,16 +139,74 @@ class Decoder(nn.Module):
 
 
 class Policy(nn.Module):
-    """a = dec(enc_motion(g), o_hist). Extra goal interfaces can be registered later (plan Appendix B)."""
+    """Return the complete default-relative action, including an optional reference skip.
 
-    def __init__(self, cfg: PolicyCfg):
+    ``goal`` is always clean for reference composition. An explicitly supplied
+    ``encoder_goal`` can be noisy without injecting that noise directly into
+    the PD target. Forward itself is deterministic, including in train mode.
+    """
+
+    def __init__(self, cfg: PolicyCfg, *, default_joint_pos: torch.Tensor | None = None,
+                 action_scale: torch.Tensor | None = None):
         super().__init__()
+        if cfg.action_mode not in ("default", "reference_residual"):
+            raise ValueError("Resolve policy action_mode before constructing a network")
+        if cfg.goal_noise_z is None or cfg.goal_noise_joint_pos is None:
+            raise ValueError("Resolve policy goal noise widths before constructing a network")
+        if not math.isfinite(cfg.reference_residual_beta) or not 0 <= cfg.reference_residual_beta <= 1:
+            raise ValueError("reference_residual_beta must be finite and in [0, 1]")
         self.cfg = cfg
         self.encoders = nn.ModuleDict({"motion": MotionEncoder(cfg)})
         self.decoder = Decoder(cfg)
+        self.register_buffer("encoder_goal_noise_half", goal_noise_half(
+            layout=cfg.observation_layout, num_joints=cfg.num_joints,
+            future_frames=cfg.future_frames, goal_dim=cfg.goal_dim,
+            z_half=cfg.goal_noise_z, joint_pos_half=cfg.goal_noise_joint_pos,
+        ), persistent=False)
+        self.has_encoder_goal_noise = bool(cfg.goal_noise_z or cfg.goal_noise_joint_pos)
+        if cfg.action_mode == "reference_residual":
+            # Validate the layout/frame once at construction, before a CUDA or
+            # ONNX graph can be built with the wrong reference timing.
+            if not isinstance(cfg.reference_frame_offset, int) or isinstance(cfg.reference_frame_offset, bool):
+                raise ValueError("reference_frame_offset must be an integer")
+            reference_joint_positions(
+                torch.empty(cfg.goal_dim), layout=cfg.observation_layout,
+                num_joints=cfg.num_joints, future_frames=cfg.future_frames,
+                frame_offset=cfg.reference_frame_offset,
+            )
+            if default_joint_pos is None or action_scale is None:
+                raise ValueError("Reference-residual policy requires robot default_joint_pos and action_scale")
+            q0 = torch.as_tensor(default_joint_pos, dtype=torch.float32).detach().clone()
+            alpha = torch.as_tensor(action_scale, dtype=torch.float32).detach().clone()
+            if q0.shape != (cfg.num_joints,) or alpha.shape != (cfg.num_joints,):
+                raise ValueError("Reference action defaults/scales must follow the policy joint order and width")
+            if not torch.isfinite(q0).all() or not torch.isfinite(alpha).all() or (alpha <= 0).any():
+                raise ValueError("Reference action defaults/scales must be finite, with positive scales")
+            self.register_buffer("reference_q_default", q0)
+            self.register_buffer("reference_action_scale", alpha)
 
-    def forward(self, obs_hist: torch.Tensor, goal: torch.Tensor, interface: str = "motion") -> torch.Tensor:
-        return self.decoder(self.encoders[interface](goal), obs_hist)
+    def make_encoder_goal(self, goal: torch.Tensor, enabled: bool = True) -> torch.Tensor:
+        """Draw independent per-element augmentation without changing clean reference.
+
+        Collection and imagination call this outside activation recomputation.
+        Disabled/zero augmentation consumes no RNG and retains the legacy path.
+        """
+        if not enabled or not self.has_encoder_goal_noise:
+            return goal
+        return goal + (2 * torch.rand_like(goal) - 1) * self.encoder_goal_noise_half.to(goal)
+
+    def forward(self, obs_hist: torch.Tensor, goal: torch.Tensor, interface: str = "motion",
+                *, encoder_goal: torch.Tensor | None = None) -> torch.Tensor:
+        action = self.decoder(self.encoders[interface](goal if encoder_goal is None else encoder_goal), obs_hist)
+        if self.cfg.action_mode == "reference_residual":
+            q_ref = reference_joint_positions(
+                goal, layout=self.cfg.observation_layout, num_joints=self.cfg.num_joints,
+                future_frames=self.cfg.future_frames, frame_offset=self.cfg.reference_frame_offset,
+            )
+            action = action + self.cfg.reference_residual_beta * (
+                q_ref - self.reference_q_default
+            ) / self.reference_action_scale
+        return action
 
 
 class Critic(nn.Module):

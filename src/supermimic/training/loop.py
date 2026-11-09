@@ -33,6 +33,29 @@ from supermimic.world_model.wm_trainer import WorldModelTrainer
 from supermimic.world_model.world_model import WorldModel
 
 
+def validate_policy_training_semantics(saved_policy: dict, requested) -> None:
+    """Do not reinterpret a trained decoder or silently change goal corruption.
+
+    Missing fields in historical checkpoints mean default-pose actions and a
+    clean goal. Inactive residual fields do not affect legacy policy behavior.
+    """
+    defaults = {"action_mode": "default", "reference_residual_beta": 1.0,
+                "reference_frame_offset": 1, "goal_noise_z": 0.0,
+                "goal_noise_joint_pos": 0.0}
+    keys = ["action_mode", "goal_noise_z", "goal_noise_joint_pos"]
+    if requested.action_mode == "reference_residual":
+        keys += ["reference_residual_beta", "reference_frame_offset"]
+    mismatches = {key: (saved_policy.get(key, defaults[key]), getattr(requested, key))
+                  for key in keys if saved_policy.get(key, defaults[key]) != getattr(requested, key)}
+    if mismatches:
+        raise ValueError(
+            f"Checkpoint action/goal-noise semantics differ: {mismatches}. Start a new run "
+            "for reference-residual training. To resume a legacy clean-goal run use "
+            "--no-reference-residual --no-goal-noise in the Khan launchers (Python: "
+            "--policy.action-mode default --policy.goal-noise-z 0 --policy.goal-noise-joint-pos 0)."
+        )
+
+
 def load_sampler_state(command, checkpoint: dict) -> bool:
     """Restore comparable curriculum statistics, or reset pre-v2 estimates.
 
@@ -163,7 +186,20 @@ class Trainer:
         fk = G1Kinematics(robot_spec.load_model(), device=self.device)
         heads = AnalyticHeads(fk, robot_spec.tracked_bodies, robot_spec.anchor_body, robot_spec.root_body, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
         self.wm = WorldModel(cfg.world_model, heads, self.device)
-        self.policy = Policy(cfg.policy).to(self.device)
+        policy_robot_args = {}
+        if cfg.policy.action_mode == "reference_residual":
+            # Use exactly the resolved action term's joint order and physical
+            # affine mapping, not a second regex expansion of robot defaults.
+            action_term = env.action_manager.get_term("joint_pos")
+            q_default = robot.data.default_joint_pos[0].clone()
+            scale = torch.as_tensor(action_term._scale, device=self.device).expand_as(
+                robot.data.default_joint_pos)[0].clone()
+            offset = torch.as_tensor(action_term._offset, device=self.device).expand_as(
+                robot.data.default_joint_pos)[0]
+            if not torch.equal(offset, q_default):
+                raise ValueError("Reference residual requires default-pose action offsets")
+            policy_robot_args = {"default_joint_pos": q_default, "action_scale": scale}
+        self.policy = Policy(cfg.policy, **policy_robot_args).to(self.device)
         if self.buffer.xi.shape[-1] != self.wm.spec.xi_dim:
             raise ValueError("Simulator replay and world model context layouts differ")
         self.critic = Critic(cfg.critic, pcfg=cfg.policy, xi_dim=self.wm.spec.xi_dim).to(self.device)
@@ -173,6 +209,13 @@ class Trainer:
         self.policy_trainer = PolicyTrainer(self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer)
         n_params = lambda m: sum(p.numel() for p in m.parameters())
         if self.is_main:
+            print(f"[INFO] action mode: {cfg.policy.action_mode}; "
+                  f"reference beta={cfg.policy.reference_residual_beta:g}, "
+                  f"frame offset={cfg.policy.reference_frame_offset}; output/history/WM use total actions")
+            print(f"[INFO] encoder-only goal noise: z +/-{cfg.policy.goal_noise_z:g} m, "
+                  f"joints +/-{cfg.policy.goal_noise_joint_pos:g} rad (uniform); "
+                  f"collection enabled={cfg.env.obs_noise}, imagination enabled={cfg.policy_trainer.obs_noise}; "
+                  "reference skip and critic stay clean")
             print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
             print(f"[INFO] sim context: {self.wm.spec.context.kind}, xi={self.wm.spec.xi_dim}, "
                   f"fields={self.wm.spec.context.sizes}; delay queue remains implicit")
@@ -234,6 +277,7 @@ class Trainer:
             )
         saved_env = ck["config"].get("env", {})
         saved_policy = ck["config"].get("policy", {})
+        validate_policy_training_semantics(saved_policy, self.cfg.policy)
         saved_profile = saved_env.get("observation_layout", "supermimic")
         saved_future = saved_env.get("future_frames", 10)
         saved_layout = (saved_profile, saved_future, saved_policy.get("history", 10),
@@ -251,6 +295,14 @@ class Trainer:
             self.cfg.robot, self.cfg.env.observation_layout, env_config=asdict(self.cfg.env),
         ):
             raise ValueError("Checkpoint environment semantics differ (delay/reset/DR); start a new run or use matching settings")
+        if self.cfg.policy.action_mode == "reference_residual":
+            for key in ("reference_q_default", "reference_action_scale"):
+                actual = ck["policy"].get(key)
+                expected = getattr(self.policy, key)
+                if (not isinstance(actual, torch.Tensor) or actual.dtype != expected.dtype
+                        or actual.shape != expected.shape
+                        or not torch.equal(actual.to(expected), expected)):
+                    raise ValueError(f"Checkpoint {key} differs from the current physical action mapping")
         self.wm.load_state_dict(ck["wm"])
         self.policy.load_state_dict(ck["policy"])
         self.critic.load_state_dict(ck["critic"])
@@ -267,7 +319,10 @@ class Trainer:
 
     @torch.no_grad()
     def act(self, obs) -> torch.Tensor:
-        return self.policy(obs["policy"], obs["goal"])
+        # The environment supplies one clean reference window. Only the motion
+        # encoder sees corruption; never overwrite the reference/PD skip.
+        encoder_goal = self.policy.make_encoder_goal(obs["goal"], enabled=self.cfg.env.obs_noise)
+        return self.policy(obs["policy"], obs["goal"], encoder_goal=encoder_goal)
 
     def run(self) -> None:
         cfg = self.cfg

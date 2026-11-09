@@ -76,7 +76,11 @@ class TrainConfig:
     env: EnvCfg = field(default_factory=EnvCfg)
     world_model: WorldModelCfg = field(default_factory=WorldModelCfg)
     wm_trainer: WMTrainerCfg = field(default_factory=WMTrainerCfg)
-    policy: PolicyCfg = field(default_factory=lambda: PolicyCfg(history=None))
+    # Auto applies only to fresh training. Standalone PolicyCfg/checkpoint loading
+    # retains the original action space when these fields are absent.
+    policy: PolicyCfg = field(default_factory=lambda: PolicyCfg(
+        history=None, action_mode="auto", goal_noise_z=None, goal_noise_joint_pos=None,
+    ))
     critic: CriticCfg = field(default_factory=CriticCfg)
     policy_trainer: PolicyTrainerCfg = field(default_factory=PolicyTrainerCfg)
     schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
@@ -127,6 +131,12 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
     cfg.policy.num_joints = robot.num_joints
     cfg.policy.num_tracked_bodies = len(robot.tracked_bodies)
     cfg.policy.goal_dim = goal_dimension(layout, robot.num_joints, future, cfg.env.anchor_obs)
+    if cfg.policy.action_mode == "auto":
+        cfg.policy.action_mode = "reference_residual" if layout == "isaac_khan" else "default"
+    if cfg.policy.goal_noise_z is None:
+        cfg.policy.goal_noise_z = 0.01 if layout == "isaac_khan" else 0.0
+    if cfg.policy.goal_noise_joint_pos is None:
+        cfg.policy.goal_noise_joint_pos = 0.05 if layout == "isaac_khan" else 0.0
     if layout == "isaac_khan":
         # The environment and analytic observations already apply Isaac's scales.
         cfg.policy.obs_term_scale = (1.0,) * 6

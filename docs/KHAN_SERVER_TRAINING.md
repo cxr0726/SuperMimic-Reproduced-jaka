@@ -1,6 +1,15 @@
 # Khan 服务器训练：Isaac观测布局、SuperMimic尺度与原优化参数
 
-2026-11-09更新：新训练及两个Khan服务器脚本启用0–20 ms actuator delay且reset首控制步立即执行、整bin尾段合并、物理reset至少剩余H32；root reset余量仍为0.05m，首步action-rate保持原定义。新建run以匹配v4采样布局与v7机器人合同。紧凑PT的mixed480子集／全量命令、无延迟对照开关及验证范围见 [本轮训练说明](KHAN_RESET_SAMPLING.md)。下文v6延迟机制属于此前配置，保留供旧检查点核查。
+2026-11-09参考残差更新：新Khan训练默认执行 `q_ref(t+1)+0.5*decoder_residual`，
+并仅给actor编码器goal加入高度±0.01 m／参考关节±0.05 rad的均匀噪声。
+参考直通分支、critic和奖励保持干净；原动作接口和目标不限幅行为不变。
+旧checkpoint按旧模式加载，新模式应新建run，详见 [参考残差与goal噪声](KHAN_REFERENCE_RESIDUAL.md)。
+
+本次服务器实验的两个 `.sh` 启动器默认关闭执行器延迟；`--actuator-delay` 可显式恢复0–20 ms延迟。
+Python机器人默认及历史延迟实现保留，ξ仍为91维，关闭时delay_steps为0。
+恢复此前启用延迟的run时需显式传 `--actuator-delay`，并匹配其余配置。
+
+此前2026-11-09更新：启用0–20 ms actuator delay时reset首控制步立即执行；整bin尾段合并、物理reset至少剩余H32；root reset余量仍为0.05m，首步action-rate保持原定义。新建run以匹配v4采样布局与v7机器人合同。紧凑PT的mixed480子集／全量命令及验证范围见 [本轮训练说明](KHAN_RESET_SAMPLING.md)。下文v6延迟机制属于此前配置，保留供旧检查点核查。
 
 本文件对应 `scripts/training/train_khan_server.sh`。脚本采用原仓库的单GPU LAFAN
 网络隐藏层与优化配置，选择Khan模型/动作；默认4096并行环境，采用 `isaac_khan` 观测。
@@ -23,19 +32,20 @@
 - 全27关节Kp/Kd每回合各自独立乘U[0.8,1.2]；四踝PR armature每回合独立乘U[0.8,1.2]。
 - 腰部startup附重U[−2,3] kg，标称7.1277 kg、实际5.1277–10.1277 kg；作为COM处点质量增减，body_inertia不变。
 - 腰部COM offset仍在body局部坐标中采样，x±0.025 m、y/z±0.05 m，startup每环境固定，本轮不扩大。
-- goal为5帧参考位移/高度/关节角，共155维，真实环境与想象训练均不加噪声；
+- goal为5帧参考位移/高度/关节角，共155维；物理采集和想象仅对编码器副本加高度±0.01 m、关节±0.05 rad噪声，参考直通分支和critic保持干净；
   prop为未来姿态30＋5帧传感器历史435，共465维，保留本体和未来朝向噪声。
 
 decoder输入为497、critic输入为605；state67、action27保持不变，context由31扩为91。
 critic保留78维当前误差：q_ref−q27、重锚body位置误差45（实际root heading系）、完整root相对旋转rot6d6；scale均为1。
 本次critic输入增加60维全部来自ξ扩展，FK复用仍保留。
-Khan保留0–20 ms每回合固定的执行器延迟，将delay标量加入ξ；WM/想象仍不加显式队列，使用隐式拟合近似。
+Khan保留可选的0–20 ms每回合固定执行器延迟，将delay标量加入ξ；本次服务器默认关闭。
+WM/想象仍不加显式队列，启用延迟时使用隐式拟合近似。
 nominal eval关闭新增gain/armature/mass随机化及已有delay、encoder/COM随机化，足底摩擦固定1.0。
 这些DR是Khan默认配置，不需要在服务器命令中增加开关；G1默认配置不变。
 踝armature的部分reset现采用选择性派生量刷新，继续每回合采样；训练命令和v6 contract不变。
 刷新原版/优化路径的对照及本机事件计时见 [KHAN_TRAINING.md](KHAN_TRAINING.md#reset派生量选择性刷新2026-11-05)。
 脚部改成每脚1个完整CAD凸包，质量/惯量不变；运动跟踪所有reset对实际机器人root加0.05 m，包含eval，参考/NPZ/goal不变。
-actor本体角速度/关节速度有效scale为0.5/0.2，恢复原SuperMimic值；prop噪声保留此前范围，参考goal保持干净。
+actor本体角速度/关节速度有效scale为0.5/0.2，恢复原SuperMimic值；prop噪声保留此前范围，goal编码器噪声及参考直通分支按上述新模式处理。
 critic除原canonical state/context/root error外，接收干净command155、未来朝向30和5帧参考速度/重力180。
 新增180维按帧排列，每帧为qd27、重力3、root系角速度3、heading系线速度3，网络入口乘数为0.2/1/0.5/1。
 原末尾9维anchor goal由prop前部5帧未来姿态替代。**包括version-5和version-4 clean-goal/100k在内的旧Khan检查点均不兼容，当前v6必须新run；旧策略需匹配的历史源码/资产做eval或export。**
@@ -103,7 +113,7 @@ bash scripts/setup/setup_server_env.sh --project-dir "$PWD"
 
 # 只检查路径、打印完整命令，不启动CUDA/训练，不创建训练日志
 bash scripts/training/train_khan_server.sh \
-  --num-envs 1024 --run-name khan_lafan1_dr_v6_1024 --dry-run
+  --num-envs 1024 --run-name khan_lafan1_residual_goal_1024 --dry-run
 ```
 
 安装细节见 [SERVER_SETUP.md](SERVER_SETUP.md)。脚本从自身路径定位项目，换项目目录无需改源码。
@@ -118,16 +128,16 @@ bash scripts/training/train_khan_server.sh \
 
 ```bash
 bash scripts/training/train_khan_server.sh \
-  --num-envs 1024 --run-name khan_lafan1_dr_v6_1024 --stop-after-iterations 50
+  --num-envs 1024 --run-name khan_lafan1_residual_goal_1024 --stop-after-iterations 50
 ```
 
 成功后日志应显示 `it 50 ... updates 4`，并保存
-`logs/khan_lafan1_dr_v6_1024/ckpt_latest.pt`。然后从该检查点继续到正式320000步：
+`logs/khan_lafan1_residual_goal_1024/ckpt_latest.pt`。然后从该检查点继续到正式320000步：
 
 ```bash
 bash scripts/training/train_khan_server.sh \
-  --num-envs 1024 --run-name khan_lafan1_dr_v6_1024 \
-  --resume logs/khan_lafan1_dr_v6_1024/ckpt_latest.pt
+  --num-envs 1024 --run-name khan_lafan1_residual_goal_1024 \
+  --resume logs/khan_lafan1_residual_goal_1024/ckpt_latest.pt
 ```
 
 恢复时重新预热40步填充新进程replay，沿用已有模型/Adam状态/全局迭代和采样器统计。
@@ -135,7 +145,7 @@ bash scripts/training/train_khan_server.sh \
 也可直接从头完整运行：
 
 ```bash
-bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_dr_v6_full
+bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan1_residual_goal_full
 ```
 
 这是前台命令，不会替用户自动启动后台任务。控制台可直接查看，TensorBoard位于
@@ -165,7 +175,7 @@ bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan
 | WM、actor、critic LR | 单GPU均2e-4 |
 | gamma / lambda | 0.99 / 0.95 |
 | 训练长度 / LR衰减 | 320000步 / 250000步余弦衰减到0.03× |
-| obs/reset/域随机化/执行噪声 | prop噪声开、goal干净；Khan延迟0–20 ms；实际机器人reset z+0.05 m；执行噪声std0.1 |
+| obs/reset/域随机化/执行噪声 | prop噪声开、encoder goal加噪／参考直通干净；服务器默认关闭delay（可选0–20 ms）；实际机器人reset z+0.05 m；执行噪声std0.1 |
 | 观测 / 激活重计算 | isaac_khan，未来/历史5/5 / 关闭 |
 | torch.compile | default |
 
@@ -277,7 +287,7 @@ bash scripts/training/train_khan_server.sh \
 ## 历史v5配置与当前v6的区别
 
 历史v5使用run名 `khan_lafan1_delay_convex`，critic从467扩为545，当时actor155/465、decoder497、ξ31和WM125不变。
-当前v6应另建run，例如本文命令中的 `khan_lafan1_dr_v6_1024`，不能恢复v5 checkpoint。
+当前v6应另建run，例如本文命令中的 `khan_lafan1_residual_goal_1024`，不能恢复v5 checkpoint。
 网络隐藏层、latent、batch、H、UTD、优化器和学习率计划继续使用原正式值；仅WM输入改为185、critic输入605，
 actor155/465和decoder497不变，G1默认不受Khan物理适配影响。
 旧100k/168项测试、上面的采样器234项测试、历史benchmark与旧ONNX验证均属于对应历史版本。

@@ -1,12 +1,18 @@
 # Khan_mini 训练适配
 
+2026-11-09动作与goal更新：新Khan训练默认采用下一帧参考残差动作（beta=1、alpha=0.5），
+并仅给actor编码器的参考高度／关节角加入±0.01 m／±0.05 rad均匀噪声。
+环境原始goal、参考直通分支、critic、奖励和WM状态保持干净；不增加目标限幅。
+动作与恢复兼容规则见 [KHAN_REFERENCE_RESIDUAL.md](KHAN_REFERENCE_RESIDUAL.md)。
+本次服务器实验的两个 `.sh` 启动器默认关闭执行器延迟；以下Python直调命令也显式关闭。
+
 ## 当前训练入口
 
 在项目根目录执行，默认读取已有全部36条 Khan LAFAN1 NPZ：
 
 ```bash
 env -u PYTHONPATH uv run sm-train --robot khan_mini \
-  --run-name khan_lafan1_dr_v6
+  --run-name khan_lafan1_residual_goal --env.actuator-delay False
 ```
 
 当前配置为 **15个跟踪body、base anchor、独立腰部COM随机化、直接颈部位置/速度奖励**，
@@ -52,8 +58,8 @@ policy prop顺序为 `[5帧未来anchor姿态, 5帧历史重力, 5帧历史角�
 5帧历史qd, 5帧历史action]`，维度为30+15+15+135+135+135。未来姿态是参考base相对当前机器人base的
 旋转矩阵前两列，按行展平；只对传感器项累积历史，历史按最旧到最新排列。
 角速度乘0.5、关节速度乘0.2，与原SuperMimic的有效scale一致；噪声在缩放前加入，网络不重复缩放。
-`isaac_khan` 标识特征布局；155维参考goal已按G1默认方式改为始终不加噪声，
-不受真实/想象的 `obs_noise` 开关影响。prop仍有本体噪声及未来朝向±0.05，
+`isaac_khan` 标识特征布局；155维参考goal原始值保持干净，训练调用仅对encoder副本加噪，
+物理采集和想象分别受该侧 `obs_noise` 控制。prop仍有本体噪声及未来朝向±0.05，
 其中gravity±0.07仍与上游±0.05不同，详见下面链接中的源码核查。
 critic输入为canonical state67＋干净参考command155＋干净未来anchor朝向30＋5帧参考速度/重力180＋context91＋root error4，
 再在原root error4后拼接当前跟踪误差78，共605维。误差依次为参考减实际关节角27、重锚后body位置误差45
@@ -96,7 +102,8 @@ delay读取当前执行器缓冲区lag；不依赖可能未同步的Python gain�
 物理状态和下一步状态目标直接来自qpos/qvel，不混入actor观测白噪声。
 
 想象时模型接收clean策略动作，沿用原G1不额外重采执行Gaussian的名义rollout；
-预测state经解析观测生成后，prop才单独加入观测噪声，参考goal始终干净。
+预测state经解析观测生成后，prop单独加入观测噪声；参考goal只给actor编码器副本加噪，
+参考直通分支和critic始终使用干净值。
 termination head单独接收高度误差/0.25、倾斜误差/0.8及两者绝对值，共4维；
 原状态输出增量scale、损失scale、显式积分与网络隐藏层均未修改。
 

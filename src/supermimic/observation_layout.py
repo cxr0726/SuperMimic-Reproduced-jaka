@@ -7,6 +7,7 @@ SuperMimic. Reference windows include the current reference frame.
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 import torch
@@ -82,6 +83,49 @@ def isaac_goal_command(
     orientation = root_quat[:, :1].expand_as(root_quat)
     delta = quat_apply_inverse(orientation, root_pos - origin)
     return torch.cat([delta.flatten(1), root_pos[..., 2].flatten(1), joint_pos.flatten(1)], -1)
+
+
+def reference_joint_positions(
+    goal: torch.Tensor, *, layout: str, num_joints: int, future_frames: int,
+    frame_offset: int,
+) -> torch.Tensor:
+    """Extract absolute reference radians from a clean term-major Khan goal.
+
+    Khan's window starts at the current frame, unlike InstantTrack's f+1
+    window. Offset 1 therefore selects the second q block (47:74 for J=27,
+    K=5). Tail padding remains the motion library's responsibility.
+    """
+    if layout != "isaac_khan":
+        raise ValueError("Reference-residual actions require the isaac_khan goal layout")
+    if not 0 <= frame_offset < future_frames:
+        raise ValueError("Reference action frame_offset must lie inside the goal window")
+    if goal.shape[-1] != future_frames * (num_joints + 4):
+        raise ValueError("Reference action goal width differs from its configured layout")
+    start = 4 * future_frames + frame_offset * num_joints
+    return goal[..., start:start + num_joints]
+
+
+def goal_noise_half(
+    *, layout: str, num_joints: int, future_frames: int, goal_dim: int,
+    z_half: float, joint_pos_half: float,
+) -> torch.Tensor:
+    """Actor-encoder uniform half-widths in raw goal units, never PD-target noise.
+
+    Isaac Khan: [displacement 3K (clean), world height K, absolute joints KJ].
+    Other layouts retain the legacy clean-goal behavior.
+    """
+    if any(not math.isfinite(x) or x < 0 for x in (z_half, joint_pos_half)):
+        raise ValueError("Goal noise half-widths must be finite and nonnegative")
+    if layout != "isaac_khan":
+        if z_half or joint_pos_half:
+            raise ValueError("Goal encoder noise is only supported for isaac_khan")
+        return torch.zeros(goal_dim)
+    if goal_dim != future_frames * (num_joints + 4):
+        raise ValueError("Goal noise width differs from the isaac_khan goal layout")
+    return torch.cat([
+        torch.zeros(3 * future_frames), torch.full((future_frames,), float(z_half)),
+        torch.full((future_frames * num_joints,), float(joint_pos_half)),
+    ])
 
 
 def isaac_anchor_orientation(robot_quat: torch.Tensor, reference_quat: torch.Tensor) -> torch.Tensor:

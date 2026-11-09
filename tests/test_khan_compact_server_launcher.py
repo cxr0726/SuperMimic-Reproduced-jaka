@@ -74,14 +74,15 @@ def test_default_compact_run_preserves_original_training_configuration(project, 
     assert cfg.robot == "khan_mini" and cfg.env.num_envs == num_envs
     assert cfg.data.library == root / "data/pt/khan_combined_8452_compact.pt"
     assert cfg.data.npz_dir is None
-    assert cfg.run_name == "khan_bones_pt" and cfg.log_root == root / "logs"
+    assert cfg.run_name == "khan_bones_pt_residual_goal" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is None
     assert cfg.env.compact_library and not cfg.env.reference_fk_compile
-    assert cfg.env.actuator_delay is True and cfg.env.merge_short_tail_bins is True
+    assert cfg.env.actuator_delay is False and cfg.env.merge_short_tail_bins is True
     assert cfg.env.delay_reset_first_step_no_delay is True
     assert cfg.env.tail_bin_merge_fraction == 1.0 and cfg.env.reset_min_remaining_steps == 32
-    assert "actuator delay True" in result.stdout
+    assert "actuator delay False" in result.stdout
     baseline = TrainConfig(robot="khan_mini")
+    baseline.env.actuator_delay = False
     resolve_training_observations(cfg)
     resolve_training_observations(baseline)
     for name in ("world_model", "wm_trainer", "policy", "critic", "policy_trainer", "schedule"):
@@ -94,6 +95,11 @@ def test_default_compact_run_preserves_original_training_configuration(project, 
     assert cfg.env.observation_layout == "isaac_khan"
     assert cfg.env.future_frames == cfg.policy.history == 5
     assert cfg.policy.goal_dim == 155
+    assert cfg.policy.action_mode == "reference_residual"
+    assert cfg.policy.reference_residual_beta == 1.0
+    assert cfg.policy.reference_frame_offset == 1
+    assert cfg.policy.goal_noise_z == 0.01
+    assert cfg.policy.goal_noise_joint_pos == 0.05
     assert not cfg.policy_trainer.activation_checkpoint
     assert cfg.policy_trainer.horizon == 32 and cfg.policy_trainer.batch_size == 4096
     assert cfg.wm_trainer.batch_size == 2048
@@ -103,7 +109,9 @@ def test_default_compact_run_preserves_original_training_configuration(project, 
     assert not any(
         flag.startswith(("--world-model.", "--wm-trainer.", "--policy.",
                          "--policy-trainer.", "--critic.", "--schedule."))
-        and flag != "--policy.history" for flag in printed_command(result.stdout)[4:]
+        and flag not in {"--policy.history", "--policy.action-mode",
+                          "--policy.goal-noise-z", "--policy.goal-noise-joint-pos"}
+        for flag in printed_command(result.stdout)[4:]
     )
     assert not (root / "data/npz").exists()
     assert not (root / "logs").exists()
@@ -135,7 +143,7 @@ def test_custom_relative_library_and_run_name_with_spaces(project):
 
 def test_existing_checkpoint_requires_explicit_resume_and_keeps_full_lr_schedule(project):
     root, _ = project
-    run = root / "logs/khan_bones_pt"
+    run = root / "logs/khan_bones_pt_residual_goal"
     run.mkdir(parents=True)
     checkpoint = run / "ckpt_latest.pt"
     checkpoint.write_bytes(b"checkpoint fixture")
@@ -233,11 +241,36 @@ def test_actual_exec_cleans_environment_preserves_gpu_selection_and_changes_dire
     assert not (root / "logs").exists()
 
 
-def test_no_delay_ablation_keeps_h32_and_full_tail_merge(project):
-    result = run_launcher(project, "--dry-run", "--no-actuator-delay")
+@pytest.mark.parametrize("flags,enabled", [
+    (["--no-actuator-delay"], False), (["--actuator-delay"], True),
+    (["--actuator-delay", "--no-actuator-delay"], False),
+    (["--no-actuator-delay", "--actuator-delay"], True),
+])
+def test_delay_switch_keeps_h32_and_full_tail_merge(project, flags, enabled):
+    result = run_launcher(project, "--dry-run", *flags)
     assert result.returncode == 0, result.stderr
     cfg = parse_config(result.stdout)
-    assert cfg.env.actuator_delay is False
+    assert cfg.env.actuator_delay is enabled
     assert cfg.env.delay_reset_first_step_no_delay is True
     assert cfg.env.reset_min_remaining_steps == 32
     assert cfg.env.tail_bin_merge_fraction == 1.0
+
+
+@pytest.mark.parametrize("flags,action_mode,z_noise,q_noise", [
+    (["--no-reference-residual"], "default", 0.01, 0.05),
+    (["--no-goal-noise"], "reference_residual", 0.0, 0.0),
+    (["--no-reference-residual", "--no-goal-noise"], "default", 0.0, 0.0),
+    (["--no-reference-residual", "--reference-residual", "--no-goal-noise", "--goal-noise"],
+     "reference_residual", 0.01, 0.05),
+])
+def test_action_space_and_encoder_noise_switches_are_independent(project, flags, action_mode, z_noise, q_noise):
+    result = run_launcher(project, "--dry-run", *flags)
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    resolve_training_observations(cfg)
+    assert cfg.policy.action_mode == action_mode
+    assert cfg.policy.goal_noise_z == z_noise
+    assert cfg.policy.goal_noise_joint_pos == q_noise
+    assert cfg.policy_trainer.horizon == 32
+    assert cfg.env.actuator_delay is False
+    assert "reference skip and critic stay clean" in result.stdout

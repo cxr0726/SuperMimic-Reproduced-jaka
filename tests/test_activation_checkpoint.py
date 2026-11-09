@@ -19,7 +19,7 @@ from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 
 
-def _khan_training_components(tmp_path, anchor_obs, observation_layout="supermimic"):
+def _khan_training_components(tmp_path, anchor_obs, observation_layout="supermimic", reference_residual=False):
     robot = get_robot_spec("khan_mini")
     profile = load_profile()
     model = robot.load_model()
@@ -49,7 +49,14 @@ def _khan_training_components(tmp_path, anchor_obs, observation_layout="supermim
     policy_cfg = PolicyCfg(encoder_hidden=(16,), decoder_hidden=(16,), latent_dim=4,
                            history=history, future_frames=future, num_joints=robot.num_joints,
                            goal_dim=goal, observation_layout=observation_layout)
-    policy = Policy(policy_cfg)
+    policy_args = {}
+    if reference_residual:
+        policy_cfg.action_mode = "reference_residual"
+        policy_cfg.goal_noise_z = .01
+        policy_cfg.goal_noise_joint_pos = .05
+        policy_args = {"default_joint_pos": library.default_joint_pos,
+                       "action_scale": torch.full((robot.num_joints,), .5)}
+    policy = Policy(policy_cfg, **policy_args)
     critic = Critic(CriticCfg(hidden=(8,)), pcfg=policy_cfg)
     buffer = ReplayBuffer(2, 32, robot.state_dim, robot.num_joints, robot.num_joints + 4, "cpu")
     env_ids = torch.arange(2)
@@ -67,12 +74,14 @@ def _khan_training_components(tmp_path, anchor_obs, observation_layout="supermim
     return wm, policy, critic, library, buffer
 
 
-@pytest.mark.parametrize("observation_layout,anchor_obs", [
-    ("supermimic", False), ("supermimic", True), ("isaac_khan", False),
+@pytest.mark.parametrize("observation_layout,anchor_obs,reference_residual", [
+    ("supermimic", False, False), ("supermimic", True, False),
+    ("isaac_khan", False, False), ("isaac_khan", False, True),
 ])
-def test_activation_checkpoint_preserves_objective_gradients_optimizer_and_rng(tmp_path, observation_layout, anchor_obs):
+def test_activation_checkpoint_preserves_objective_gradients_optimizer_and_rng(tmp_path, observation_layout, anchor_obs, reference_residual):
     torch.manual_seed(123)
-    wm, policy, critic, library, buffer = _khan_training_components(tmp_path, anchor_obs, observation_layout)
+    wm, policy, critic, library, buffer = _khan_training_components(
+        tmp_path, anchor_obs, observation_layout, reference_residual)
     cfg = PolicyTrainerCfg(horizon=3, batch_size=4, history=policy.cfg.history,
                            future_frames=policy.cfg.future_frames, observation_layout=observation_layout,
                            critic_epochs=1, critic_minibatches=2, compile=None,

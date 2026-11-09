@@ -23,26 +23,54 @@ import torch
 from supermimic.config import TrainConfig, resolve_training_observations
 from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
+from supermimic.eval.benchmark import load_policy_from_checkpoint
 from supermimic.imagination.objective import policy_objective
 from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.imagination.rollout import imagine
 from supermimic.kinematics.g1_fk import G1Kinematics
-from supermimic.policy.nets import Critic, Policy
+from supermimic.policy.nets import Critic, PolicyCfg
 from supermimic.robots.registry import get_robot_spec
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.world_model import WorldModel
 
 
 def restore_config(obj, saved):
+    """Restore checkpoint values without applying fresh-policy defaults.
+
+    A missing action/noise field denotes the original policy, not the new
+    robot-specific defaults in TrainConfig's policy factory.
+    """
     for field in fields(obj):
         if field.name not in saved:
             continue
         value = saved[field.name]
         current = getattr(obj, field.name)
+        if isinstance(current, PolicyCfg):
+            current = PolicyCfg()
+            setattr(obj, field.name, current)
         if is_dataclass(current):
             restore_config(current, value)
         else:
             setattr(obj, field.name, tuple(value) if isinstance(current, tuple) else value)
+
+
+def load_benchmark_checkpoint(path, device):
+    """Use the production policy loader, including residual baseline checks.
+
+    The second checkpoint view is memory-mapped for WM/critic tensors: it does
+    not copy the entire policy/optimizer payload into another CPU allocation.
+    """
+    policy, saved_config = load_policy_from_checkpoint(path, "cpu")
+    cfg = TrainConfig()
+    restore_config(cfg, saved_config)
+    cfg.policy = policy.cfg
+    # The production loader also resolves missing historical observation
+    # fields. Do not reinterpret those as the robot's fresh-training layout.
+    cfg.env.observation_layout = policy.cfg.observation_layout
+    cfg.env.future_frames = policy.cfg.future_frames
+    resolve_training_observations(cfg)
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+    return cfg, policy.to(device), checkpoint
 
 
 def weights_hash(models):
@@ -91,10 +119,7 @@ def main():
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
     torch.manual_seed(730)
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    cfg = TrainConfig()
-    restore_config(cfg, checkpoint["config"])
-    resolve_training_observations(cfg)
+    cfg, policy, checkpoint = load_benchmark_checkpoint(args.checkpoint, device)
     cfg.policy_trainer.activation_checkpoint = args.activation_checkpoint
     spec = get_robot_spec(cfg.robot)
     model = spec.load_model()
@@ -111,9 +136,8 @@ def main():
     heads = AnalyticHeads(G1Kinematics(model, device), spec.tracked_bodies,
                           spec.anchor_body, spec.root_body, limits, q0)
     wm = WorldModel(cfg.world_model, heads, device)
-    policy = Policy(cfg.policy).to(device)
     critic = Critic(cfg.critic, pcfg=cfg.policy, xi_dim=wm.spec.xi_dim).to(device)
-    for name, network in (("wm", wm), ("policy", policy), ("critic", critic)):
+    for name, network in (("wm", wm), ("critic", critic)):
         network.load_state_dict(checkpoint[name])
     del checkpoint
     wm.requires_grad_(False)

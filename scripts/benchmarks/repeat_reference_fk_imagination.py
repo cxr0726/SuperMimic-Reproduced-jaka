@@ -22,19 +22,18 @@ import numpy as np
 import torch
 from benchmark_reference_fk_imagination import (
     difference,
-    restore_config,
+    load_benchmark_checkpoint,
     snapshot,
     weights_hash,
 )
 
-from supermimic.config import TrainConfig, resolve_training_observations
 from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.imagination.objective import policy_objective
 from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.imagination.rollout import imagine
 from supermimic.kinematics.g1_fk import G1Kinematics
-from supermimic.policy.nets import Critic, Policy
+from supermimic.policy.nets import Critic
 from supermimic.robots.registry import get_robot_spec
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.world_model import WorldModel
@@ -132,10 +131,7 @@ def main():
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
     torch.manual_seed(730)
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    cfg = TrainConfig()
-    restore_config(cfg, checkpoint["config"])
-    resolve_training_observations(cfg)
+    cfg, policy, checkpoint = load_benchmark_checkpoint(args.checkpoint, device)
     cfg.policy_trainer.activation_checkpoint = args.activation_checkpoint
     spec = get_robot_spec(cfg.robot)
     model = spec.load_model()
@@ -152,9 +148,8 @@ def main():
     heads = AnalyticHeads(G1Kinematics(model, device), spec.tracked_bodies,
                           spec.anchor_body, spec.root_body, limits, q0)
     wm = WorldModel(cfg.world_model, heads, device)
-    policy = Policy(cfg.policy).to(device)
     critic = Critic(cfg.critic, pcfg=cfg.policy, xi_dim=wm.spec.xi_dim).to(device)
-    for name, network in (("wm", wm), ("policy", policy), ("critic", critic)):
+    for name, network in (("wm", wm), ("critic", critic)):
         network.load_state_dict(checkpoint[name])
     del checkpoint
     wm.requires_grad_(False)

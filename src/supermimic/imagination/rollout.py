@@ -185,19 +185,24 @@ def imagine(
         obs_flat = flatten_history_term_major(torch.stack(hist, 0), observation_layout=layout)
         if layout == "isaac_khan":
             obs_flat = torch.cat([future_orientation, obs_flat], dim=-1)
+        # Sample outside activation recomputation. goals/critic_goals remain
+        # clean; only the encoder consumes this independently corrupted copy.
+        encoder_kwargs = ({"encoder_goal": policy.make_encoder_goal(goals[-1])}
+                          if obs_noise and getattr(policy, "has_encoder_goal_noise", False) else {})
         if activation_checkpoint:
             # Recompute deterministic activations during backward; the complete batch,
             # objective and update schedule are unchanged. Sensor noise stays outside.
             # TorchScript quaternion helpers wrap the checkpoint early-stop signal
             # as RuntimeError. Complete recomputation preserves eager compatibility.
             with set_checkpoint_early_stop(False):
-                a = checkpoint(policy, obs_flat, goals[-1], use_reentrant=False, preserve_rng_state=True)
+                a = checkpoint(policy, obs_flat, goals[-1], **encoder_kwargs,
+                               use_reentrant=False, preserve_rng_state=True)
                 step_result = checkpoint(
                     step_fn, s, a, a_prev, start.xi, ref,
                     use_reentrant=False, preserve_rng_state=True,
                 )
         else:
-            a = policy(obs_flat, goals[-1])
+            a = policy(obs_flat, goals[-1], **encoder_kwargs)
             step_result = step_fn(s, a, a_prev, start.xi, ref)
         if returns_body_poses:
             s_next, r, term_vec, logits, obs_clean, anchor_pose, body_pos, body_quat = step_result
