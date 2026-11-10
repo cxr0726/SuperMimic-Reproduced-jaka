@@ -164,11 +164,13 @@ def test_robot_bindings_and_g1_compatibility_defaults():
     assert (cfg.sim.nconmax, cfg.sim.njmax) == (128, 512)
 
 
-def test_production_optimizer_and_network_defaults_unchanged():
+def test_production_compact_encoder_and_ema_preserve_optimizer_defaults():
     cfg = TrainConfig(robot="khan_mini")
     resolve_training_observations(cfg)
     assert cfg.world_model.hidden == (2048, 2048, 2048)
-    assert cfg.policy.encoder_hidden == cfg.policy.decoder_hidden == (2048, 1024, 512, 256)
+    assert cfg.policy.encoder_hidden == (1024, 512, 256)
+    assert cfg.policy.decoder_hidden == (2048, 1024, 512, 256)
+    assert cfg.policy_trainer.ema_decay == .995
     assert cfg.policy.latent_dim == 32 and cfg.policy.history == 5
     assert cfg.env.future_frames == cfg.policy.future_frames == cfg.policy_trainer.history == 5
     assert cfg.policy.goal_dim == 155 and cfg.policy.observation_layout == "isaac_khan"

@@ -19,7 +19,7 @@ from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
-from supermimic.eval.benchmark import load_policy_from_checkpoint
+from supermimic.eval.benchmark import PolicyWeights, load_policy_from_checkpoint
 from supermimic.robots.registry import get_robot_spec
 
 
@@ -43,15 +43,16 @@ def main(
     sampling: Literal["start", "uniform"] = "start",
     reference_fk_compile: bool = False,
     steps: int | None = None,
+    policy_weights: PolicyWeights = "auto",
 ) -> None:
-    """Start at clip frame zero by default. --steps optionally bounds viewer execution."""
+    """Start at clip frame zero. --steps bounds playback; auto weights prefer EMA."""
     if num_envs < 1 or (steps is not None and steps < 1):
         raise ValueError("num_envs and optional steps must be positive")
     if not clips or len(set(clips)) != len(clips):
         raise ValueError("clips must contain nonempty, unique exact library names")
     if library.suffix != ".pt":
         raise ValueError("--library must be a compact .pt file")
-    policy, cfg = load_policy_from_checkpoint(ckpt, device)
+    policy, cfg = load_policy_from_checkpoint(ckpt, device, policy_weights=policy_weights)
     robot = get_robot_spec(cfg.get("robot", "g1"))
     args = SuperMimicEnvCfgArgs(
         npz_files=[str(library)], robot=robot.name, num_envs=num_envs,
@@ -74,7 +75,8 @@ def main(
         pol = _DictPolicy(policy)
         if viewer == "auto":
             viewer = "native" if (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) else "viser"
-        print(f"[INFO] PT play: {len(clips)} selected motion(s), {num_envs} env(s), viewer={viewer}")
+        print(f"[INFO] PT play: {len(clips)} selected motion(s), {num_envs} env(s), viewer={viewer}, "
+              f"policy weights={policy.checkpoint_policy_weights}")
         print(f"[INFO] Selected: {', '.join(clips)}")
         player = NativeMujocoViewer(env, pol) if viewer == "native" else ViserPlayViewer(env, pol)
         previous_threads = set(threading.enumerate())

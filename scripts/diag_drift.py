@@ -22,7 +22,7 @@ from mjlab.utils.lab_api.math import quat_apply, quat_inv, quat_mul, wrap_to_pi,
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
-from supermimic.eval.benchmark import load_policy_from_checkpoint
+from supermimic.eval.benchmark import PolicyWeights, load_policy_from_checkpoint
 
 
 def _yaw(q: torch.Tensor) -> torch.Tensor:
@@ -31,9 +31,11 @@ def _yaw(q: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def main(ckpt: Path, npz_dir: Path = Path("data/npz/lafan1"), clips: list[str] | None = None, device: str = "cuda:0", out: Path | None = None) -> None:
+def main(ckpt: Path, npz_dir: Path = Path("data/npz/lafan1"), clips: list[str] | None = None, device: str = "cuda:0", out: Path | None = None, policy_weights: PolicyWeights = "auto") -> None:
+    """--policy-weights auto prefers saved EMA; explicit ema requires it."""
     files = [str(f) for f in discover_npz(npz_dir, names=clips)]
-    policy, cfg = load_policy_from_checkpoint(ckpt, device)
+    policy, cfg = load_policy_from_checkpoint(ckpt, device, policy_weights=policy_weights)
+    print(f"[INFO] Policy weights={policy.checkpoint_policy_weights}")
     if cfg.get("robot", "g1") != "g1":
         raise ValueError("diag_drift.py is a G1-specific diagnostic; use eval_benchmark.py for Khan")
     n = len(files)
@@ -122,7 +124,13 @@ def main(ckpt: Path, npz_dir: Path = Path("data/npz/lafan1"), clips: list[str] |
         for r in rows:
             print(f"{r['name']:30s} {r['steps']:6d} {str(r['failed'])[0]:>4s} {r['mean_xy']:7.2f} {r['final_xy']:6.2f} {r['mean_yaw_deg']:8.1f} {r['final_yaw_deg']:7.1f} {r['t_xy_gt_0p3']:7.1f} {r['t_yaw_gt_15']:7.1f} {r['r_lin_world']:6.2f} {r['r_lin_aligned']:6.2f}")
         out = out or ckpt.parent / f"drift_{ckpt.stem}.json"
-        Path(out).write_text(json.dumps({"summary": agg, "clips": rows}, indent=1))
+        Path(out).write_text(json.dumps({
+            "summary": agg, "clips": rows,
+            "policy_weights": policy.checkpoint_policy_weights,
+            "policy_weights_requested": policy_weights,
+            "policy_ema_updates": policy.checkpoint_policy_ema_updates,
+            "policy_ema_decay": policy.checkpoint_policy_ema_decay,
+        }, indent=1))
         print("saved", out)
     finally:
         env.close()

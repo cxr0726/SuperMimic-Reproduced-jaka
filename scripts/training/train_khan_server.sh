@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Single-GPU Khan training with the original single-GPU LAFAN optimization values.
+# Single-GPU Khan training with current actor/EMA and original optimization values.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -19,9 +19,11 @@ usage() {
     cat <<'HELP'
 Usage: bash scripts/training/train_khan_server.sh [options]
 
-Single GPU, Khan_mini, original single-GPU LAFAN training parameters.
-Networks, optimization, H=32, UTD=0.4 and LR schedule reuse
-the repository defaults. Khan uses the Isaac observation layout: 5 reference
+Single GPU, Khan_mini, current repository training parameters.
+Encoder hidden layers are 1024/512/256; decoder is 2048/1024/512/256.
+Actor EMA decay is 0.995.
+Optimization, H=32, UTD=0.4 and LR schedule reuse the repository defaults.
+Khan uses the Isaac observation layout: 5 reference
 frames, 5 history frames, goal 155 and policy input 465. The encoder goal has
 uniform z +/-0.01 m and q +/-0.05 rad noise; the reference action skip stays clean.
 Actions use q_ref(t+1) + 0.5 * decoder_residual. Activation
@@ -31,7 +33,7 @@ Khan uses full CAD convex feet, actual root reset clearance 0.05 m and a 605-dim
 critic. Dynamics DR (PD, ankle armature, waist mass) retains the 91-dim context
 including delay. Every incomplete final bin is merged into the preceding bin.
 Physical reset requires at least 32 remaining reference steps.
-No dataset is downloaded. Use a fresh run for the changed action space.
+No dataset is downloaded. Use a fresh run for the compact encoder.
 
 Options:
   --num-envs N                Parallel robot environments (default: 4096)
@@ -142,6 +144,7 @@ fi
 printf '[INFO] Khan clips: %d; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "${#NPZ_FILES[@]}" "$NUM_ENVS"
 printf '[INFO] Khan observations: future/history 5/5; goal 155; policy 465; activation recomputation: OFF\n'
+printf '[INFO] Actor hidden defaults: encoder 1024/512/256; decoder 2048/1024/512/256; EMA decay 0.995; training uses live, inference auto-selects EMA\n'
 printf '[INFO] Actions: %s; scale 0.5; residual mode uses beta 1 and reference offset 1\n' "$ACTION_MODE"
 printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; reference skip and critic stay clean\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
 printf '[INFO] Khan: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$ACTUATOR_DELAY"

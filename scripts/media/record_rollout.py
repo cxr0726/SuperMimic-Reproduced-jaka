@@ -19,13 +19,15 @@ import tyro
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
 from supermimic.envs.state_io import StateIO
-from supermimic.eval.benchmark import load_policy_from_checkpoint
+from supermimic.eval.benchmark import PolicyWeights, load_policy_from_checkpoint
 from supermimic.robots.registry import get_robot_spec
 
 
 @torch.no_grad()
-def main(ckpt: Path, clips: list[str], npz_dir: Path | None = None, out: Path = Path("media/rollouts.npz"), device: str = "cuda:0") -> None:
-    policy, cfg = load_policy_from_checkpoint(ckpt, device)
+def main(ckpt: Path, clips: list[str], npz_dir: Path | None = None, out: Path = Path("media/rollouts.npz"), device: str = "cuda:0", policy_weights: PolicyWeights = "auto") -> None:
+    """--policy-weights auto prefers saved EMA; explicit ema requires it."""
+    policy, cfg = load_policy_from_checkpoint(ckpt, device, policy_weights=policy_weights)
+    print(f"[INFO] Policy weights={policy.checkpoint_policy_weights}")
     robot_spec = get_robot_spec(cfg.get("robot", "g1"))
     npz_dir = npz_dir or robot_spec.default_npz_dir
     files = [str(f) for f in discover_npz(npz_dir, names=clips)]
@@ -81,7 +83,9 @@ def main(ckpt: Path, clips: list[str], npz_dir: Path | None = None, out: Path = 
         out.parent.mkdir(parents=True, exist_ok=True)
         norm_return = (rew_sum / (max_r * steps.clamp(min=1))).cpu().numpy()
         np.savez_compressed(out, names=np.array(names), robot_qpos=robot_qpos[:, :T], ref_qpos=ref_qpos[:, :T], lengths=lengths, norm_return=norm_return,
-                            robot=np.array(robot_spec.name), fps=np.array(1.0 / env.step_dt))
+                            robot=np.array(robot_spec.name), fps=np.array(1.0 / env.step_dt),
+                            policy_weights=np.array(policy.checkpoint_policy_weights),
+                            policy_weights_requested=np.array(policy_weights))
         for i, nm in enumerate(names):
             print(f"{nm:48s} steps {int(lengths[i]):5d}/{lib.clips[i].length}  return {float(norm_return[i]):.3f}")
         print("saved", out)

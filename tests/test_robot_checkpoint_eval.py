@@ -111,13 +111,14 @@ def test_khan_isaac_policy_and_critic_keep_production_hidden_layers():
                     observation_layout="isaac_khan")
     policy = Policy(cfg)
     critic = Critic(CriticCfg(), pcfg=cfg, xi_dim=91)
+    assert sum(parameter.numel() for parameter in policy.parameters()) == 4_605_243
     encoder_layers = [layer for layer in policy.encoders["motion"].mlp.net
                       if isinstance(layer, torch.nn.Linear)]
     decoder_layers = [layer for layer in policy.decoder.mlp.net
                       if isinstance(layer, torch.nn.Linear)]
     critic_layers = [layer for layer in critic.mlp.net if isinstance(layer, torch.nn.Linear)]
     assert [(layer.in_features, layer.out_features) for layer in encoder_layers] == [
-        (155, 2048), (2048, 1024), (1024, 512), (512, 256), (256, 32)
+        (155, 1024), (1024, 512), (512, 256), (256, 32)
     ]
     assert [(layer.in_features, layer.out_features) for layer in decoder_layers] == [
         (497, 2048), (2048, 1024), (1024, 512), (512, 256), (256, 27)

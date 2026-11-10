@@ -116,6 +116,16 @@ env -u PYTHONPATH uv run sm-train --robot khan_mini --run-name khan_lafan1_delay
 env -u PYTHONPATH uv run python scripts/smoke_train_khan.py
 ```
 
+Current fresh-training defaults use an encoder with hidden widths `1024,512,256`,
+a decoder with `2048,1024,512,256`, and actor EMA decay `0.995`.
+Collection and optimization use the live actor; eval/play/ONNX export prefer saved
+EMA weights (`--policy-weights live` selects live explicitly). Existing checkpoints
+keep their saved architecture. Use a new run for the compact encoder; see
+[`docs/KHAN_ACTOR_EMA.md`](docs/KHAN_ACTOR_EMA.md) for server commands and resume rules.
+The InstantTrack evaluation-guided reset review is in
+[`docs/INSTANTTRACK_RESET_REVIEW.md`](docs/INSTANTTRACK_RESET_REVIEW.md);
+this update keeps the existing Khan reset sampler.
+
 The smoke command keeps production hidden layers, batches, H=32 and UTD=0.4, with
 32 environments for 50 steps; activation recomputation stays off by default.
 See [`docs/KHAN_ISAAC_OBSERVATIONS.md`](docs/KHAN_ISAAC_OBSERVATIONS.md) for exact

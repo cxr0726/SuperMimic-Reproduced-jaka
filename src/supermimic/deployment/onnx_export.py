@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from supermimic.eval.benchmark import load_policy_from_checkpoint
+from supermimic.eval.benchmark import PolicyWeights, load_policy_from_checkpoint
 from supermimic.policy.nets import Policy
 from supermimic.robots.contracts import robot_contract
 from supermimic.robots.khan_mini import load_profile
@@ -262,7 +262,7 @@ def _validate(path: Path, policy: Policy, layout: InputLayout, samples: int,
 
 def export_policy(ckpt: Path, out: Path, input_layout: InputLayout = "packed",
                   validation_samples: int = 64, motion: Path | None = None,
-                  overwrite: bool = False) -> dict:
+                  overwrite: bool = False, policy_weights: PolicyWeights = "auto") -> dict:
     """Export and validate atomically; reject incompatible or unverified artifacts."""
     if input_layout not in ("packed", "split") or validation_samples < 1:
         raise ValueError("input_layout must be packed/split and validation_samples must be positive")
@@ -278,7 +278,7 @@ def export_policy(ckpt: Path, out: Path, input_layout: InputLayout = "packed",
         import onnxruntime
     except ImportError as exc:
         raise ImportError("Install export dependencies with: uv sync --extra export") from exc
-    policy, cfg = load_policy_from_checkpoint(ckpt, "cpu")
+    policy, cfg = load_policy_from_checkpoint(ckpt, "cpu", policy_weights=policy_weights)
     if (cfg.get("robot") != "khan_mini" or policy.cfg.observation_layout != "isaac_khan"
             or policy.cfg.history != 5 or policy.cfg.future_frames != 5
             or policy.cfg.goal_dim != 155 or policy.decoder.scale.numel() != 465):
@@ -299,6 +299,12 @@ def export_policy(ckpt: Path, out: Path, input_layout: InputLayout = "packed",
     del saved
     metadata = _metadata(ckpt, cfg, input_layout)
     metadata["checkpoint_iteration"] = str(iteration)
+    metadata["policy_weights"] = policy.checkpoint_policy_weights
+    metadata["policy_weights_requested"] = policy_weights
+    if policy.checkpoint_policy_ema_updates is not None:
+        metadata["policy_ema_updates"] = str(policy.checkpoint_policy_ema_updates)
+    if policy.checkpoint_policy_ema_decay is not None:
+        metadata["policy_ema_decay"] = str(policy.checkpoint_policy_ema_decay)
     model = PackedActor(policy) if input_layout == "packed" else SplitActor(policy)
     inputs = ((torch.zeros(1, 620),) if input_layout == "packed" else
               (torch.zeros(1, 465), torch.zeros(1, 155)))
@@ -323,6 +329,10 @@ def export_policy(ckpt: Path, out: Path, input_layout: InputLayout = "packed",
         report = {
             "onnx": str(out), "onnx_sha256": _sha256(temporary),
             "checkpoint": str(ckpt), "iteration": iteration,
+            "policy_weights": policy.checkpoint_policy_weights,
+            "policy_weights_requested": policy_weights,
+            "policy_ema_updates": policy.checkpoint_policy_ema_updates,
+            "policy_ema_decay": policy.checkpoint_policy_ema_decay,
             "input_layout": input_layout, "opset": 17, "dtype": "float32",
             "metadata": metadata, "schema": deployment_schema(input_layout, cfg["policy"]),
             "validation": validation,

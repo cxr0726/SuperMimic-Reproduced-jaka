@@ -56,6 +56,24 @@ def validate_policy_training_semantics(saved_policy: dict, requested) -> None:
         )
 
 
+def validate_policy_architecture(saved_policy: dict, requested) -> None:
+    """Reject incompatible resume shapes before modifying model/optimizer state."""
+    legacy_hidden = (2048, 1024, 512, 256)
+    mismatches = {}
+    for key in ("encoder_hidden", "decoder_hidden"):
+        saved = tuple(saved_policy.get(key, legacy_hidden))
+        current = tuple(getattr(requested, key))
+        if saved != current:
+            mismatches[key] = (saved, current)
+    if saved_policy.get("latent_dim", 32) != requested.latent_dim:
+        mismatches["latent_dim"] = (saved_policy.get("latent_dim", 32), requested.latent_dim)
+    if mismatches:
+        raise ValueError(
+            f"Checkpoint policy architecture differs: {mismatches}; start a new run "
+            "for the new hidden layers, or explicitly request the saved architecture to resume"
+        )
+
+
 def load_sampler_state(command, checkpoint: dict) -> bool:
     """Restore comparable curriculum statistics, or reset pre-v2 estimates.
 
@@ -217,6 +235,10 @@ class Trainer:
                   f"collection enabled={cfg.env.obs_noise}, imagination enabled={cfg.policy_trainer.obs_noise}; "
                   "reference skip and critic stay clean")
             print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
+            print(f"[INFO] policy hidden layers: encoder={cfg.policy.encoder_hidden}, "
+                  f"decoder={cfg.policy.decoder_hidden}; "
+                  f"actor EMA decay={cfg.policy_trainer.ema_decay:g} "
+                  "(0=disabled); collection/optimization use live actor")
             print(f"[INFO] sim context: {self.wm.spec.context.kind}, xi={self.wm.spec.xi_dim}, "
                   f"fields={self.wm.spec.context.sizes}; delay queue remains implicit")
             delay_active = cfg.env.actuator_delay and cfg.env.domain_randomization
@@ -244,25 +266,27 @@ class Trainer:
     def save(self, name: str = "ckpt_latest.pt") -> None:
         if not self.is_main:
             return
-        torch.save(
-            {
-                "iteration": self.iteration,
-                "num_updates": self.num_updates,
-                "wm": self.wm.state_dict(),
-                "policy": self.policy.state_dict(),
-                "critic": self.critic.state_dict(),
-                "wm_opt": self.wm_trainer.opt.state_dict(),
-                "policy_opt": self.policy_trainer.opt.state_dict(),
-                "critic_opt": self.policy_trainer.critic_opt.state_dict(),
-                "bin_return": self.command.bin_return,
-                "bin_memory": self.command.bin_memory,
-                "sampler_contract": self.command.sampler_contract,
-                "config": asdict(self.cfg),
-                "robot_contract": robot_contract(self.cfg.robot, self.cfg.env.observation_layout,
-                                                 env_config=asdict(self.cfg.env)),
-            },
-            self.log_dir / name,
-        )
+        checkpoint = {
+            "iteration": self.iteration,
+            "num_updates": self.num_updates,
+            "wm": self.wm.state_dict(),
+            "policy": self.policy.state_dict(),
+            "critic": self.critic.state_dict(),
+            "wm_opt": self.wm_trainer.opt.state_dict(),
+            "policy_opt": self.policy_trainer.opt.state_dict(),
+            "critic_opt": self.policy_trainer.critic_opt.state_dict(),
+            "bin_return": self.command.bin_return,
+            "bin_memory": self.command.bin_memory,
+            "sampler_contract": self.command.sampler_contract,
+            "config": asdict(self.cfg),
+            "robot_contract": robot_contract(self.cfg.robot, self.cfg.env.observation_layout,
+                                             env_config=asdict(self.cfg.env)),
+        }
+        ema = getattr(self.policy_trainer, "ema", None)
+        if ema is not None:
+            checkpoint.update(policy_ema=ema.state_dict(), policy_ema_updates=ema.num_updates,
+                              policy_ema_decay=ema.decay)
+        torch.save(checkpoint, self.log_dir / name)
 
     def load(self, path: Path) -> None:
         ck = torch.load(path, map_location=self.device, weights_only=False)
@@ -303,12 +327,20 @@ class Trainer:
                         or actual.shape != expected.shape
                         or not torch.equal(actual.to(expected), expected)):
                     raise ValueError(f"Checkpoint {key} differs from the current physical action mapping")
+        validate_policy_architecture(saved_policy, self.cfg.policy)
+        ema = getattr(self.policy_trainer, "ema", None)
+        if ema is not None:
+            ema.validate_checkpoint(ck)
         self.wm.load_state_dict(ck["wm"])
         self.policy.load_state_dict(ck["policy"])
         self.critic.load_state_dict(ck["critic"])
         self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
         self.policy_trainer.opt.load_state_dict(ck["policy_opt"])
         self.policy_trainer.critic_opt.load_state_dict(ck["critic_opt"])
+        if ema is not None:
+            ema.restore(self.policy, ck)
+            print(f"[INFO] actor EMA: restored={ck.get('policy_ema') is not None}, "
+                  f"updates={ema.num_updates}, decay={ema.decay:g}")
         load_sampler_state(self.command, ck)
         self.iteration = ck["iteration"]
         self.start_iteration = self.iteration
@@ -434,6 +466,8 @@ class Trainer:
                         self.writer.add_scalar(f"time/{k}_s_per_iter", v / sch.log_interval, it)
                     self.writer.add_scalar("time/hours", elapsed / 3600, it)
                     self.writer.add_scalar("time/updates", self.num_updates, it)
+                    if self.policy_trainer.ema is not None:
+                        self.writer.add_scalar("policy/ema_updates", self.policy_trainer.ema.num_updates, it)
                     self.writer.add_scalar("sampler/entropy", float(self.command.metrics["sampling_entropy"][0]), it)
                     self.writer.add_scalar("sampler/bin_return_mean", float(self.command.bin_return.mean()), it)
                     dt_log = time.time() - last_log

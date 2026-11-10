@@ -1,9 +1,9 @@
-"""Verify Khan training with the repository's full production hyperparameters.
+"""Verify Khan training with the repository's current production hyperparameters.
 
 Robot/data selection, Khan physics/observations, world count and execution limit
-differ from the original G1 defaults. Optimization settings remain unchanged. Optional activation recomputation
-is disabled by default, matching the original execution. The 320k LR schedule, network
-widths, batch sizes, compilation, warmup, horizon and UTD are preserved.
+differ from the default scene. The compact encoder and EMA use current training
+defaults. Optional activation recomputation is disabled by default. The 320k LR
+schedule, batch sizes, compilation, warmup, horizon and UTD are preserved.
 """
 
 from __future__ import annotations
@@ -59,12 +59,18 @@ def verify_checkpoint_restore(trainer, models, checkpoint: Path) -> dict:
                   "critic": trainer.policy_trainer.critic_opt}
     states = {name: _copy_to_cpu(opt.state_dict()) for name, opt in optimizers.items()}
     sampler = {key: getattr(trainer.command, key).clone() for key in ("bin_return", "bin_memory")}
+    ema = trainer.policy_trainer.ema
+    ema_before = _copy_to_cpu(ema.state_dict()) if ema is not None else None
+    ema_updates = ema.num_updates if ema is not None else 0
     iteration, updates = trainer.iteration, trainer.num_updates
     with torch.no_grad():
         for model in models.values():
             next(model.parameters()).add_(1.0)
         for value in sampler:
             getattr(trainer.command, value).zero_()
+        if ema is not None:
+            next(ema.module.parameters()).add_(2.0)
+            ema.num_updates = -1
     for opt in optimizers.values():
         opt.state.clear()
         for group in opt.param_groups:
@@ -78,9 +84,13 @@ def verify_checkpoint_restore(trainer, models, checkpoint: Path) -> dict:
         torch.testing.assert_close(getattr(trainer.command, key), value, rtol=0, atol=0)
     for name, opt in optimizers.items():
         _assert_tree_equal(opt.state_dict(), states[name])
+    if ema is not None:
+        _assert_tree_equal(ema.state_dict(), ema_before)
+        assert ema.num_updates == ema_updates
     return {"passed": True, "optimizer_states_erased_and_restored": list(optimizers),
             "optimizer_parameter_groups_restored": True,
-            "sampler_fields_restored": list(sampler)}
+            "sampler_fields_restored": list(sampler),
+            "ema_state_and_update_count_restored": ema is not None}
 
 
 def verify_production_config(cfg: TrainConfig) -> dict:
@@ -156,6 +166,7 @@ def verify_production_config(cfg: TrainConfig) -> dict:
         "world_model_hidden": cfg.world_model.hidden,
         "policy_encoder_hidden": cfg.policy.encoder_hidden,
         "policy_decoder_hidden": cfg.policy.decoder_hidden,
+        "actor_ema_decay": cfg.policy_trainer.ema_decay,
         "critic_hidden": cfg.critic.hidden,
         "world_model_batch_size": cfg.wm_trainer.batch_size,
         "world_model_batches_per_update": cfg.wm_trainer.batches_per_update,
@@ -344,6 +355,14 @@ def main() -> None:
         for name, steps in expected.items():
             assert report["optimizer_checks"][name]["min_step"] == steps, (name, steps)
             assert report["optimizer_checks"][name]["max_step"] == steps, (name, steps)
+        ema = trainer.policy_trainer.ema
+        if ema is not None:
+            assert ema.num_updates == expected["policy"]
+            assert all(torch.isfinite(p).all() and not p.requires_grad for p in ema.module.parameters())
+            for name, live in trainer.policy.named_buffers():
+                torch.testing.assert_close(dict(ema.module.named_buffers())[name], live, rtol=0, atol=0)
+            report["ema_checks"] = {"passed": True, "updates": ema.num_updates,
+                                    "decay": ema.decay, "physical_buffers_exact": True}
         checkpoint = run_dir / "ckpt_latest.pt"
         assert checkpoint.is_file()
         report["checkpoint_restore_checks"] = verify_checkpoint_restore(trainer, models, checkpoint)

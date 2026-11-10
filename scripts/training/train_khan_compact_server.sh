@@ -21,8 +21,9 @@ usage() {
 Usage: bash scripts/training/train_khan_compact_server.sh [options]
 
 Single GPU, Khan_mini, packed compact .pt motion library.
-Uses the same training entry point and original network/optimization defaults
-as train_khan_server.sh: H=32, batch=2048/4096, UTD=0.4, 320k LR schedule,
+Uses the same training entry point and current network/optimization defaults
+as train_khan_server.sh: encoder 1024/512/256, decoder 2048/1024/512/256,
+actor EMA 0.995, H=32, batch=2048/4096, UTD=0.4, 320k LR schedule,
 Isaac observation layout with future/history 5/5, goal 155, policy 465.
 The encoder goal has uniform z +/-0.01 m and q +/-0.05 rad noise; the reference
 action skip stays clean. Actions use q_ref(t+1) + 0.5 * decoder_residual.
@@ -129,7 +130,7 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-1}"
 cd -- "$PROJECT_DIR"
 
-# TrainConfig owns the network and optimization values, just as in the NPZ launcher.
+# TrainConfig owns the actor/EMA and optimization values, just as in the NPZ launcher.
 command=(
     "$VENV_PYTHON" -u -m supermimic.scripts.train
     --robot khan_mini --run-name "$RUN_NAME" --log-root "$PROJECT_DIR/logs"
@@ -160,6 +161,7 @@ printf '[INFO] Khan compact library: %s\n' "$LIBRARY"
 printf '[INFO] Reference FK: %s; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "$REFERENCE_FK_MODE" "$NUM_ENVS"
 printf '[INFO] Khan observations: future/history 5/5; goal 155; policy 465; activation recomputation: OFF\n'
+printf '[INFO] Actor hidden defaults: encoder 1024/512/256; decoder 2048/1024/512/256; EMA decay 0.995; training uses live, inference auto-selects EMA\n'
 printf '[INFO] Actions: %s; scale 0.5; residual mode uses beta 1 and reference offset 1\n' "$ACTION_MODE"
 printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; reference skip and critic stay clean\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
 printf '[INFO] Khan: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$ACTUATOR_DELAY"

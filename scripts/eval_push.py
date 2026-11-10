@@ -17,6 +17,8 @@ import numpy as np
 import torch
 import tyro
 
+from supermimic.eval.benchmark import PolicyWeights, load_policy_from_checkpoint
+
 
 def make_tpose_clip(out: Path, seconds: float = 20.0, fps: int = 50) -> Path:
     """Write a 50 Hz T-pose npz (standing still) via the converter's FK."""
@@ -60,11 +62,12 @@ def make_tpose_clip(out: Path, seconds: float = 20.0, fps: int = 50) -> Path:
 
 
 @torch.no_grad()
-def main(ckpt: Path, speeds: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0), num_envs: int = 256, device: str = "cuda:0", push_time_s: float = 1.0, horizon_s: float = 8.0) -> None:
+def main(ckpt: Path, speeds: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0), num_envs: int = 256, device: str = "cuda:0", push_time_s: float = 1.0, horizon_s: float = 8.0, policy_weights: PolicyWeights = "auto") -> None:
+    """--policy-weights auto prefers saved EMA; explicit ema requires it."""
     from supermimic.envs import SuperMimicEnvCfgArgs, make_env
-    from supermimic.eval.benchmark import load_policy_from_checkpoint
 
-    policy, cfg = load_policy_from_checkpoint(ckpt, device)
+    policy, cfg = load_policy_from_checkpoint(ckpt, device, policy_weights=policy_weights)
+    print(f"[INFO] Policy weights={policy.checkpoint_policy_weights}")
     if cfg.get("robot", "g1") != "g1":
         raise ValueError("eval_push.py uses a G1-specific synthetic T-pose; Khan is not supported")
     tmp = Path(tempfile.mkdtemp()) / "tpose.npz"

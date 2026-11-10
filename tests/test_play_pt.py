@@ -120,6 +120,7 @@ def test_viewer_receives_compact_selection_and_actor_contract_and_closes(tmp_pat
 
     class FakePolicy:
         cfg = SimpleNamespace(history=5, future_frames=5, observation_layout="isaac_khan", goal_dim=155)
+        checkpoint_policy_weights = "live"
 
         def __call__(self, policy_obs, goal):
             assert policy_obs.shape == (2, 465) and goal.shape == (2, 155)
@@ -129,7 +130,7 @@ def test_viewer_receives_compact_selection_and_actor_contract_and_closes(tmp_pat
         "future_frames": 5, "anchor_obs": False, "reset_root_z_offset": .05,
         "library_fp16": True,
     }}
-    monkeypatch.setattr(module, "load_policy_from_checkpoint", lambda path, device: (FakePolicy(), cfg))
+    monkeypatch.setattr(module, "load_policy_from_checkpoint", lambda path, device, **kwargs: (FakePolicy(), cfg))
 
     class FakeEnv:
         def close(self):
@@ -201,8 +202,9 @@ def test_native_renderer_stops_before_environment_is_freed(tmp_path, monkeypatch
     stop = threading.Event()
     worker = None
     cfg = {"robot": "khan_mini", "world_model": {}, "env": {"future_frames": 5}}
-    policy = SimpleNamespace(cfg=SimpleNamespace(history=5, observation_layout="isaac_khan"))
-    monkeypatch.setattr(module, "load_policy_from_checkpoint", lambda *a: (policy, cfg))
+    policy = SimpleNamespace(cfg=SimpleNamespace(history=5, observation_layout="isaac_khan"),
+                             checkpoint_policy_weights="live")
+    monkeypatch.setattr(module, "load_policy_from_checkpoint", lambda *a, **kw: (policy, cfg))
 
     class Env:
         def close(self):

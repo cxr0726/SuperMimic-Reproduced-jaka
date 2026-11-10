@@ -16,6 +16,7 @@ import tyro
 
 from supermimic.envs.mdp.motion_library import discover_npz
 from supermimic.eval.benchmark import (
+    PolicyWeights,
     benchmark_source,
     load_policy_from_checkpoint,
     run_benchmark,
@@ -26,12 +27,13 @@ from supermimic.robots.contracts import robot_contract
 from supermimic.robots.registry import get_robot_spec
 
 
-def main(ckpt: Path, npz_dir: Path | None = None, clips: list[str] | None = None, clip_list: Path | None = None, manifest: Path | None = None, num_envs: int = 1024, device: str = "cuda:0", out: Path | None = None, library: Path | None = None, reference_fk_compile: bool = False) -> None:
+def main(ckpt: Path, npz_dir: Path | None = None, clips: list[str] | None = None, clip_list: Path | None = None, manifest: Path | None = None, num_envs: int = 1024, device: str = "cuda:0", out: Path | None = None, library: Path | None = None, reference_fk_compile: bool = False, policy_weights: PolicyWeights = "auto") -> None:
+    """--policy-weights auto prefers saved EMA; explicit ema requires it."""
     if library is not None and any(value is not None for value in (npz_dir, clips, clip_list, manifest)):
         raise ValueError("--library evaluates the entire packed library; do not combine NPZ/filter options")
     if clip_list is not None:
         clips = [line.strip() for line in clip_list.read_text().splitlines() if line.strip()]
-    policy, cfg = load_policy_from_checkpoint(ckpt, device)
+    policy, cfg = load_policy_from_checkpoint(ckpt, device, policy_weights=policy_weights)
     robot = get_robot_spec(cfg.get("robot", "g1"))
     if library is not None:
         if library.suffix != ".pt" or not library.is_file():
@@ -41,7 +43,8 @@ def main(ckpt: Path, npz_dir: Path | None = None, clips: list[str] | None = None
         npz_dir = npz_dir or robot.default_npz_dir
         files = [str(f) for f in discover_npz(npz_dir, names=clips, manifest=manifest)]
     actual_envs, compact = benchmark_source(files, num_envs)
-    print(f"Benchmark device={device}; environments={actual_envs}; compact={compact}; reference FK compile={reference_fk_compile}", flush=True)
+    print(f"Benchmark device={device}; environments={actual_envs}; compact={compact}; "
+          f"reference FK compile={reference_fk_compile}; policy weights={policy.checkpoint_policy_weights}", flush=True)
     started = time.monotonic()
     results = run_benchmark(
         policy, files, device=device, num_envs=num_envs,
@@ -69,6 +72,10 @@ def main(ckpt: Path, npz_dir: Path | None = None, clips: list[str] | None = None
             return hashlib.file_digest(stream, "sha256").hexdigest()
     provenance = {
         "checkpoint": str(ckpt.resolve()), "checkpoint_sha256": sha256(ckpt),
+        "policy_weights": policy.checkpoint_policy_weights,
+        "policy_weights_requested": policy_weights,
+        "policy_ema_updates": policy.checkpoint_policy_ema_updates,
+        "policy_ema_decay": policy.checkpoint_policy_ema_decay,
         "library": str(library.resolve()) if library is not None else None,
         "library_sha256": sha256(library) if library is not None else None,
         "npz_dir": str(npz_dir.resolve()) if npz_dir is not None else None,

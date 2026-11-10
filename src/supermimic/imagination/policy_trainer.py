@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -10,6 +11,7 @@ from supermimic.data.replay_buffer import ReplayBuffer
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.imagination.objective import gae_targets, policy_objective
 from supermimic.imagination.rollout import ImagRollout, imagine
+from supermimic.policy.ema import ActorEMA
 from supermimic.policy.nets import Critic, Policy
 from supermimic.training.distributed import allreduce_grads
 from supermimic.world_model.heads import ReferenceFrame
@@ -38,11 +40,15 @@ class PolicyTrainerCfg:
     anchor_obs: bool = False  # None | "default" | "reduce-overhead" | "max-autotune-no-cudagraphs"
     activation_checkpoint: bool = False  # recompute activations; preserve the full effective batch
     observation_layout: str = "supermimic"
+    ema_decay: float = 0.995  # Post-actor-update deployment average; zero disables it.
 
 
 class PolicyTrainer:
     def __init__(self, wm: WorldModel, policy: Policy, critic: Critic, lib: MotionLibrary, cfg: PolicyTrainerCfg):
         self.wm, self.policy, self.critic, self.lib, self.cfg = wm, policy, critic, lib, cfg
+        if not math.isfinite(cfg.ema_decay) or not 0 <= cfg.ema_decay < 1:
+            raise ValueError("ema_decay must lie in [0, 1); zero disables actor EMA")
+        self.ema = ActorEMA(policy, cfg.ema_decay) if cfg.ema_decay > 0 else None
         self.opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, betas=cfg.betas)
         self.critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
         from supermimic.imagination.compiled import ImagStep
@@ -122,6 +128,8 @@ class PolicyTrainer:
         gn = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.grad_clip_norm)
         torch.nn.utils.clip_grad_value_(self.policy.parameters(), cfg.grad_clip_value)
         self.opt.step()
+        if self.ema is not None:
+            self.ema.update(self.policy)
         self.wm.requires_grad_(True)
         self.critic.requires_grad_(True)
 

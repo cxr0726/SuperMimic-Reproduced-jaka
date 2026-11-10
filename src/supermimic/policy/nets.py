@@ -24,7 +24,7 @@ ACT_DIM = 29
 
 @dataclass
 class PolicyCfg:
-    encoder_hidden: tuple[int, ...] = (2048, 1024, 512, 256)
+    encoder_hidden: tuple[int, ...] = (1024, 512, 256)
     decoder_hidden: tuple[int, ...] = (2048, 1024, 512, 256)
     latent_dim: int = LATENT_DIM
     history: int | None = 10  # None is resolved by the training configuration
@@ -38,8 +38,8 @@ class PolicyCfg:
     goal_dim: int = GOAL_DIM  # G1:680 (+9 anchor); Khan Isaac:155
     num_joints: int = ACT_DIM
     num_tracked_bodies: int | None = None  # Training resolves this from RobotSpec.
-    # Standalone/old checkpoint defaults preserve the original actor exactly.
-    # TrainConfig resolves "auto" and unspecified noise widths for fresh runs.
+    # Missing action/noise fields retain legacy semantics; checkpoint loaders
+    # resolve historical hidden widths explicitly. TrainConfig resolves fresh runs.
     action_mode: Literal["auto", "default", "reference_residual"] = "default"
     reference_residual_beta: float = 1.0
     reference_frame_offset: int = 1

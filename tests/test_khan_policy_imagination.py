@@ -57,7 +57,8 @@ def test_policy_critic_shapes_scales_and_gradients(num_joints, anchor_obs):
 def test_policy_formal_hidden_defaults_and_explicit_critic_dimensions_remain_available():
     cfg = PolicyCfg()
     assert cfg.num_joints == 29 and cfg.history == 10 and cfg.goal_dim == 680
-    assert cfg.encoder_hidden == cfg.decoder_hidden == (2048, 1024, 512, 256)
+    assert cfg.encoder_hidden == (1024, 512, 256)
+    assert cfg.decoder_hidden == (2048, 1024, 512, 256)
     assert cfg.latent_dim == 32 and cfg.decoder_last_gain == 0.01
     critic = Critic(CriticCfg(hidden=(8,)), feat_dim=5, goal_dim=68, xi_dim=7)
     assert critic(torch.zeros(2, 5), torch.zeros(2, 68), torch.zeros(2, 7), torch.zeros(2, 4)).shape == (2,)

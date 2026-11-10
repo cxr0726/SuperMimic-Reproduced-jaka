@@ -22,7 +22,7 @@ from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
-from supermimic.eval.benchmark import load_policy_from_checkpoint
+from supermimic.eval.benchmark import PolicyWeights, load_policy_from_checkpoint
 from supermimic.robots.registry import get_robot_spec
 
 
@@ -46,8 +46,10 @@ def main(
     viewer: Literal["auto", "native", "viser"] = "auto",
     ghost: bool = True,
     sampling: Literal["start", "uniform"] = "start",
+    policy_weights: PolicyWeights = "auto",
 ) -> None:
-    policy, cfg = load_policy_from_checkpoint(ckpt, device)
+    """--policy-weights auto prefers saved EMA; live uses the training actor."""
+    policy, cfg = load_policy_from_checkpoint(ckpt, device, policy_weights=policy_weights)
     robot = get_robot_spec(cfg.get("robot", "g1"))
     npz_dir = npz_dir or robot.default_npz_dir
     files = [str(f) for f in discover_npz(npz_dir, names=clips)]
@@ -75,7 +77,8 @@ def main(
     pol = _DictPolicy(policy)
     if viewer == "auto":
         viewer = "native" if (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) else "viser"
-    print(f"[INFO] {len(files)} clip(s), {num_envs} env(s), viewer={viewer}")
+    print(f"[INFO] {len(files)} clip(s), {num_envs} env(s), viewer={viewer}, "
+          f"policy weights={policy.checkpoint_policy_weights}")
     try:
         if viewer == "native":
             NativeMujocoViewer(env, pol).run()

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal
 
 import torch
 
@@ -25,6 +26,8 @@ from supermimic.observation_layout import (
 from supermimic.policy.nets import Policy, PolicyCfg
 from supermimic.robots.contracts import validate_robot_contract
 from supermimic.robots.registry import RobotName, get_robot_spec
+
+PolicyWeights = Literal["auto", "live", "ema"]
 
 
 @dataclass
@@ -65,11 +68,36 @@ def benchmark_source(npz_files: list[str], num_envs: int | None) -> tuple[int, b
     return min(requested, count), packed
 
 
-def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, dict]:
+def load_policy_from_checkpoint(path: str | Path, device: str, *,
+                                policy_weights: PolicyWeights = "auto") -> tuple[Policy, dict]:
+    """Load EMA for inference when available, preserving legacy live checkpoints.
+
+    Explicit EMA selection must be present and valid; an invalid EMA state never
+    falls back to live weights. The returned policy records the resolved source
+    in ``checkpoint_policy_weights`` for evaluation/export provenance.
+    """
+    if policy_weights not in ("auto", "live", "ema"):
+        raise ValueError("policy_weights must be auto, live or ema")
     ck = torch.load(path, map_location=device, weights_only=False)
+    has_ema = ck.get("policy_ema") is not None
+    if policy_weights == "ema" and not has_ema:
+        raise ValueError("EMA policy weights requested, but checkpoint has no policy_ema")
+    use_ema = policy_weights == "ema" or (policy_weights == "auto" and has_ema)
+    selected_weights = "ema" if use_ema else "live"
+    state_key = "policy_ema" if selected_weights == "ema" else "policy"
+    state = ck[state_key]
+    if not isinstance(state, dict) or not state:
+        raise ValueError(f"Checkpoint {state_key} must be a nonempty policy state_dict")
+    for name, value in state.items():
+        if not isinstance(value, torch.Tensor) or not torch.isfinite(value).all():
+            raise ValueError(f"Checkpoint {state_key} tensor {name} is invalid or nonfinite")
     cfg = ck["config"]
     robot = get_robot_spec(cfg.get("robot", "g1"))
     pc = dict(cfg["policy"])
+    # Historical checkpoints could omit these original four-layer defaults.
+    # Fresh training defaults must not reinterpret their saved architecture.
+    pc.setdefault("encoder_hidden", (2048, 1024, 512, 256))
+    pc.setdefault("decoder_hidden", (2048, 1024, 512, 256))
     if pc.get("num_joints", robot.num_joints) != robot.num_joints:
         raise ValueError(f"Checkpoint policy joint count differs from robot {robot.name}")
     pc["num_joints"] = robot.num_joints
@@ -109,13 +137,16 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
         ):
             expected = torch.tensor([profile[profile_key][name] for name in robot.joint_names],
                                     dtype=torch.float32, device=device)
-            saved = ck["policy"].get(buffer_name)
+            saved = state.get(buffer_name)
             if (not isinstance(saved, torch.Tensor) or saved.dtype != expected.dtype
                     or saved.shape != expected.shape or not torch.equal(saved.to(device), expected)):
                 raise ValueError(f"Checkpoint {buffer_name} differs from the robot's joint-order {profile_key}")
             reference_parameters[argument] = expected
     policy = Policy(pcfg, **reference_parameters).to(device)
-    policy.load_state_dict(ck["policy"])
+    policy.load_state_dict(state)
+    policy.checkpoint_policy_weights = selected_weights
+    policy.checkpoint_policy_ema_updates = ck.get("policy_ema_updates") if use_ema else None
+    policy.checkpoint_policy_ema_decay = ck.get("policy_ema_decay") if use_ema else None
     policy.eval()
     return policy, cfg
 
