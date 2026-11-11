@@ -47,11 +47,22 @@ class PolicyCfg:
     goal_noise_z: float | None = 0.0  # Uniform half-width in meters, encoder only.
     goal_noise_joint_pos: float | None = 0.0  # Uniform half-width in radians.
     running_normalization: bool = False  # Historical checkpoints keep their fixed input scales.
+    hidden_layer_norm: bool = False  # Missing checkpoint fields retain the original SiLU MLP.
+    hidden_activation: Literal["silu", "gelu"] = "silu"
 
 
 @dataclass
 class CriticCfg:
     hidden: tuple[int, ...] = (256, 128)
+    hidden_layer_norm: bool = False
+    hidden_activation: Literal["silu", "gelu"] = "silu"
+
+
+def _hidden_activation(name: str) -> type[nn.Module]:
+    activations = {"silu": nn.SiLU, "gelu": nn.GELU}
+    if name not in activations:
+        raise ValueError(f"Unknown policy/critic hidden activation: {name!r}")
+    return activations[name]
 
 
 def critic_goal_dimension(cfg: PolicyCfg) -> int:
@@ -118,7 +129,8 @@ class MotionEncoder(nn.Module):
     def __init__(self, cfg: PolicyCfg, goal_dim: int | None = None):
         super().__init__()
         goal_dim = goal_dim or cfg.goal_dim
-        self.mlp = MLP(goal_dim, cfg.encoder_hidden, cfg.latent_dim)
+        self.mlp = MLP(goal_dim, cfg.encoder_hidden, cfg.latent_dim,
+                       layer_norm=cfg.hidden_layer_norm, act=_hidden_activation(cfg.hidden_activation))
         self.register_buffer("scale", _goal_scale_vector(cfg, goal_dim))
         self.normalizer = RunningNormalizer(goal_dim) if cfg.running_normalization else None
 
@@ -184,7 +196,9 @@ class Decoder(nn.Module):
         obs_dim = policy_observation_dimension(
             cfg.observation_layout, cfg.num_joints, cfg.history, cfg.future_frames,
         ) if obs_dim is None else obs_dim
-        self.mlp = MLP(cfg.latent_dim + obs_dim, cfg.decoder_hidden, cfg.num_joints, last_gain=cfg.decoder_last_gain)
+        self.mlp = MLP(cfg.latent_dim + obs_dim, cfg.decoder_hidden, cfg.num_joints,
+                       last_gain=cfg.decoder_last_gain, layer_norm=cfg.hidden_layer_norm,
+                       act=_hidden_activation(cfg.hidden_activation))
         self.register_buffer("scale", _obs_scale_vector(cfg))
         self.observation_normalizer = ActorObservationNormalizer(cfg) if cfg.running_normalization else None
 
@@ -284,7 +298,8 @@ class Critic(nn.Module):
         xi_dim = pcfg.num_joints + 4 if xi_dim is None else xi_dim
         goal_dim = critic_goal_dimension(pcfg) if goal_dim is None else goal_dim
         self.error_dim = critic_error_dimension(pcfg)
-        self.mlp = MLP(feat_dim + goal_dim + xi_dim + 4 + self.error_dim, cfg.hidden, 1)
+        self.mlp = MLP(feat_dim + goal_dim + xi_dim + 4 + self.error_dim, cfg.hidden, 1,
+                       layer_norm=cfg.hidden_layer_norm, act=_hidden_activation(cfg.hidden_activation))
         self.register_buffer("goal_scale", _critic_goal_scale_vector(pcfg, goal_dim))
 
     def forward(self, feat: torch.Tensor, goal: torch.Tensor, xi_norm: torch.Tensor,

@@ -172,6 +172,8 @@ def _metadata(ckpt: Path, cfg: dict, input_layout: InputLayout) -> dict[str, str
         "robot_contract": json.dumps(contract, sort_keys=True),
         "policy_config": json.dumps(cfg["policy"], sort_keys=True),
         "running_normalization": str(bool(cfg["policy"].get("running_normalization", False))).lower(),
+        "policy_hidden_layer_norm": str(bool(cfg["policy"].get("hidden_layer_norm", False))).lower(),
+        "policy_hidden_activation": cfg["policy"].get("hidden_activation", "silu"),
     }
 
 

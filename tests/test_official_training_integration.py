@@ -12,7 +12,7 @@ from supermimic.data.recorder import ReplayRecorder
 from supermimic.envs.mdp.commands import MultiClipMotionCommand
 from supermimic.envs.mdp.reset_sampling import WindowValueSampler, WindowValueSamplerCfg
 from supermimic.policy.ema import ActorEMA
-from supermimic.policy.nets import Policy, PolicyCfg
+from supermimic.policy.nets import Critic, CriticCfg, Policy, PolicyCfg
 from supermimic.robots.registry import get_robot_spec
 from supermimic.training import loop as loop_module
 from supermimic.training.loop import Trainer
@@ -26,9 +26,10 @@ def _trainer(tmp_path, *, actor_noise=True):
         encoder_hidden=(8,), decoder_hidden=(8,), latent_dim=4, history=5,
         future_frames=5, num_joints=27, goal_dim=155, observation_layout="isaac_khan",
         action_mode="default", goal_noise_z=.01, goal_noise_joint_pos=.05,
-        running_normalization=True,
+        running_normalization=True, hidden_layer_norm=True, hidden_activation="gelu",
     )
-    trainer.cfg = TrainConfig(robot="khan_mini", device="cpu", policy=policy_cfg)
+    critic_cfg = CriticCfg(hidden=(8,), hidden_layer_norm=True, hidden_activation="gelu")
+    trainer.cfg = TrainConfig(robot="khan_mini", device="cpu", policy=policy_cfg, critic=critic_cfg)
     trainer.cfg.env.obs_noise = actor_noise
     trainer.cfg.env.num_envs = 3
     trainer.cfg.world_model.hidden = (8,)
@@ -44,22 +45,26 @@ def _trainer(tmp_path, *, actor_noise=True):
         action_offset=torch.linspace(-.2, .2, 27),
     )
     trainer.policy = Policy(policy_cfg)
-    trainer.critic = torch.nn.Linear(2, 2)
+    trainer.critic = Critic(critic_cfg, pcfg=policy_cfg, xi_dim=trainer.wm.spec.xi_dim)
     trainer.wm_trainer = SimpleNamespace(opt=torch.optim.Adam(trainer.wm.parameters()))
     trainer.policy_trainer = SimpleNamespace(
         opt=torch.optim.Adam(trainer.policy.parameters()),
         critic_opt=torch.optim.Adam(trainer.critic.parameters()),
         ema=ActorEMA(trainer.policy),
     )
-    window = WindowValueSampler(WindowValueSamplerCfg(horizon=3), 4, 100, 3, .112)
+    last_frame_of = lambda frames: torch.full_like(frames, 99)
+    window = WindowValueSampler(WindowValueSamplerCfg(horizon=3), 4, 100, 3, .112,
+                                last_frame_of=last_frame_of)
     trainer.command = SimpleNamespace(
         frame=torch.tensor([1, 20, 40]), window_sampler=window,
         bin_return=window.value, bin_memory=torch.full((4,), .25),
-        sampler_contract={"version": "official-test", "mapping": "4bins100frames"},
+        sampler_contract={"version": 6, "mapping": "4bins100frames",
+                          "bootstrap_next_frame": "clip_clamped"},
         metrics={"sampling_entropy": torch.ones(3)}, num_sampleable_bins=4,
         sampleable_bins=torch.ones(4, dtype=torch.bool),
         cfg=SimpleNamespace(sampling_mode="return"),
-        library=SimpleNamespace(frame_clip=torch.zeros(100, dtype=torch.long)),
+        library=SimpleNamespace(frame_clip=torch.zeros(100, dtype=torch.long),
+                                last_frame_of=last_frame_of),
     )
     trainer.command.window_sampler_state_dict = MethodType(
         MultiClipMotionCommand.window_sampler_state_dict, trainer.command)
@@ -231,6 +236,108 @@ def test_real_run_records_terminal_actions_preframes_and_fresh_statistics_once(t
     assert len(env.recorder.buffer.end_calls) == 1
 
 
+class _TailPhysics(_Physics):
+    """Use the real command advance after termination, including partial resets."""
+
+    def __init__(self, trainer):
+        super().__init__(trainer)
+        self.cmd.frame = torch.tensor([99, 98, 99])
+        self.cmd.clip_end = torch.zeros(3, dtype=torch.bool)
+        self.cmd.library = SimpleNamespace(
+            frame_clip=torch.arange(200) // 100,
+            last_frame_of=lambda frames: torch.where(frames < 100, 99, 199),
+        )
+        self.cmd._log_step_rewards = lambda advance: None
+        self.cmd._refresh_ref = lambda: None
+        self.cmd.update_relative_body_poses = lambda: None
+        self.post_frames, self.manager_end, self.command_end = [], [], []
+
+    def step(self, action):
+        self.pre_frames.append(self.cmd.frame.clone())
+        self.pre_states.append(self.state.clone())
+        self.action_manager.action.copy_(action)
+        self.actuator.executed_raw.copy_(action + .1 * (self.count + 1))
+        self.executed.append(self.actuator.executed_raw.clone())
+        self.state[:, :3] += .01
+        # The manager sees the previous command flag, before the command advances.
+        self.clip_ended.copy_(self.cmd.clip_end)
+        self.manager_end.append(self.clip_ended.clone())
+        terminated = torch.tensor([False, False, self.count == 0])
+        timeouts = self.clip_ended.clone()
+        if self.count == 0:
+            timeouts[2] = True  # Simultaneous raw failure+timeout retains timeout priority.
+        self.reset_terminated, self.reset_buf = terminated, terminated | timeouts
+        self.reward_buf.fill_(.1)
+        ids = self.reset_buf.nonzero().flatten()
+        if ids.numel():
+            self.recorder.record_pre_reset(ids)
+            self.state[ids, :3] = -10.
+            self.cmd.frame[ids] = 150  # A different clip, never the old bootstrap successor.
+            self.cmd.clip_end[ids] = False
+            self.action_manager.action[ids] = 0.
+            self.actuator.executed_raw[ids] = 0.
+        self.cmd._compute_dt = torch.full((3,), .02)
+        self.cmd._compute_dt[ids] = 0.
+        MultiClipMotionCommand._update_command(self.cmd)
+        self.post_frames.append(self.cmd.frame.clone())
+        self.command_end.append(self.cmd.clip_end.clone())
+        if ids.numel():
+            self.recorder.record_post_reset(ids)
+        self.recorder.record_post_step()
+        self.count += 1
+        return self.observation(), self.reward_buf, terminated, timeouts, {}
+
+
+def test_run_bootstrap_uses_source_clip_with_real_command_order_and_partial_reset(tmp_path, monkeypatch):
+    trainer = _trainer(tmp_path, actor_noise=False)
+    env = _TailPhysics(trainer)
+    trainer.env, trainer.recorder = env, env.recorder
+    # Force every collection column to need a bootstrap; the sampler boundary
+    # suite separately covers the actual H20 end-column alignment.
+    window = WindowValueSampler(
+        WindowValueSamplerCfg(horizon=1), 4, 200, 3, .112,
+        bin_of_frame=lambda frames: frames // 50,
+        last_frame_of=env.cmd.library.last_frame_of,
+    )
+    window.value.copy_(torch.tensor([2., 4., 8., 9.]))
+    trainer.command.window_sampler = window
+    trainer.command.bin_return = window.value
+    returns = []
+    original_update = window._update
+
+    def capture_update():
+        returns.append(window._returns().clone())
+        original_update()
+
+    monkeypatch.setattr(window, "_update", capture_update)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(loop_module, "finalize", lambda: None)
+    monkeypatch.setattr(trainer, "save", lambda *args: None)
+    trainer.run()
+
+    # First-last-frame does not become an earlier physical clip termination.
+    assert [row.tolist() for row in env.pre_frames] == [
+        [99, 98, 99], [99, 99, 150], [150, 99, 151],
+    ]
+    assert [row.tolist() for row in env.post_frames] == [
+        [99, 99, 150], [150, 99, 151], [151, 150, 152],
+    ]
+    assert [row.tolist() for row in env.manager_end] == [
+        [False, False, False], [True, False, False], [False, True, False],
+    ]
+    assert env.command_end[0].tolist() == [True, False, False]
+    # Env0 hits the terminal frame without a done yet; env2 timed out and reset
+    # to B's frame150. Both must bootstrap A's frame99 (V4), not B's V8/V9.
+    torch.testing.assert_close(returns[0][:, 0], torch.full((3,), .1 + .99 * 4),
+                               rtol=1e-6, atol=1e-6)
+    assert returns[0][2, 0].item() != pytest.approx(.1 + .99 * 9)
+    assert window.num_updates == 3
+    assert trainer.wm.state_normalizer.count.item() == 9
+    assert trainer.policy.encoders["motion"].normalizer.count.item() == 9
+    assert trainer.policy.decoder.observation_normalizer.sensor.count.item() == 9
+    assert trainer.policy_trainer.ema.num_updates == 0
+
+
 def _state(trainer):
     return {
         "models": [copy.deepcopy(model.state_dict()) for model in
@@ -243,12 +350,32 @@ def _state(trainer):
     }
 
 
+def _assert_tree_equal(actual, expected):
+    if isinstance(expected, torch.Tensor):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    elif isinstance(expected, dict):
+        assert actual.keys() == expected.keys()
+        for key, value in expected.items():
+            _assert_tree_equal(actual[key], value)
+    elif isinstance(expected, (tuple, list)):
+        assert type(actual) is type(expected) and len(actual) == len(expected)
+        for left, right in zip(actual, expected, strict=True):
+            _assert_tree_equal(left, right)
+    else:
+        assert actual == expected
+
+
 @pytest.mark.parametrize("change, error", [
     ("actor_norm", "semantics differ"), ("action_mode", "semantics differ"),
     ("wm_norm", "training algorithm differs"), ("wm_ln", "training algorithm differs"),
     ("wm_term", "training algorithm differs"), ("critic_bound", "training algorithm differs"),
     ("action_scale", "WM action_scale differs"), ("sampler_contract", "sampler contract differs"),
     ("sampler_state", "Window sampler"),
+    ("actor_ln", "policy architecture differs"),
+    ("actor_activation", "policy architecture differs"),
+    ("critic_ln", "critic architecture differs"),
+    ("critic_activation", "critic architecture differs"),
+    ("sampler_successor", "bootstrap_next_frame differs"),
 ])
 def test_resume_semantic_rejections_precede_all_model_optimizer_and_sampler_mutations(tmp_path, change, error):
     original = _trainer(tmp_path)
@@ -273,6 +400,16 @@ def test_resume_semantic_rejections_precede_all_model_optimizer_and_sampler_muta
         saved["sampler_contract"] = {"version": "different"}
     elif change == "sampler_state":
         saved["window_sampler"] = None
+    elif change == "actor_ln":
+        saved["config"]["policy"].pop("hidden_layer_norm")
+    elif change == "actor_activation":
+        saved["config"]["policy"].pop("hidden_activation")
+    elif change == "critic_ln":
+        saved["config"]["critic"].pop("hidden_layer_norm")
+    elif change == "critic_activation":
+        saved["config"]["critic"].pop("hidden_activation")
+    elif change == "sampler_successor":
+        saved["window_sampler"]["bootstrap_next_frame"] = "global_clamped"
     # If load starts copying weights too early, these incompatible values expose it.
     parameter_name = next(iter(dict(original.wm.named_parameters())))
     saved["wm"][parameter_name].fill_(7.)
@@ -281,11 +418,17 @@ def test_resume_semantic_rejections_precede_all_model_optimizer_and_sampler_muta
     before = _state(restored)
     with pytest.raises(ValueError, match=error):
         restored.load(path)
-    torch.testing.assert_close(_state(restored), before, rtol=0, atol=0)
+    _assert_tree_equal(_state(restored), before)
 
 
 def test_resume_restores_window_moments_but_drops_pending_physical_trajectory(tmp_path):
     original = _trainer(tmp_path)
+    state = torch.zeros(3, 67)
+    state[:, 3] = 1.
+    state[:, 2] = torch.tensor([.5, .6, .7])
+    original.wm.update_normalization(state, torch.randn(3, 27))
+    original.policy.update_normalization(torch.randn(3, 465), torch.randn(3, 155))
+    original.policy_trainer.ema.sync_buffers(original.policy)
     window = original.command.window_sampler
     window.value.copy_(torch.tensor([1., 2., 3., 4.]))
     window.count.copy_(torch.tensor([3., 4., 5., 6.]))
@@ -296,6 +439,10 @@ def test_resume_restores_window_moments_but_drops_pending_physical_trajectory(tm
     original.save()
     restored = _trainer(tmp_path)
     restored.load(tmp_path / "ckpt_latest.pt")
+    for name in ("models", "optimizers", "iteration"):
+        _assert_tree_equal(_state(restored)[name], _state(original)[name])
+    assert restored.wm.state_normalizer.count.item() == 3
+    assert restored.policy.encoders["motion"].normalizer.count.item() == 3
     assert restored.command.window_sampler._step == 0
     for name in ("value", "count", "effort", "probabilities"):
         torch.testing.assert_close(getattr(restored.command.window_sampler, name),

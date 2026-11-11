@@ -35,8 +35,9 @@ including delay. Every incomplete final bin is merged into the preceding bin.
 Physical reset requires at least 32 remaining reference steps.
 No dataset is downloaded. This branch uses window-value sampling every 20
 physical steps (memory 256), WM input running normalization + LayerNorm/GELU,
-analytic soft termination, actor obs/goal running normalization and critic
-upper bounds (11.2). Use a fresh run; pre-port checkpoints are incompatible.
+analytic soft termination, actor obs/goal running normalization, actor/critic
+LayerNorm/GELU hidden blocks and critic upper bounds (11.2). Bootstrap successors
+stay within their source clip; physical end timing is unchanged. Use a fresh run.
 
 Options:
   --num-envs N                Parallel robot environments (default: 4096)
@@ -148,6 +149,7 @@ printf '[INFO] Khan clips: %d; parallel environments: %s; learning batch: 4096; 
     "${#NPZ_FILES[@]}" "$NUM_ENVS"
 printf '[INFO] Khan observations: future/history 5/5; goal 155; policy 465; activation recomputation: OFF\n'
 printf '[INFO] Actor hidden defaults: encoder 1024/512/256; decoder 2048/1024/512/256; EMA decay 0.995; training uses live, inference auto-selects EMA\n'
+printf '[INFO] Actor/Critic hidden blocks: Linear -> LayerNorm -> GELU; bootstrap successor: source-clip clamped\n'
 printf '[INFO] Official port defaults: window_value sampler; horizon 20; memory 256; WM input running norm + LayerNorm/GELU; analytic soft termination; actor obs/goal running norm; critic upper bound 11.2\n'
 if [[ "$ACTION_MODE" == default ]]; then
     printf '[INFO] Actions: default; PD target=q_default + 0.5*actor_output; reference skip OFF\n'

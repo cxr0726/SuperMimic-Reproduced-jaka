@@ -66,11 +66,30 @@ def validate_policy_architecture(saved_policy: dict, requested) -> None:
             mismatches[key] = (saved, current)
     if saved_policy.get("latent_dim", 32) != requested.latent_dim:
         mismatches["latent_dim"] = (saved_policy.get("latent_dim", 32), requested.latent_dim)
+    for key, legacy in (("hidden_layer_norm", False), ("hidden_activation", "silu")):
+        saved, current = saved_policy.get(key, legacy), getattr(requested, key)
+        if saved != current:
+            mismatches[key] = (saved, current)
     if mismatches:
         raise ValueError(
             f"Checkpoint policy architecture differs: {mismatches}; start a new run "
             "for the new hidden layers, or explicitly request the saved architecture to resume"
         )
+
+
+def validate_critic_architecture(saved_critic: dict, requested) -> None:
+    """Activation changes are semantic changes even when tensor shapes match."""
+    defaults = {"hidden": (256, 128), "hidden_layer_norm": False, "hidden_activation": "silu"}
+    mismatches = {}
+    for key, legacy in defaults.items():
+        saved, current = saved_critic.get(key, legacy), getattr(requested, key)
+        if key == "hidden":
+            saved, current = tuple(saved), tuple(current)
+        if saved != current:
+            mismatches[key] = (saved, current)
+    if mismatches:
+        raise ValueError(f"Checkpoint critic architecture differs: {mismatches}; start a new run "
+                         "or explicitly request the saved architecture to resume")
 
 
 def load_sampler_state(command, checkpoint: dict) -> bool:
@@ -265,6 +284,9 @@ class Trainer:
                   f"decoder={cfg.policy.decoder_hidden}; "
                   f"actor EMA decay={cfg.policy_trainer.ema_decay:g} "
                   "(0=disabled); collection/optimization use live actor")
+            print(f"[INFO] actor blocks: LayerNorm={cfg.policy.hidden_layer_norm}, "
+                  f"activation={cfg.policy.hidden_activation}; critic blocks: "
+                  f"LayerNorm={cfg.critic.hidden_layer_norm}, activation={cfg.critic.hidden_activation}")
             print(f"[INFO] sim context: {self.wm.spec.context.kind}, xi={self.wm.spec.xi_dim}, "
                   f"fields={self.wm.spec.context.sizes}; delay queue remains implicit")
             delay_active = cfg.env.actuator_delay and cfg.env.domain_randomization
@@ -375,6 +397,7 @@ class Trainer:
                         or not torch.equal(actual.to(expected), expected)):
                     raise ValueError(f"Checkpoint {key} differs from the current physical action mapping")
         validate_policy_architecture(saved_policy, self.cfg.policy)
+        validate_critic_architecture(ck["config"].get("critic", {}), self.cfg.critic)
         ema = getattr(self.policy_trainer, "ema", None)
         if ema is not None:
             ema.validate_checkpoint(ck)

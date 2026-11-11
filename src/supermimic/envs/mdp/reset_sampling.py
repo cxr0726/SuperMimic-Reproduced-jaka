@@ -57,6 +57,7 @@ class WindowValueSampler:
         *,
         bin_of_frame: Callable[[torch.Tensor], torch.Tensor] | None = None,
         sampleable_bins: torch.Tensor | None = None,
+        last_frame_of: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ):
         if not 0 < cfg.gamma < 1:
             raise ValueError("Window sampler gamma must lie in (0, 1)")
@@ -76,6 +77,12 @@ class WindowValueSampler:
         self.num_envs = num_envs
         self.v_max = max_step_reward / (1 - cfg.gamma)
         self.bin_of_frame = bin_of_frame
+        if last_frame_of is not None and not callable(last_frame_of):
+            raise ValueError("Window sampler last_frame_of must be callable")
+        self.last_frame_of = last_frame_of
+        self.bootstrap_next_frame = (
+            "clip_clamped" if last_frame_of is not None else "global_clamped"
+        )
         if sampleable_bins is None:
             sampleable_bins = torch.ones(bin_count, dtype=torch.bool, device=device)
         if sampleable_bins.shape != (bin_count,) or sampleable_bins.dtype != torch.bool:
@@ -135,6 +142,12 @@ class WindowValueSampler:
     def _returns(self):
         """Official lambda=1 backward recursion with three boundary tail rules."""
         next_frames = (self._frames + 1).clamp(max=self.frame_count - 1)
+        if self.last_frame_of is not None:
+            # Use the recorded pre-step frame's source clip. Auto-reset may
+            # already have installed an unrelated clip in the live command.
+            # This only fixes the successor value lookup, not physical done
+            # timing, episode grouping, or the existing terminal/tail rules.
+            next_frames = torch.minimum(next_frames, self.last_frame_of(self._frames))
         next_value = torch.where(
             self._terminated,
             0.0,
@@ -215,7 +228,8 @@ class WindowValueSampler:
 
     def state_dict(self):
         return {
-            "version": 1,
+            "version": 2,
+            "bootstrap_next_frame": self.bootstrap_next_frame,
             "cfg": asdict(self.cfg),
             "v_max": self.v_max,
             "bin_count": self.bin_count,
@@ -231,8 +245,17 @@ class WindowValueSampler:
         """Validate the complete snapshot before any live buffer is changed."""
         if not isinstance(state, Mapping):
             raise ValueError("Window sampler checkpoint must be a mapping")  # noqa: TRY004
+        version = state.get("version")
+        if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2):
+            raise ValueError("Window sampler checkpoint version differs from runtime")
+        if version == 1 and self.last_frame_of is not None:
+            raise ValueError("Window sampler checkpoint bootstrap_next_frame differs from runtime")
+        # Old standalone global-bin snapshots had no successor-policy field.
+        # They are safe only in the unchanged global-clamp implementation.
+        saved_successor = state.get("bootstrap_next_frame", "global_clamped" if version == 1 else None)
+        if saved_successor != self.bootstrap_next_frame:
+            raise ValueError("Window sampler checkpoint bootstrap_next_frame differs from runtime")
         expected = {
-            "version": 1,
             "cfg": asdict(self.cfg),
             "v_max": self.v_max,
             "bin_count": self.bin_count,

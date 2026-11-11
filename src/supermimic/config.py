@@ -86,9 +86,11 @@ class TrainConfig:
     # retains the original action space when these fields are absent.
     policy: PolicyCfg = field(default_factory=lambda: PolicyCfg(
         history=None, action_mode="auto", goal_noise_z=None, goal_noise_joint_pos=None,
-        running_normalization=True,
+        running_normalization=True, hidden_layer_norm=True, hidden_activation="gelu",
     ))
-    critic: CriticCfg = field(default_factory=CriticCfg)
+    critic: CriticCfg = field(default_factory=lambda: CriticCfg(
+        hidden_layer_norm=True, hidden_activation="gelu",
+    ))
     policy_trainer: PolicyTrainerCfg = field(default_factory=lambda: PolicyTrainerCfg(
         critic_value_bound=True,
     ))

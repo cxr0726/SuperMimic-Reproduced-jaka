@@ -97,6 +97,7 @@ class MultiClipMotionCommand(CommandTerm):
                     steepness=cfg.softmax_temp, explore=cfg.uniform_ratio, keep=cfg.memory_ratio,
                 ), lib.num_bins, lib.num_frames, n, cfg.g_max * (1 - cfg.gamma), self.device,
                 bin_of_frame=lib.bin_of_frame, sampleable_bins=self.sampleable_bins,
+                last_frame_of=lib.last_frame_of,
             )
             self.bin_return = self.window_sampler.value
         self.reset_sampler_statistics()
@@ -167,7 +168,7 @@ class MultiClipMotionCommand(CommandTerm):
             for name in ("bin_ema", "history_ema"):
                 contract.pop(name)
             contract.update(
-                version=5, algorithm="official_window_value",
+                version=6, algorithm="official_window_value",
                 return_target="window_nstep_bin_value_bootstrap",
                 duplicate_bins="mean_per_env_episode_bin_within_window",
                 initial_return=cfg.g_max, history_method="cumulative_focus_squared_per_window",
@@ -175,6 +176,7 @@ class MultiClipMotionCommand(CommandTerm):
                 failure_timeout_precedence="timeout",
                 clip_end_bootstrap="all_bin_value_mean",
                 frame_bin_mapping="clip_local_with_merged_tail",
+                bootstrap_next_frame="clip_clamped",
             )
         return contract
 

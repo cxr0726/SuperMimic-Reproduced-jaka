@@ -28,7 +28,7 @@ from supermimic.imagination.objective import policy_objective
 from supermimic.imagination.policy_trainer import PolicyTrainer, PolicyTrainerCfg
 from supermimic.imagination.rollout import imagine
 from supermimic.kinematics.g1_fk import G1Kinematics
-from supermimic.policy.nets import Critic, PolicyCfg
+from supermimic.policy.nets import Critic, CriticCfg, PolicyCfg
 from supermimic.robots.registry import get_robot_spec
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
@@ -47,6 +47,9 @@ def restore_config(obj, saved):
         current = getattr(obj, field.name)
         if isinstance(current, PolicyCfg):
             current = PolicyCfg()
+            setattr(obj, field.name, current)
+        elif isinstance(current, CriticCfg):
+            current = CriticCfg()
             setattr(obj, field.name, current)
         elif isinstance(current, WorldModelCfg):
             current = WorldModelCfg()

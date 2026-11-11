@@ -101,6 +101,8 @@ def load_policy_from_checkpoint(path: str | Path, device: str, *,
     # Absence means the original fixed-scale input mapping, never today's
     # training default. The saved statistics travel with a normalized actor.
     pc.setdefault("running_normalization", False)
+    pc.setdefault("hidden_layer_norm", False)
+    pc.setdefault("hidden_activation", "silu")
     if pc.get("num_joints", robot.num_joints) != robot.num_joints:
         raise ValueError(f"Checkpoint policy joint count differs from robot {robot.name}")
     pc["num_joints"] = robot.num_joints

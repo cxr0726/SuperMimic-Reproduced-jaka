@@ -11,7 +11,7 @@
 |---|---|
 | reset 采样 | `window_value`，每 20 个物理步更新，memory=256 |
 | 更新对象 | 窗口中每个环境、回合、bin 的访问回报先平均，再按新样本数更新 |
-| 截断尾值 | 失败=0；动作结束=全 bin 价值均值；timeout/窗口末=下一帧 bin 价值 |
+| 截断尾值 | 失败=0；动作结束=全 bin 价值均值；timeout/窗口末=来源clip内下一帧bin价值，后继不越clip |
 | 分布 | 均匀 0.5＋当前困难 0.4＋累计 focus² 历史 0.1 |
 | WM 输入 | 状态、物理 PD 目标分别运行均值/方差归一化；ξ 保持范围归一化 |
 | WM 隐层 | 2048/2048/2048，Linear→LayerNorm→GELU |
@@ -19,13 +19,15 @@
 | critic | bootstrap、GAE target 仅上界限制，Khan 为 0.112/(1−0.99)=11.2 |
 | actor 输入 | obs/goal 运行归一化，输入维度仍为 465＋155=620 |
 | actor 动作 | **默认姿态相对动作**，PD target=`q_default+0.5*actions`，无参考 residual skip |
-| actor 网络 | encoder1024/512/256，decoder2048/1024/512/256，latent32 |
+| actor 网络 | encoder1024/512/256，decoder2048/1024/512/256，隐藏层均为LayerNorm/GELU，latent32 |
+| critic 网络 | 256/128，隐藏层为LayerNorm/GELU，最终输出仍为普通Linear |
 | Actor EMA | 0.995，采集/优化使用 live；eval/export 默认自动选择 EMA |
 
 保留当前 clip 内分 bin、尾 bin 合并、物理及想象 H32 合法性、15 body/颈关节奖励、
 base_link anchor、91 维 ξ、Khan DR、reset 实际 root 抬高 0.05m、5/5 observation
 窗口以及原有优化参数和学习率调度。执行器 delay 和参考 FK 编译默认关闭。
-Actor/Critic 的隐藏层仍为已有 SiLU；本次仅给 WM 增加 LayerNorm/GELU。
+WM、Actor、Critic隐藏层均为Linear→LayerNorm→GELU。encoder最终latent仍经tanh，
+decoder动作输出和critic价值输出仍为普通Linear，不添加输出归一化或限幅。
 WM 仍使用现有 heading 表示（Khan67维状态特征）、66维速度/pose residual 输出、
 8次真实transition监督及原误差尺度；没有同时改成官方33维纯速度预测模型或切换Muon。
 运行输入归一化取代WM原固定输入除数，输出scale和loss scale保持现有实现。
@@ -48,6 +50,33 @@ ONNX 内嵌全部 actor 统计，C++ 不要再次标准化。EMA 的统计 buffe
 采样器窗口统计、value/count/effort/概率和窗口游标纳入 checkpoint。
 进程重启不恢复物理仿真世界；恢复后的首段 fresh 采集不能与旧世界尾段拼成同一回合。
 训练入口会检查 checkpoint 的动作、归一化、WM 结构和采样契约。
+本次还会检查Actor/Critic的LayerNorm与激活函数，拒绝把旧SiLU权重静默解释成新模型。
+历史未记录这些字段的checkpoint仍按SiLU、无隐藏LayerNorm加载用于play/export。
+
+## 自举后继边界
+
+采样器每20次物理step更新一次；单个环境reset不重启统计窗口。普通窗口末使用
+`V[bin(f+1)]`，其中f为保存的步前参考帧。框架额外将后继限制为
+`min(f+1, clip_last_of(f))`，所以只会读取当前来源clip的价值；不能改用自动reset
+之后的command.frame。明确clip-end仍用全库V均值，有效failure仍用0，timeout继续
+自举；timeout覆盖同时发生的failure这一既有规则保留。
+
+此修复只改变采样器读取的后继索引，不改变物理终止、参考推进、尾帧重复步、
+reset时机或奖励。新sampler contract记录`bootstrap_next_frame=clip_clamped`，
+与旧的跨clip统计版本不兼容，需要新建训练run。
+
+例如同一clip内连续执行参考帧30～49，共20次transition，且没有发生结束或失败：
+
+```text
+G49 = r49 + 0.99 * V[bin(50)]
+G48 = r48 + 0.99 * G49
+...
+G30 = r30 + 0.99*r31 + ... + 0.99^19*r49 + 0.99^20*V[bin(50)]
+```
+
+这里V是本轮统计更新前的bin价值表，不是神经网络critic，也不是整条clip的平均价值。
+20步是跨环境同步的统计窗口，不是每次reset后的固定回合长度；窗口内若发生结束，
+会按该边界的规则切断递推，下一回合的奖励不会倒灌到上一回合。
 
 ## 服务器训练
 
@@ -58,7 +87,7 @@ cd /home/jaka/Workspace/SuperMimic-Reproduced-jaka
 
 bash scripts/training/train_khan_compact_server.sh \
   --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
-  --run-name khan_8452_official_window_norm_4096 \
+  --run-name khan_8452_official_clip_ln_gelu_4096 \
   --num-envs 4096
 ```
 
@@ -71,7 +100,7 @@ NPZ 混合库沿用原入口：
 ```bash
 bash scripts/training/train_khan_server.sh \
   --data-dir data/npz/khan_mini/mixed \
-  --run-name khan_mixed_official_window_norm_4096 \
+  --run-name khan_mixed_official_clip_ln_gelu_4096 \
   --num-envs 4096
 ```
 
@@ -108,3 +137,22 @@ Khan 的 benchmark 或实机稳定性。仍需用新 run 与旧策略做受控�
 本地结果位于 `logs/smoke_official_window_norm_20261111/`（PT，delay开启）和
 `logs/smoke_official_window_norm_npz_20261111/`（NPZ，delay关闭）。首次编译耗时
 较长，不应将该50步测试的平均速度当作正式训练吞吐。以上验证不包含收敛性或实机测试。
+
+## 后继修复与 Actor/Critic 隐层验证（2026-11-11）
+
+- 完整 CPU 回归：710 passed、34 skipped。新增末帧、timeout、失败、partial reset、
+  H20正常窗口、合并尾bin、恢复契约及隐藏层结构/梯度/导出的检查。
+- 普通窗口30～49的自举结果修前修后完全相同；来源clip为0～99时，80～99窗口
+  最后一步的构造数值由错误的8.02修正为4.06，没有改变物理帧和结束标记轨迹。
+- 真实mjlab单环境在walk clip末帧13064执行一次物理step，没有提前结束或reset；
+  sampler值为3.9062686，与同clip自举一致，未读取下一clip对应的7.8662686。
+- 完整8452条PT库、8环境、50步GPU训练通过；正式网络宽度、学习batch及调度不变，
+  实际执行40次WM、4次actor、80次critic optimizer step。模型参数均更新且有限，
+  模型、优化器、EMA及sampler恢复检查通过。本地启用激活重计算，delay关闭。
+- 新LayerNorm/GELU EMA actor实际导出ONNX，对照零输入、随机输入、动态batch和
+  NPZ参考状态，最大action误差2.42e-8，PD target误差1.19e-7 rad。
+- 旧运行归一化SiLU smoke checkpoint和旧160k residual checkpoint均按原结构加载，
+  有限值推理通过；没有把历史缺失字段解释为新LayerNorm/GELU结构。
+
+本次结果位于 `logs/smoke_clip_successor_ln_gelu_20261111/`。导出文件仅用于验证，
+属于50步smoke权重。以上结果证明链路与边界检查通过，不代表正式训练已收敛或实机性能提升。
