@@ -15,6 +15,7 @@ from supermimic.policy.ema import ActorEMA
 from supermimic.policy.nets import Policy, PolicyCfg
 from supermimic.robots.registry import get_robot_spec
 from supermimic.training.loop import Trainer
+from supermimic.world_model.world_model import WorldModelCfg
 
 
 def _policy():
@@ -303,6 +304,12 @@ def _checkpoint_trainer(tmp_path):
     trainer.iteration, trainer.start_iteration, trainer.num_updates = 400, 0, 11
     trainer.policy = _policy()
     trainer.cfg = TrainConfig(robot="khan_mini", device="cpu", policy=trainer.policy.cfg)
+    # This checkpoint fixture uses toy Linear modules rather than the new
+    # normalized WM. Describe their historical training semantics explicitly.
+    trainer.cfg.world_model = WorldModelCfg()
+    trainer.cfg.policy.running_normalization = False
+    trainer.cfg.policy_trainer.critic_value_bound = False
+    trainer.cfg.env.reset_sampler = "legacy"
     trainer.cfg.policy_trainer.ema_decay = .75
     resolve_training_observations(trainer.cfg)
     trainer.robot_spec = get_robot_spec(trainer.cfg.robot)

@@ -40,6 +40,9 @@ class EnvCfg:
     delay_reset_first_step_no_delay: bool | None = None  # Khan: prime the queue with the first command
     reset_root_z_offset: float | None = None  # Actual robot only: Khan .05 m, G1 zero
     sampling_mode: str = "return"
+    reset_sampler: Literal["legacy", "window_value"] = "window_value"
+    return_horizon: int = 20
+    return_memory: int = 256
     replay_capacity: int = 1000
     future_frames: int | None = None  # robot/layout default: G1=10, Khan Isaac=5
     observation_layout: Literal["auto", "supermimic", "isaac_khan"] = "auto"
@@ -74,15 +77,21 @@ class TrainConfig:
     robot: RobotName = "g1"
     data: DataCfg = field(default_factory=DataCfg)
     env: EnvCfg = field(default_factory=EnvCfg)
-    world_model: WorldModelCfg = field(default_factory=WorldModelCfg)
+    world_model: WorldModelCfg = field(default_factory=lambda: WorldModelCfg(
+        input_normalization=True, hidden_layer_norm=True, hidden_activation="gelu",
+        termination_mode="analytic",
+    ))
     wm_trainer: WMTrainerCfg = field(default_factory=WMTrainerCfg)
     # Auto applies only to fresh training. Standalone PolicyCfg/checkpoint loading
     # retains the original action space when these fields are absent.
     policy: PolicyCfg = field(default_factory=lambda: PolicyCfg(
         history=None, action_mode="auto", goal_noise_z=None, goal_noise_joint_pos=None,
+        running_normalization=True,
     ))
     critic: CriticCfg = field(default_factory=CriticCfg)
-    policy_trainer: PolicyTrainerCfg = field(default_factory=PolicyTrainerCfg)
+    policy_trainer: PolicyTrainerCfg = field(default_factory=lambda: PolicyTrainerCfg(
+        critic_value_bound=True,
+    ))
     schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
     resume: Path | None = None
 
@@ -132,7 +141,9 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
     cfg.policy.num_tracked_bodies = len(robot.tracked_bodies)
     cfg.policy.goal_dim = goal_dimension(layout, robot.num_joints, future, cfg.env.anchor_obs)
     if cfg.policy.action_mode == "auto":
-        cfg.policy.action_mode = "reference_residual" if layout == "isaac_khan" else "default"
+        # This experimental branch trains default-pose actions. Historical
+        # residual checkpoints remain playable via their explicit saved mode.
+        cfg.policy.action_mode = "default"
     if cfg.policy.goal_noise_z is None:
         cfg.policy.goal_noise_z = 0.01 if layout == "isaac_khan" else 0.0
     if cfg.policy.goal_noise_joint_pos is None:

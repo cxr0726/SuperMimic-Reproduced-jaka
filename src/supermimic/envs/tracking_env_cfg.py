@@ -87,6 +87,9 @@ class SuperMimicEnvCfgArgs:
     delay_reset_first_step_no_delay: bool = False  # Historical direct/evaluation API default
     reset_root_z_offset: float | None = None
     sampling_mode: str = "return"  # return | uniform | start
+    reset_sampler: str = "legacy"  # legacy | window_value (new training selects window_value)
+    return_horizon: int = 20
+    return_memory: int = 256
     replay_capacity: int = 1000
     record_transitions: bool = True
     seed: int | None = 0
@@ -237,6 +240,9 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             velocity_range=vel_range if a.reset_noise else {},
             joint_position_range=(-0.1, 0.1) if a.reset_noise else (0.0, 0.0),
             sampling_mode=a.sampling_mode,  # type: ignore[arg-type]
+            reset_sampler=a.reset_sampler,  # type: ignore[arg-type]
+            return_horizon=a.return_horizon,
+            return_memory=a.return_memory,
             reset_root_z_offset=a.reset_root_z_offset,
             compact_library=a.compact_library,
             packed_clip_names=a.packed_clip_names,

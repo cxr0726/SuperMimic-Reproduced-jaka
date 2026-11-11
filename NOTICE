@@ -1,0 +1,15 @@
+This repository includes adaptations of the following open source work:
+
+SuperMimic, HybridRobotics/supermimic
+Copyright 2026 The SuperMimic Authors.
+https://github.com/HybridRobotics/supermimic
+Reference commit: 5efbf114e11f725c31d83e217be987c13c0e4ce2
+Licensed under the Apache License, Version 2.0; see
+licenses/SuperMimic-Apache-2.0.txt.
+
+The window-value reset sampler in src/supermimic/envs/mdp/reset_sampling.py
+adapts the official ReturnSampler to clip-local bins, reset eligibility masks,
+checkpoint validation, and this repository's collection lifecycle. The WM
+normalization, LayerNorm block, analytic soft termination, actor normalization,
+and critic upper-bound integration also follow the official implementation.
+These adaptations are modified implementations, not an unmodified upstream copy.

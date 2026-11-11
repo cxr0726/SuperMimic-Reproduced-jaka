@@ -9,6 +9,7 @@ from typing import Literal
 import torch
 from torch import nn
 
+from supermimic.normalization import RunningNormalizer
 from supermimic.observation_layout import (
     goal_noise_half,
     policy_observation_dimension,
@@ -45,6 +46,7 @@ class PolicyCfg:
     reference_frame_offset: int = 1
     goal_noise_z: float | None = 0.0  # Uniform half-width in meters, encoder only.
     goal_noise_joint_pos: float | None = 0.0  # Uniform half-width in radians.
+    running_normalization: bool = False  # Historical checkpoints keep their fixed input scales.
 
 
 @dataclass
@@ -118,9 +120,60 @@ class MotionEncoder(nn.Module):
         goal_dim = goal_dim or cfg.goal_dim
         self.mlp = MLP(goal_dim, cfg.encoder_hidden, cfg.latent_dim)
         self.register_buffer("scale", _goal_scale_vector(cfg, goal_dim))
+        self.normalizer = RunningNormalizer(goal_dim) if cfg.running_normalization else None
 
     def forward(self, goal: torch.Tensor) -> torch.Tensor:
-        return torch.tanh(self.mlp(goal * self.scale))
+        inputs = self.normalizer(goal) if self.normalizer is not None else goal * self.scale
+        return torch.tanh(self.mlp(inputs))
+
+
+class ActorObservationNormalizer(nn.Module):
+    """Share raw sensor moments over history lags; keep future orientation separate."""
+
+    def __init__(self, cfg: PolicyCfg):
+        super().__init__()
+        if cfg.history is None:
+            raise ValueError("Resolve actor history before constructing normalization")
+        self.history = cfg.history
+        self.terms = observation_terms(cfg.num_joints, cfg.observation_layout)
+        self.orientation_width = 6 * cfg.future_frames if cfg.observation_layout == "isaac_khan" else 0
+        self.sensor = RunningNormalizer(sum(width for _, width in self.terms))
+        self.orientation = RunningNormalizer(self.orientation_width) if self.orientation_width else None
+        # The Khan environment supplies already scaled sensor terms. Restore
+        # physical units before empirical normalization, including eps units.
+        self.raw_scales = tuple(
+            2.0 if cfg.observation_layout == "isaac_khan" and name == "base_ang_vel" else
+            5.0 if cfg.observation_layout == "isaac_khan" and name == "joint_vel" else 1.0
+            for name, _ in self.terms
+        )
+
+    def _terms(self, obs_hist: torch.Tensor):
+        offset = self.orientation_width
+        for (_, width), raw_scale in zip(self.terms, self.raw_scales, strict=True):
+            term = obs_hist[..., offset:offset + self.history * width]
+            yield term.unflatten(-1, (self.history, width)) * raw_scale
+            offset += self.history * width
+
+    def forward(self, obs_hist: torch.Tensor) -> torch.Tensor:
+        parts = []
+        if self.orientation is not None:
+            parts.append(self.orientation(obs_hist[..., :self.orientation_width]))
+        offset = 0
+        for (_, width), term in zip(self.terms, self._terms(obs_hist), strict=True):
+            normalized = (term - self.sensor._mean[offset:offset + width]) / (
+                self.sensor._std[offset:offset + width] + self.sensor.eps
+            )
+            parts.append(normalized.flatten(-2, -1))
+            offset += width
+        return torch.cat(parts, dim=-1)
+
+    @torch.no_grad()
+    def update(self, obs_hist: torch.Tensor) -> None:
+        # Only the newest sensor is fresh. Updating all history slots would
+        # repeatedly count older observations and weight reset padding H times.
+        self.sensor.update(torch.cat([term[..., -1, :] for term in self._terms(obs_hist)], dim=-1))
+        if self.orientation is not None:
+            self.orientation.update(obs_hist[..., :self.orientation_width])
 
 
 class Decoder(nn.Module):
@@ -133,9 +186,12 @@ class Decoder(nn.Module):
         ) if obs_dim is None else obs_dim
         self.mlp = MLP(cfg.latent_dim + obs_dim, cfg.decoder_hidden, cfg.num_joints, last_gain=cfg.decoder_last_gain)
         self.register_buffer("scale", _obs_scale_vector(cfg))
+        self.observation_normalizer = ActorObservationNormalizer(cfg) if cfg.running_normalization else None
 
     def forward(self, z: torch.Tensor, obs_hist: torch.Tensor) -> torch.Tensor:
-        return self.mlp(torch.cat([z, obs_hist * self.scale], dim=-1))
+        obs = (self.observation_normalizer(obs_hist) if self.observation_normalizer is not None
+               else obs_hist * self.scale)
+        return self.mlp(torch.cat([z, obs], dim=-1))
 
 
 class Policy(nn.Module):
@@ -195,6 +251,15 @@ class Policy(nn.Module):
             return goal
         return goal + (2 * torch.rand_like(goal) - 1) * self.encoder_goal_noise_half.to(goal)
 
+    @torch.no_grad()
+    def update_normalization(self, obs_hist: torch.Tensor, goal: torch.Tensor, *,
+                             encoder_goal: torch.Tensor | None = None) -> None:
+        """Update once from fresh real observations, reusing the actual noisy goal."""
+        if not self.cfg.running_normalization:
+            return
+        self.decoder.observation_normalizer.update(obs_hist)
+        self.encoders["motion"].normalizer.update(goal if encoder_goal is None else encoder_goal)
+
     def forward(self, obs_hist: torch.Tensor, goal: torch.Tensor, interface: str = "motion",
                 *, encoder_goal: torch.Tensor | None = None) -> torch.Tensor:
         action = self.decoder(self.encoders[interface](goal if encoder_goal is None else encoder_goal), obs_hist)
@@ -210,7 +275,7 @@ class Policy(nn.Module):
 
 
 class Critic(nn.Module):
-    """V(state, reference, xi, root drift, tracking errors); G1 input788, Khan input545."""
+    """V(state, reference, xi, root drift, tracking errors); G1 input788, Khan DR input605."""
 
     def __init__(self, cfg: CriticCfg, feat_dim: int | None = None, goal_dim: int | None = None, xi_dim: int | None = None, pcfg: PolicyCfg | None = None):
         super().__init__()

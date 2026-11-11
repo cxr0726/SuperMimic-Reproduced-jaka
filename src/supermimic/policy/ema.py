@@ -31,9 +31,14 @@ class ActorEMA:
                 average.copy_(live)
             else:
                 average.lerp_(live, 1.0 - self.decay)
+        self.sync_buffers(policy)
+        self.num_updates += 1
+
+    @torch.no_grad()
+    def sync_buffers(self, policy: nn.Module) -> None:
+        """Refresh running statistics after collection without averaging weights."""
         for average, live in zip(self.module.buffers(), policy.buffers(), strict=True):
             average.copy_(live)
-        self.num_updates += 1
 
     def state_dict(self) -> Mapping[str, torch.Tensor]:
         return self.module.state_dict()

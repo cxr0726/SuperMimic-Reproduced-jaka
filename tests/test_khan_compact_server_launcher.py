@@ -74,7 +74,7 @@ def test_default_compact_run_preserves_original_training_configuration(project, 
     assert cfg.robot == "khan_mini" and cfg.env.num_envs == num_envs
     assert cfg.data.library == root / "data/pt/khan_combined_8452_compact.pt"
     assert cfg.data.npz_dir is None
-    assert cfg.run_name == "khan_bones_pt_residual_goal" and cfg.log_root == root / "logs"
+    assert cfg.run_name == "khan_8452_official_window_norm" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is None
     assert cfg.env.compact_library and not cfg.env.reference_fk_compile
     assert cfg.env.actuator_delay is False and cfg.env.merge_short_tail_bins is True
@@ -95,7 +95,14 @@ def test_default_compact_run_preserves_original_training_configuration(project, 
     assert cfg.env.observation_layout == "isaac_khan"
     assert cfg.env.future_frames == cfg.policy.history == 5
     assert cfg.policy.goal_dim == 155
-    assert cfg.policy.action_mode == "reference_residual"
+    assert cfg.policy.action_mode == "default"
+    assert cfg.env.reset_sampler == "window_value"
+    assert cfg.env.return_horizon == 20 and cfg.env.return_memory == 256
+    assert cfg.world_model.input_normalization and cfg.world_model.hidden_layer_norm
+    assert cfg.world_model.hidden_activation == "gelu"
+    assert cfg.world_model.termination_mode == "analytic"
+    assert cfg.policy.running_normalization and cfg.policy_trainer.critic_value_bound
+    assert "window_value sampler; horizon 20; memory 256" in result.stdout
     assert cfg.policy.reference_residual_beta == 1.0
     assert cfg.policy.reference_frame_offset == 1
     assert cfg.policy.goal_noise_z == 0.01
@@ -143,7 +150,7 @@ def test_custom_relative_library_and_run_name_with_spaces(project):
 
 def test_existing_checkpoint_requires_explicit_resume_and_keeps_full_lr_schedule(project):
     root, _ = project
-    run = root / "logs/khan_bones_pt_residual_goal"
+    run = root / "logs/khan_8452_official_window_norm"
     run.mkdir(parents=True)
     checkpoint = run / "ckpt_latest.pt"
     checkpoint.write_bytes(b"checkpoint fixture")
@@ -258,7 +265,7 @@ def test_delay_switch_keeps_h32_and_full_tail_merge(project, flags, enabled):
 
 @pytest.mark.parametrize("flags,action_mode,z_noise,q_noise", [
     (["--no-reference-residual"], "default", 0.01, 0.05),
-    (["--no-goal-noise"], "reference_residual", 0.0, 0.0),
+    (["--no-goal-noise"], "default", 0.0, 0.0),
     (["--no-reference-residual", "--no-goal-noise"], "default", 0.0, 0.0),
     (["--no-reference-residual", "--reference-residual", "--no-goal-noise", "--goal-noise"],
      "reference_residual", 0.01, 0.05),
@@ -273,4 +280,4 @@ def test_action_space_and_encoder_noise_switches_are_independent(project, flags,
     assert cfg.policy.goal_noise_joint_pos == q_noise
     assert cfg.policy_trainer.horizon == 32
     assert cfg.env.actuator_delay is False
-    assert "reference skip and critic stay clean" in result.stdout
+    assert "critic/reward stay clean" in result.stdout

@@ -41,8 +41,8 @@ def validate_policy_training_semantics(saved_policy: dict, requested) -> None:
     """
     defaults = {"action_mode": "default", "reference_residual_beta": 1.0,
                 "reference_frame_offset": 1, "goal_noise_z": 0.0,
-                "goal_noise_joint_pos": 0.0}
-    keys = ["action_mode", "goal_noise_z", "goal_noise_joint_pos"]
+                "goal_noise_joint_pos": 0.0, "running_normalization": False}
+    keys = ["action_mode", "goal_noise_z", "goal_noise_joint_pos", "running_normalization"]
     if requested.action_mode == "reference_residual":
         keys += ["reference_residual_beta", "reference_frame_offset"]
     mismatches = {key: (saved_policy.get(key, defaults[key]), getattr(requested, key))
@@ -50,9 +50,8 @@ def validate_policy_training_semantics(saved_policy: dict, requested) -> None:
     if mismatches:
         raise ValueError(
             f"Checkpoint action/goal-noise semantics differ: {mismatches}. Start a new run "
-            "for reference-residual training. To resume a legacy clean-goal run use "
-            "--no-reference-residual --no-goal-noise in the Khan launchers (Python: "
-            "--policy.action-mode default --policy.goal-noise-z 0 --policy.goal-noise-joint-pos 0)."
+            "for a different action, goal-noise or normalization configuration. "
+            "A legacy run requires its original configuration and branch."
         )
 
 
@@ -81,6 +80,19 @@ def load_sampler_state(command, checkpoint: dict) -> bool:
     clip-end continuation. Those estimates must not seed the new start-bin
     curriculum. Model/optimizer state and schedule restoration are independent.
     """
+    window = getattr(command, "window_sampler", None)
+    if window is not None:
+        if checkpoint.get("sampler_contract") != command.sampler_contract:
+            raise ValueError("Checkpoint window-value sampler contract differs; start a new run")
+        state = checkpoint.get("window_sampler")
+        if state is None:
+            raise ValueError("Checkpoint is missing its window-value sampler state")
+        # Physical worlds/replay are freshly initialized on resume. A partial
+        # window cannot be joined to the new trajectories as one episode.
+        command.load_window_sampler_state_dict(state, discard_pending=True)
+        print("[INFO] restored window sampler value/count/effort; discarded pending "
+              "physical window because simulator/replay restart on resume")
+        return True
     if "sampler_contract" not in checkpoint:
         command.reset_sampler_statistics()
         warnings.warn(
@@ -183,6 +195,9 @@ class Trainer:
                 delay_reset_first_step_no_delay=cfg.env.delay_reset_first_step_no_delay,
                 reset_root_z_offset=cfg.env.reset_root_z_offset,
                 sampling_mode=cfg.env.sampling_mode,
+                reset_sampler=cfg.env.reset_sampler,
+                return_horizon=cfg.env.return_horizon,
+                return_memory=cfg.env.return_memory,
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
                 reference_fk_compile=cfg.env.reference_fk_compile,
@@ -190,6 +205,8 @@ class Trainer:
                 tail_bin_merge_fraction=cfg.env.tail_bin_merge_fraction,
                 reset_min_remaining_steps=cfg.env.reset_min_remaining_steps,
                 anchor_obs=cfg.env.anchor_obs,
+                root_height_threshold=cfg.world_model.height_threshold,
+                root_tilt_threshold=cfg.world_model.tilt_threshold,
                 seed=cfg.seed + 1000 * self.rank,
             ),
             device=self.device,
@@ -203,7 +220,14 @@ class Trainer:
 
         fk = G1Kinematics(robot_spec.load_model(), device=self.device)
         heads = AnalyticHeads(fk, robot_spec.tracked_bodies, robot_spec.anchor_body, robot_spec.root_body, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
-        self.wm = WorldModel(cfg.world_model, heads, self.device)
+        action_term = env.action_manager.get_term("joint_pos")
+        q_default = robot.data.default_joint_pos[0].clone()
+        scale = torch.as_tensor(action_term._scale, device=self.device).expand_as(
+            robot.data.default_joint_pos)[0].clone()
+        offset = torch.as_tensor(action_term._offset, device=self.device).expand_as(
+            robot.data.default_joint_pos)[0].clone()
+        self.wm = WorldModel(cfg.world_model, heads, self.device,
+                             action_scale=scale, action_offset=offset)
         policy_robot_args = {}
         if cfg.policy.action_mode == "reference_residual":
             # Use exactly the resolved action term's joint order and physical
@@ -227,13 +251,15 @@ class Trainer:
         self.policy_trainer = PolicyTrainer(self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer)
         n_params = lambda m: sum(p.numel() for p in m.parameters())
         if self.is_main:
-            print(f"[INFO] action mode: {cfg.policy.action_mode}; "
-                  f"reference beta={cfg.policy.reference_residual_beta:g}, "
-                  f"frame offset={cfg.policy.reference_frame_offset}; output/history/WM use total actions")
+            if cfg.policy.action_mode == "reference_residual":
+                print(f"[INFO] action mode: reference_residual; beta={cfg.policy.reference_residual_beta:g}, "
+                      f"frame offset={cfg.policy.reference_frame_offset}")
+            else:
+                print("[INFO] action mode: default; q_target=q_default+action_scale*actor_output")
             print(f"[INFO] encoder-only goal noise: z +/-{cfg.policy.goal_noise_z:g} m, "
                   f"joints +/-{cfg.policy.goal_noise_joint_pos:g} rad (uniform); "
                   f"collection enabled={cfg.env.obs_noise}, imagination enabled={cfg.policy_trainer.obs_noise}; "
-                  "reference skip and critic stay clean")
+                  "critic and reward references stay clean")
             print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
             print(f"[INFO] policy hidden layers: encoder={cfg.policy.encoder_hidden}, "
                   f"decoder={cfg.policy.decoder_hidden}; "
@@ -245,10 +271,16 @@ class Trainer:
             print(f"[INFO] actuator delay: {'ON' if delay_active else 'OFF'}, "
                   f"range=0..{cfg.env.actuator_delay_max_ms if delay_active else 0:g} ms; "
                   f"first control step immediate={cfg.env.delay_reset_first_step_no_delay}")
-            print(f"[INFO] reset sampler: min remaining={cfg.env.reset_min_remaining_steps} steps; "
+            print(f"[INFO] reset sampler: {cfg.env.reset_sampler}; "
+                  f"window={cfg.env.return_horizon}, memory={cfg.env.return_memory}; "
+                  f"min remaining={cfg.env.reset_min_remaining_steps} steps; "
                   f"merge tails={cfg.env.merge_short_tail_bins}, fraction={cfg.env.tail_bin_merge_fraction:g}; "
                   f"eligible bins={self.command.num_sampleable_bins}/{self.lib.num_bins}; "
-                  "first-step action-rate and return continuation unchanged")
+                  "first-step action-rate unchanged")
+            print(f"[INFO] official components: WM input running norm={cfg.world_model.input_normalization}, "
+                  f"WM LayerNorm={cfg.world_model.hidden_layer_norm}/{cfg.world_model.hidden_activation}; "
+                  f"termination={cfg.world_model.termination_mode}; actor running norm="
+                  f"{cfg.policy.running_normalization}; critic upper bound={cfg.policy_trainer.critic_value_bound}")
 
         # Episode statistics of the training env (paper's "training return").
         self.ep_reward_sum = torch.zeros(env.num_envs, device=self.device)
@@ -283,6 +315,9 @@ class Trainer:
                                              env_config=asdict(self.cfg.env)),
         }
         ema = getattr(self.policy_trainer, "ema", None)
+        window = getattr(self.command, "window_sampler", None)
+        if window is not None:
+            checkpoint["window_sampler"] = self.command.window_sampler_state_dict()
         if ema is not None:
             checkpoint.update(policy_ema=ema.state_dict(), policy_ema_updates=ema.num_updates,
                               policy_ema_decay=ema.decay)
@@ -302,6 +337,18 @@ class Trainer:
         saved_env = ck["config"].get("env", {})
         saved_policy = ck["config"].get("policy", {})
         validate_policy_training_semantics(saved_policy, self.cfg.policy)
+        saved_wm = ck["config"].get("world_model", {})
+        legacy_wm = {"input_normalization": False, "hidden_layer_norm": False,
+                     "hidden_activation": "silu", "termination_mode": "learned",
+                     "termination_softness": .05, "height_threshold": .25, "tilt_threshold": .8}
+        differences = {name: (saved_wm.get(name, default), getattr(self.cfg.world_model, name))
+                       for name, default in legacy_wm.items()
+                       if saved_wm.get(name, default) != getattr(self.cfg.world_model, name)}
+        saved_bound = ck["config"].get("policy_trainer", {}).get("critic_value_bound", False)
+        if saved_bound != self.cfg.policy_trainer.critic_value_bound:
+            differences["critic_value_bound"] = (saved_bound, self.cfg.policy_trainer.critic_value_bound)
+        if differences:
+            raise ValueError(f"Checkpoint training algorithm differs: {differences}; start a new run")
         saved_profile = saved_env.get("observation_layout", "supermimic")
         saved_future = saved_env.get("future_frames", 10)
         saved_layout = (saved_profile, saved_future, saved_policy.get("history", 10),
@@ -331,6 +378,15 @@ class Trainer:
         ema = getattr(self.policy_trainer, "ema", None)
         if ema is not None:
             ema.validate_checkpoint(ck)
+        if self.cfg.world_model.input_normalization:
+            for name in ("action_scale", "action_offset"):
+                actual, expected = ck["wm"].get(name), getattr(self.wm, name)
+                if not isinstance(actual, torch.Tensor) or not torch.equal(actual.to(expected), expected):
+                    raise ValueError(f"Checkpoint WM {name} differs from the simulator action mapping")
+        if getattr(self.command, "window_sampler", None) is not None:
+            if ck.get("sampler_contract") != self.command.sampler_contract:
+                raise ValueError("Checkpoint window-value sampler contract differs; start a new run")
+            self.command.window_sampler.validate_state_dict(ck.get("window_sampler"))
         self.wm.load_state_dict(ck["wm"])
         self.policy.load_state_dict(ck["policy"])
         self.critic.load_state_dict(ck["critic"])
@@ -354,7 +410,21 @@ class Trainer:
         # The environment supplies one clean reference window. Only the motion
         # encoder sees corruption; never overwrite the reference/PD skip.
         encoder_goal = self.policy.make_encoder_goal(obs["goal"], enabled=self.cfg.env.obs_noise)
+        if self.policy.cfg.running_normalization:
+            # Reuse exactly the corruption used by the actual physical action.
+            self._actor_norm_inputs = (obs["policy"].detach().clone(), encoder_goal.detach().clone())
         return self.policy(obs["policy"], obs["goal"], encoder_goal=encoder_goal)
+
+    @torch.no_grad()
+    def update_collection_normalization(self) -> None:
+        """Update once per physical step, after terminal transitions were captured."""
+        self.wm.update_normalization(self.recorder.last_step_states,
+                                     self.recorder.last_step_actions)
+        if self.cfg.policy.running_normalization:
+            sensor, encoder_goal = self._actor_norm_inputs
+            self.policy.update_normalization(sensor, encoder_goal, encoder_goal=encoder_goal)
+            if self.policy_trainer.ema is not None:
+                self.policy_trainer.ema.sync_buffers(self.policy)
 
     def run(self) -> None:
         cfg = self.cfg
@@ -377,8 +447,12 @@ class Trainer:
         while self.iteration < stop_iteration:
             # ---------------- (1) collect one vectorised env step
             t0 = time.perf_counter()
+            pre_frames = self.command.frame.clone()
             action = self.act(obs)
             obs, rew, term, tout, _extras = env.step(action)
+            self.command.record_window_transition(
+                pre_frames, rew, term, tout, env.termination_manager.get_term("clip_end"))
+            self.update_collection_normalization()
             self.ep_reward_sum += rew
             self.ep_len += 1
             done = term | tout
@@ -429,7 +503,9 @@ class Trainer:
                     # episodes. Only the log interval converts these to CPU.
                     torch.distributed.all_reduce(diagnostic_totals)
                 if self.is_main:
-                    for key, value in reset_diagnostic_metrics(diagnostic_totals, self.max_step_reward).items():
+                    for key, value in reset_diagnostic_metrics(
+                        diagnostic_totals, self.max_step_reward, sampler_kind=cfg.env.reset_sampler,
+                    ).items():
                         self.writer.add_scalar(key, value, it)
                 if self.world > 1:
                     # Every rank must issue the same collectives: reduce (sum, count) unconditionally.
@@ -470,6 +546,18 @@ class Trainer:
                         self.writer.add_scalar("policy/ema_updates", self.policy_trainer.ema.num_updates, it)
                     self.writer.add_scalar("sampler/entropy", float(self.command.metrics["sampling_entropy"][0]), it)
                     self.writer.add_scalar("sampler/bin_return_mean", float(self.command.bin_return.mean()), it)
+                    window = getattr(self.command, "window_sampler", None)
+                    if window is not None:
+                        self.writer.add_scalar("sampler/window_updates", window.num_updates, it)
+                        self.writer.add_scalar("sampler/visited_bin_fraction", float((window.count > 0).float().mean()), it)
+                        self.writer.add_scalar("sampler/max_probability", float(window.probabilities.max()), it)
+                    if cfg.world_model.input_normalization:
+                        self.writer.add_scalar("normalization/wm_count", int(self.wm.state_normalizer.count), it)
+                    if cfg.policy.running_normalization:
+                        self.writer.add_scalar("normalization/actor_sensor_count",
+                                               int(self.policy.decoder.observation_normalizer.sensor.count), it)
+                        self.writer.add_scalar("normalization/actor_goal_count",
+                                               int(self.policy.encoders["motion"].normalizer.count), it)
                     dt_log = time.time() - last_log
                     last_log = time.time()
                     msg = (

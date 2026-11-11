@@ -45,6 +45,10 @@ class ReplayRecorder(RecorderTerm):
         self.prev_xi = torch.zeros(n, self.ctx.xi_dim, device=env.device)
         self.prev_frame = torch.zeros(n, dtype=torch.long, device=env.device)
         self.prev_clip = torch.zeros(n, dtype=torch.long, device=env.device)
+        # Fresh one-step snapshots for empirical WM input statistics. Filled
+        # before auto-reset can clear executed_raw on terminal environments.
+        self.last_step_states = torch.zeros_like(self.prev_s)
+        self.last_step_actions = torch.zeros(n, self.action_dim, device=env.device)
         self.ep_start = torch.ones(n, dtype=torch.bool, device=env.device)
         self.enabled = True
 
@@ -72,6 +76,8 @@ class ReplayRecorder(RecorderTerm):
 
     def _write_rows(self, ids: torch.Tensor, done_next: torch.Tensor) -> None:
         env = self._env
+        self.last_step_states[ids] = self.prev_s[ids]
+        self.last_step_actions[ids] = self.action_term.executed_raw[ids]
         self.buffer.add(
             ids,
             s=self.prev_s[ids],

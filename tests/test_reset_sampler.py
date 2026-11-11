@@ -454,3 +454,79 @@ def test_sampler_contract_versions_distinguish_boundary_semantics(merge, fractio
         assert contract["merge_short_tail_bins"] == merge
         assert contract["tail_bin_merge_fraction"] == fraction
         assert contract["reset_min_remaining_steps"] == horizon
+
+
+def _window_command(n=2, horizon=2):
+    from supermimic.envs.mdp.reset_sampling import WindowValueSampler, WindowValueSamplerCfg
+    cmd = _command(n)
+    cmd.cfg.reset_sampler = "window_value"
+    cmd.cfg.return_horizon = horizon
+    cmd.window_sampler = WindowValueSampler(
+        WindowValueSamplerCfg(horizon=horizon), 4, 200, n, max_step_reward=.1,
+        bin_of_frame=cmd.library.bin_of_frame, sampleable_bins=cmd.sampleable_bins,
+    )
+    cmd.bin_return = cmd.window_sampler.value
+    cmd.reset_sampler_statistics()
+    return cmd
+
+
+def test_window_reset_and_episode_finalize_never_update_window_statistics():
+    cmd = _window_command()
+    window = cmd.window_sampler
+    pointer = cmd.bin_return.data_ptr()
+    before = window.state_dict()
+    # Initial reset cannot introduce a transition or change optimistic values.
+    cmd._resample_command(torch.tensor([0, 1]))
+    for name in window._TENSORS:
+        torch.testing.assert_close(getattr(window, name), before[name], rtol=0, atol=0)
+    cmd._env.common_step_counter = 1
+    cmd._env.reward_buf[:] = -.05
+    cmd._log_step_rewards()
+    cmd._resample_command(torch.tensor([0]))
+    for name in window._TENSORS:
+        torch.testing.assert_close(getattr(window, name), before[name], rtol=0, atol=0)
+    assert window._step == 0 and pointer == cmd.bin_return.data_ptr()
+    stats = reset_diagnostic_metrics(cmd.reset_diagnostics.consume(), .1, sampler_kind="window_value")
+    assert "sampler/completed_episode_target" not in stats
+    assert stats["diagnostics/completed_episode_discounted_return"] == pytest.approx(-.05)
+    assert stats["reset/first_step_discounted_return_contribution"] == pytest.approx(-.05)
+
+
+def test_window_record_uses_snapshot_frames_and_timeout_precedence():
+    cmd = _window_command(n=2, horizon=1)
+    # Simulate auto-reset replacing the live frames before the trainer hook.
+    cmd.frame[:] = torch.tensor([100, 150])
+    before = torch.tensor([9, 59])
+    cmd.record_window_transition(before, torch.tensor([.1, .1]),
+                                 torch.tensor([True, True]), torch.tensor([True, False]),
+                                 torch.tensor([False, False]))
+    assert cmd.window_sampler.count.tolist() == [1, 1, 0, 0]
+    assert cmd.bin_return[0] == pytest.approx(10.0)  # timeout bootstraps
+    assert cmd.bin_return[1] == pytest.approx(.1, abs=1e-6)  # real failure has no tail
+
+
+def test_window_sampling_does_not_accumulate_keep_at_reset_frequency(monkeypatch):
+    cmd = _window_command()
+    window = cmd.window_sampler
+    cmd.record_window_transition(torch.tensor([0, 50]), torch.tensor([.1, .1]),
+                                 torch.zeros(2, dtype=torch.bool), torch.zeros(2, dtype=torch.bool),
+                                 torch.zeros(2, dtype=torch.bool))
+    before = window.state_dict()
+    for _ in range(5):
+        cmd._sample_frames(3)
+    assert window._step == 1
+    for name in window._TENSORS:
+        torch.testing.assert_close(getattr(window, name), before[name], rtol=0, atol=0)
+
+
+def test_window_command_state_restore_rebuilds_audit_arrays():
+    cmd, resumed = _window_command(horizon=1), _window_command(horizon=1)
+    cmd.record_window_transition(torch.tensor([0, 50]), torch.tensor([.1, .2]),
+                                 torch.zeros(2, dtype=torch.bool), torch.zeros(2, dtype=torch.bool),
+                                 torch.zeros(2, dtype=torch.bool))
+    state = cmd.window_sampler_state_dict()
+    pointer = resumed.bin_return.data_ptr()
+    resumed.load_window_sampler_state_dict(state)
+    torch.testing.assert_close(cmd.bin_return, resumed.bin_return, rtol=0, atol=0)
+    torch.testing.assert_close(cmd.bin_memory, resumed.bin_memory, rtol=0, atol=0)
+    assert pointer == resumed.bin_return.data_ptr()

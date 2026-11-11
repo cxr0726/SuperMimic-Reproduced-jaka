@@ -20,18 +20,18 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from supermimic.config import TrainConfig, resolve_training_observations
+from supermimic.config import EnvCfg, TrainConfig, resolve_training_observations
 from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.eval.benchmark import load_policy_from_checkpoint
 from supermimic.imagination.objective import policy_objective
-from supermimic.imagination.policy_trainer import PolicyTrainer
+from supermimic.imagination.policy_trainer import PolicyTrainer, PolicyTrainerCfg
 from supermimic.imagination.rollout import imagine
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.policy.nets import Critic, PolicyCfg
 from supermimic.robots.registry import get_robot_spec
 from supermimic.world_model.heads import AnalyticHeads
-from supermimic.world_model.world_model import WorldModel
+from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 
 
 def restore_config(obj, saved):
@@ -47,6 +47,15 @@ def restore_config(obj, saved):
         current = getattr(obj, field.name)
         if isinstance(current, PolicyCfg):
             current = PolicyCfg()
+            setattr(obj, field.name, current)
+        elif isinstance(current, WorldModelCfg):
+            current = WorldModelCfg()
+            setattr(obj, field.name, current)
+        elif isinstance(current, PolicyTrainerCfg):
+            current = PolicyTrainerCfg()
+            setattr(obj, field.name, current)
+        elif isinstance(current, EnvCfg):
+            current = EnvCfg(reset_sampler="legacy")
             setattr(obj, field.name, current)
         if is_dataclass(current):
             restore_config(current, value)
@@ -135,7 +144,9 @@ def main():
     limits = torch.stack((middle - factor * half_range, middle + factor * half_range), -1)
     heads = AnalyticHeads(G1Kinematics(model, device), spec.tracked_bodies,
                           spec.anchor_body, spec.root_body, limits, q0)
-    wm = WorldModel(cfg.world_model, heads, device)
+    mapping = ({name: checkpoint["wm"][name] for name in ("action_scale", "action_offset")}
+               if cfg.world_model.input_normalization else {})
+    wm = WorldModel(cfg.world_model, heads, device, **mapping)
     critic = Critic(cfg.critic, pcfg=cfg.policy, xi_dim=wm.spec.xi_dim).to(device)
     for name, network in (("wm", wm), ("critic", critic)):
         network.load_state_dict(checkpoint[name])

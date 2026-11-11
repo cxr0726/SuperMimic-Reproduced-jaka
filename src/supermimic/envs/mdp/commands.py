@@ -33,6 +33,8 @@ from mjlab.utils.lab_api.math import (
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.envs.mdp.reset_sampling import (
     ResetEpisodeDiagnostics,
+    WindowValueSampler,
+    WindowValueSamplerCfg,
     mean_reward_continuation,
     update_bin_returns,
 )
@@ -83,6 +85,20 @@ class MultiClipMotionCommand(CommandTerm):
         self._configure_reset_sampling()
         self.bin_return = torch.zeros(lib.num_bins, device=self.device)
         self.bin_memory = torch.zeros_like(self.bin_return)
+        if cfg.reset_sampler not in ("legacy", "window_value"):
+            raise ValueError(f"Unknown reset sampler: {cfg.reset_sampler}")
+        self.window_sampler = None
+        if cfg.reset_sampler == "window_value":
+            if not math.isclose(cfg.hard_ratio, 1 - cfg.uniform_ratio - cfg.memory_ratio):
+                raise ValueError("Window sampler mixture weights must sum to one")
+            self.window_sampler = WindowValueSampler(
+                WindowValueSamplerCfg(
+                    gamma=cfg.gamma, horizon=cfg.return_horizon, memory=cfg.return_memory,
+                    steepness=cfg.softmax_temp, explore=cfg.uniform_ratio, keep=cfg.memory_ratio,
+                ), lib.num_bins, lib.num_frames, n, cfg.g_max * (1 - cfg.gamma), self.device,
+                bin_of_frame=lib.bin_of_frame, sampleable_bins=self.sampleable_bins,
+            )
+            self.bin_return = self.window_sampler.value
         self.reset_sampler_statistics()
         self.sampler_contract = self._make_sampler_contract()
         # Evaluation hook: when >= 0, the next reset of that env starts exactly at this global frame.
@@ -146,6 +162,19 @@ class MultiClipMotionCommand(CommandTerm):
                 if cfg.merge_short_tail_bins else "keep_all_remainders",
                 reset_boundary="frame_plus_min_remaining_steps_le_inclusive_last",
                 reset_min_remaining_steps=cfg.reset_min_remaining_steps,
+            )
+        if cfg.reset_sampler == "window_value":
+            for name in ("bin_ema", "history_ema"):
+                contract.pop(name)
+            contract.update(
+                version=5, algorithm="official_window_value",
+                return_target="window_nstep_bin_value_bootstrap",
+                duplicate_bins="mean_per_env_episode_bin_within_window",
+                initial_return=cfg.g_max, history_method="cumulative_focus_squared_per_window",
+                update_horizon=cfg.return_horizon, count_memory=cfg.return_memory,
+                failure_timeout_precedence="timeout",
+                clip_end_bootstrap="all_bin_value_mean",
+                frame_bin_mapping="clip_local_with_merged_tail",
             )
         return contract
 
@@ -260,8 +289,48 @@ class MultiClipMotionCommand(CommandTerm):
 
     def reset_sampler_statistics(self) -> None:
         """Discard scores from a different sampler algorithm without changing networks."""
-        self.bin_return.zero_()
+        window = getattr(self, "window_sampler", None)
+        if window is not None:
+            window.reset()
+        else:
+            self.bin_return.zero_()
         self.bin_memory.copy_(self.sampleable_bins / self.num_sampleable_bins)
+
+    def record_window_transition(self, pre_frames, rewards, terminated, timeouts, clip_end):
+        """Called once after a vectorised physical step, never from reset callbacks.
+
+        The caller must snapshot frames before env.step: auto-reset has already
+        installed a new reference by the time env.step returns. As upstream,
+        simultaneous timeout/failure is treated as truncation, not a fall.
+        """
+        window = getattr(self, "window_sampler", None)
+        if window is None or self.cfg.sampling_mode != "return":
+            return None
+        truncated = timeouts.bool() | clip_end.bool()
+        probabilities = window.record(
+            pre_frames, rewards, terminated.bool() & ~truncated,
+            clip_end.bool(), truncated & ~clip_end.bool(),
+        )
+        if probabilities is not None:
+            self.bin_memory.copy_(window.keep_distribution())
+            entropy = -(probabilities * (probabilities + 1e-12).log()).sum()
+            self.metrics["sampling_entropy"][:] = entropy / math.log(max(self.num_sampleable_bins, 2))
+        return probabilities
+
+    def window_sampler_state_dict(self):
+        window = getattr(self, "window_sampler", None)
+        return window.state_dict() if window is not None else None
+
+    def load_window_sampler_state_dict(self, state, *, discard_pending=False):
+        window = getattr(self, "window_sampler", None)
+        if window is None:
+            raise ValueError("A window-value sampler checkpoint needs the window_value algorithm")
+        window.load_state_dict(state)
+        if discard_pending:
+            window.discard_pending_window()
+        self.bin_memory.copy_(window.keep_distribution())
+        p = window.probabilities
+        self.metrics["sampling_entropy"][:] = -(p * (p + 1e-12).log()).sum() / math.log(max(self.num_sampleable_bins, 2))
 
     def _log_step_rewards(self, env_mask: torch.Tensor | None = None) -> None:
         """Count each real simulator reward once, including the terminal transition."""
@@ -290,17 +359,22 @@ class MultiClipMotionCommand(CommandTerm):
         self.last_logged_step[ids] = self._env.common_step_counter
 
     def _finalize_episodes(self, env_ids: torch.Tensor) -> None:
-        """Update only episode start bins, using mean-reward continuation at cutoffs."""
+        """Finalize diagnostics; only legacy mode updates episode-start returns."""
         ids = env_ids[self.ep_len[env_ids] > 0]
         if ids.numel() == 0:
             return
         terminated = self._env.termination_manager.terminated[ids]
-        targets = mean_reward_continuation(
+        is_window = self.cfg.reset_sampler == "window_value"
+        targets = self.ep_discounted_return[ids] if is_window else mean_reward_continuation(
             self.ep_discounted_return[ids], self.ep_reward_sum[ids],
             self.ep_len[ids], terminated, self.cfg.gamma,
         )
-        self.reset_diagnostics.finalize(ids, self.ep_reward_sum[ids], self.ep_len[ids], terminated, targets)
-        update_bin_returns(self.bin_return, self.episode_start_bin[ids], targets, self.cfg.ema_alpha)
+        self.reset_diagnostics.finalize(
+            ids, self.ep_reward_sum[ids], self.ep_len[ids], terminated, targets,
+            extrapolate=not is_window,
+        )
+        if not is_window:
+            update_bin_returns(self.bin_return, self.episode_start_bin[ids], targets, self.cfg.ema_alpha)
         self.metrics["episode_return_to_go"][ids] = targets.float()
         self.ep_len[ids] = 0
         self.ep_reward_sum[ids] = 0
@@ -326,6 +400,13 @@ class MultiClipMotionCommand(CommandTerm):
             f = torch.randint(0, lib.num_frames, (n,), device=self.device)
             return torch.minimum(f, lib.last_frame_of(f) - 1).clamp_min(lib.clip_start[lib.frame_clip[f]])
         assert cfg.sampling_mode == "return"
+        if cfg.reset_sampler == "window_value":
+            # Distribution/keep are refreshed only every return_horizon real
+            # control steps. Reset frequency does not set their time scale.
+            p = self.window_sampler.probabilities
+            b = torch.multinomial(p, n, replacement=True)
+            u = torch.rand(n, device=self.device)
+            return lib.bin_start[b] + (u * (self.sample_bin_end[b] - lib.bin_start[b]).float()).long()
         logits = (-cfg.softmax_temp * self.bin_return / cfg.g_max).masked_fill(~self.sampleable_bins, -torch.inf)
         hard = torch.softmax(logits, dim=0)
         self.bin_memory.lerp_(hard, cfg.memory_alpha)
@@ -515,6 +596,9 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     joint_position_range: tuple[float, float] = (0.0, 0.0)
     reset_root_z_offset: float = 0.0
     sampling_mode: Literal["return", "uniform", "start"] = "return"
+    reset_sampler: Literal["legacy", "window_value"] = "legacy"
+    return_horizon: int = 20
+    return_memory: int = 256
     # Return-based sampling: start-bin targets, mean-reward continuation at cutoffs.
     uniform_ratio: float = 0.5
     hard_ratio: float = 0.4

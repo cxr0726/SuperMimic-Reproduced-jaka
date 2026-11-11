@@ -5,14 +5,14 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 NUM_ENVS=4096
-RUN_NAME=khan_bones_pt_residual_goal
+RUN_NAME=khan_8452_official_window_norm
 LIBRARY="$PROJECT_DIR/data/pt/khan_combined_8452_compact.pt"
 REFERENCE_FK_COMPILE=0
 RESUME=''
 STOP_AFTER=''
 DRY_RUN=0
 ACTUATOR_DELAY=False
-ACTION_MODE=reference_residual
+ACTION_MODE=default
 GOAL_NOISE_Z=0.01
 GOAL_NOISE_JOINT_POS=0.05
 
@@ -25,25 +25,29 @@ Uses the same training entry point and current network/optimization defaults
 as train_khan_server.sh: encoder 1024/512/256, decoder 2048/1024/512/256,
 actor EMA 0.995, H=32, batch=2048/4096, UTD=0.4, 320k LR schedule,
 Isaac observation layout with future/history 5/5, goal 155, policy 465.
-The encoder goal has uniform z +/-0.01 m and q +/-0.05 rad noise; the reference
-action skip stays clean. Actions use q_ref(t+1) + 0.5 * decoder_residual.
+The encoder goal has uniform z +/-0.01 m and q +/-0.05 rad noise; critic/reward
+stay clean. Actions use q_default + 0.5 * actor_output; reference residual is disabled.
 Actuator delay is disabled by default for this server experiment; --actuator-delay
 enables held 0–20 ms delay with an immediate first control step.
 Reset clearance remains 0.05 m and first-step action-rate is unchanged. Every
 incomplete final bin is merged into the previous bin. Physical reset requires
 at least 32 remaining reference steps. Activation recomputation remains disabled.
+This branch uses window-value sampling every 20 physical steps (memory 256),
+WM input running normalization + LayerNorm/GELU, analytic soft termination,
+actor obs/goal running normalization and critic upper bounds (11.2). Use a fresh
+run; pre-port checkpoints are incompatible.
 Reference FK compilation is opt-in;
 its effect on total training throughput depends on the target GPU.
 
 Options:
   --library PATH             Packed compact .pt file (default: project data/pt/khan_combined_8452_compact.pt)
   --num-envs N               Parallel robot environments (default: 4096)
-  --run-name NAME            Directory under project logs/ (default: khan_bones_pt_residual_goal)
+  --run-name NAME            Directory under project logs/ (default: khan_8452_official_window_norm)
   --reference-fk-compile     Compile current/imagination reference FK on CUDA
   --no-reference-fk-compile  Use eager reference FK (default)
-  --no-reference-residual    Use the legacy default-pose action space
-  --reference-residual      Use the next-reference residual action space (default)
-  --no-goal-noise            Disable encoder goal augmentation; reference skip stays clean
+  --no-reference-residual   Use default-pose actions (default for this branch)
+  --reference-residual      Opt in to next-reference residual actions for comparison
+  --no-goal-noise           Disable encoder goal augmentation
   --goal-noise               Enable Isaac encoder goal noise (default)
   --no-actuator-delay        Disable actuator delay (default for this server experiment)
   --actuator-delay           Enable held 0–20 ms delay; first control step is immediate
@@ -154,7 +158,7 @@ if [[ -n "$STOP_AFTER" ]]; then
 fi
 if [[ -n "$RESUME" ]]; then
     command+=(--resume "$RESUME")
-    printf '[INFO] Resume requires matching action mode and goal noise. Legacy clean-goal checkpoints need --no-reference-residual --no-goal-noise.\n'
+    printf '[INFO] Resume requires matching window sampler, normalization, architecture and action semantics; pre-port checkpoints require a fresh run.\n'
 fi
 
 printf '[INFO] Khan compact library: %s\n' "$LIBRARY"
@@ -162,8 +166,13 @@ printf '[INFO] Reference FK: %s; parallel environments: %s; learning batch: 4096
     "$REFERENCE_FK_MODE" "$NUM_ENVS"
 printf '[INFO] Khan observations: future/history 5/5; goal 155; policy 465; activation recomputation: OFF\n'
 printf '[INFO] Actor hidden defaults: encoder 1024/512/256; decoder 2048/1024/512/256; EMA decay 0.995; training uses live, inference auto-selects EMA\n'
-printf '[INFO] Actions: %s; scale 0.5; residual mode uses beta 1 and reference offset 1\n' "$ACTION_MODE"
-printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; reference skip and critic stay clean\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
+printf '[INFO] Official port defaults: window_value sampler; horizon 20; memory 256; WM input running norm + LayerNorm/GELU; analytic soft termination; actor obs/goal running norm; critic upper bound 11.2\n'
+if [[ "$ACTION_MODE" == default ]]; then
+    printf '[INFO] Actions: default; PD target=q_default + 0.5*actor_output; reference skip OFF\n'
+else
+    printf '[INFO] Actions: reference_residual; PD target=q_ref(t+1) + 0.5*decoder_output; beta 1\n'
+fi
+printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; critic/reward stay clean; default action has no reference skip\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
 printf '[INFO] Khan: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$ACTUATOR_DELAY"
 printf '[INFO] Reset bins: merge every incomplete final bin; require >=32 remaining reference steps; first-step action-rate unchanged\n'
 printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; full convex feet\n'

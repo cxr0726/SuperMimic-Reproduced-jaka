@@ -41,6 +41,38 @@ class PolicyTrainerCfg:
     activation_checkpoint: bool = False  # recompute activations; preserve the full effective batch
     observation_layout: str = "supermimic"
     ema_decay: float = 0.995  # Post-actor-update deployment average; zero disables it.
+    critic_value_bound: bool = False  # Historical configs had no bootstrap/target upper bound.
+
+
+def critic_value_ceiling(max_step_reward: float, gamma: float) -> float:
+    """Analytic upper bound; negative rewards/values deliberately have no floor."""
+    if not math.isfinite(gamma) or not 0 <= gamma < 1:
+        raise ValueError("A critic value ceiling requires 0 <= gamma < 1")
+    if not math.isfinite(max_step_reward) or max_step_reward <= 0:
+        raise ValueError("A critic value ceiling requires a positive finite max step reward")
+    return max_step_reward / (1.0 - gamma)
+
+
+@torch.no_grad()
+def critic_bound_diagnostics(ceiling: float, **raw_values: torch.Tensor) -> dict[str, float]:
+    """Summarize unclipped predictions/targets with a single device-to-host copy.
+
+    P99 uses the empirical nearest-rank percentile and ``kthvalue`` rather than
+    sorting an entire H*batch array. Diagnostics never enter either loss graph.
+    """
+    names, statistics = [], []
+    for name, value in raw_values.items():
+        flat = value.detach().reshape(-1).float()
+        if not flat.numel():
+            continue
+        rank = max(1, math.ceil(.99 * flat.numel()))
+        statistics.extend(((flat > ceiling).float().mean(), flat.max(),
+                           flat.kthvalue(rank).values))
+        names.extend((f"critic_{name}_raw_exceed_fraction", f"critic_{name}_raw_max",
+                      f"critic_{name}_raw_p99"))
+    if not statistics:
+        return {}
+    return dict(zip(names, torch.stack(statistics).cpu().tolist(), strict=True))
 
 
 class PolicyTrainer:
@@ -48,6 +80,15 @@ class PolicyTrainer:
         self.wm, self.policy, self.critic, self.lib, self.cfg = wm, policy, critic, lib, cfg
         if not math.isfinite(cfg.ema_decay) or not 0 <= cfg.ema_decay < 1:
             raise ValueError("ema_decay must lie in [0, 1); zero disables actor EMA")
+        # The reward ceiling is part of the actual robot's analytic reward cfg,
+        # so adding Khan neck tracking gives 11.2 instead of G1's 10.0. Keep
+        # legacy lightweight/mock trainers working when the bound is disabled.
+        reward_cfg = getattr(getattr(wm, "heads", None), "reward_cfg", None)
+        self.value_ceiling = None
+        if cfg.use_critic and reward_cfg is not None and 0 <= cfg.gamma < 1:
+            self.value_ceiling = critic_value_ceiling(reward_cfg.max_step_reward, cfg.gamma)
+        if cfg.use_critic and cfg.critic_value_bound and self.value_ceiling is None:
+            raise ValueError("Critic value bounds need the world model's reward ceiling and gamma < 1")
         self.ema = ActorEMA(policy, cfg.ema_decay) if cfg.ema_decay > 0 else None
         self.opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, betas=cfg.betas)
         self.critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
@@ -115,9 +156,12 @@ class PolicyTrainer:
         self.critic.requires_grad_(False)
         ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs, activation_checkpoint=cfg.activation_checkpoint)
         feat, goals, e_root, errors = self._critic_inputs(ro)
+        raw_bootstrap = None
         if cfg.use_critic:
-            v_H = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1],
-                              errors[-1] if errors is not None else None)
+            raw_bootstrap = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1],
+                                        errors[-1] if errors is not None else None)
+            v_H = (raw_bootstrap.clamp(max=self.value_ceiling)
+                   if cfg.critic_value_bound else raw_bootstrap)
         else:
             v_H = None
         J = policy_objective(ro, v_H, cfg.gamma)
@@ -155,7 +199,9 @@ class PolicyTrainer:
                 values = self.critic(feat_d.reshape(H1 * n, -1), goals_d.reshape(H1 * n, -1),
                                      xi_rep.reshape(H1 * n, -1), e_root_d.reshape(H1 * n, -1),
                                      errors_d.reshape(H1 * n, -1) if errors_d is not None else None).reshape(H1, n)
-                targets = gae_targets(ro.rewards.detach(), ro.dhat[1:].detach(), values, cfg.gamma, cfg.gae_lambda)  # (H, n)
+                raw_targets = gae_targets(ro.rewards.detach(), ro.dhat[1:].detach(), values, cfg.gamma, cfg.gae_lambda)  # (H, n)
+                targets = (raw_targets.clamp(max=self.value_ceiling)
+                           if cfg.critic_value_bound else raw_targets)
                 X_feat = feat_d[:-1].reshape(-1, feat_d.shape[-1])
                 X_goal = goals_d[:-1].reshape(-1, goals_d.shape[-1])
                 X_xi = xi_rep[:-1].reshape(-1, xi_rep.shape[-1])
@@ -181,4 +227,10 @@ class PolicyTrainer:
             metrics["critic_loss"] = float(last)
             metrics["critic_value_mean"] = float(values.mean())
             metrics["critic_target_mean"] = float(targets.mean())
+            if self.value_ceiling is not None:
+                metrics["critic_value_ceiling"] = self.value_ceiling
+                metrics["critic_value_bound_enabled"] = float(cfg.critic_value_bound)
+                metrics.update(critic_bound_diagnostics(
+                    self.value_ceiling, bootstrap=raw_bootstrap, value=values, target=raw_targets,
+                ))
         return metrics

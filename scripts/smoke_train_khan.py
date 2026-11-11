@@ -198,6 +198,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Optional 9D goal pose for supermimic layout only; incompatible with isaac_khan")
     parser.add_argument("--activation-checkpoint", action=argparse.BooleanOptionalAction, default=False,
                         help="Optional activation recomputation; disabled to match the original training")
+    parser.add_argument("--actuator-delay", action=argparse.BooleanOptionalAction, default=False,
+                        help="Held 0–20 ms actuator delay; off like the server launcher")
     parser.add_argument("--reference-fk-compile", action=argparse.BooleanOptionalAction, default=False,
                         help="Compile CUDA compact reference queries; disable for eager A/B checks")
     args = parser.parse_args(argv)
@@ -281,6 +283,7 @@ def main() -> None:
     cfg.env.reference_fk_compile = args.reference_fk_compile
     cfg.env.observation_layout = args.observation_layout
     cfg.env.anchor_obs = args.anchor_obs
+    cfg.env.actuator_delay = args.actuator_delay
     cfg.policy_trainer.anchor_obs = args.anchor_obs
     cfg.schedule.stop_after_iterations = args.steps
     cfg.policy_trainer.activation_checkpoint = args.activation_checkpoint

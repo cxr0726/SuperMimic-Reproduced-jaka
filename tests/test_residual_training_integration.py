@@ -14,6 +14,10 @@ from supermimic.training.loop import Trainer, validate_policy_training_semantics
 
 def _small_policy_config(**overrides):
     cfg = TrainConfig(robot="khan_mini")
+    # Residual tests deliberately exercise the previous optional action space;
+    # fresh training on this branch now defaults to absolute default-pose actions.
+    cfg.policy.action_mode = "reference_residual"
+    cfg.policy.running_normalization = False
     cfg.policy.encoder_hidden = cfg.policy.decoder_hidden = (16,)
     cfg.policy.latent_dim = 4
     resolve_training_observations(cfg)
@@ -21,14 +25,14 @@ def _small_policy_config(**overrides):
 
 
 def _policy(cfg):
-    robot_args = (dict(default_joint_pos=torch.linspace(-0.2, 0.2, 27),
-                       action_scale=torch.full((27,), 0.5))
+    robot_args = ({"default_joint_pos": torch.linspace(-0.2, 0.2, 27),
+                   "action_scale": torch.full((27,), 0.5)}
                   if cfg.action_mode == "reference_residual" else {})
     return Policy(cfg, **robot_args)
 
 
 @pytest.mark.parametrize("robot,mode,z_half,q_half,goal_dim", [
-    ("khan_mini", "reference_residual", 0.01, 0.05, 155),
+    ("khan_mini", "default", 0.01, 0.05, 155),
     ("g1", "default", 0.0, 0.0, 680),
 ])
 def test_fresh_defaults_resolve_by_layout_without_changing_optimization(
@@ -103,8 +107,8 @@ def test_collection_passes_clean_reference_and_separate_encoder_copy(obs_noise, 
     else:
         assert encoder_goal is obs["goal"]
         assert torch.equal(rng_before, rng_after)
-    for key in obs:
-        torch.testing.assert_close(obs[key], original[key], rtol=0, atol=0)
+    for key, value in obs.items():
+        torch.testing.assert_close(value, original[key], rtol=0, atol=0)
     assert not action.requires_grad
     with torch.no_grad():
         expected = policy(obs["policy"], obs["goal"], encoder_goal=encoder_goal)

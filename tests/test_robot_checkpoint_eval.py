@@ -178,8 +178,9 @@ def test_training_resume_rejects_goal_or_history_layout_before_loading_models(tm
     trainer.cfg.env.anchor_obs = True
     resolve_training_observations(trainer.cfg)
     trainer.device = "cpu"
-    saved = {"robot": "khan_mini", "env": {"anchor_obs": True, "future_frames": 10},
-             "policy": {"num_joints": 27, "history": 10, "goal_dim": 649}}
+    # Keep the other algorithm contracts equal so this test isolates the layout
+    # refusal rather than the new branch's running-normalization defaults.
+    saved = asdict(trainer.cfg)
     saved["env" if field == "future_frames" else "policy"][field] = value
     path = tmp_path / "wrong_goal_layout.pt"
     torch.save({"config": saved}, path)

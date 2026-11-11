@@ -1,6 +1,8 @@
 # SuperMimic-Reproduced
 
-An independent, from-scratch reproduction of **SuperMimic: Scaling Humanoid Whole-Body Control with One Differentiable World Model** ([arXiv:2610.28480](https://arxiv.org/abs/2610.28480), CoRL 2026) for the Unitree G1, built on [mjlab](https://github.com/mujocolab/mjlab) / MuJoCo Warp. No official code is released; everything here (motion library, differentiable FK, world model, BPTT trainer, return-based reset sampling, data-parallel training, Appendix-F benchmark) is implemented from the paper.
+An independent reproduction of **SuperMimic: Scaling Humanoid Whole-Body Control with One Differentiable World Model** ([arXiv:2610.28480](https://arxiv.org/abs/2610.28480), CoRL 2026), built on [mjlab](https://github.com/mujocolab/mjlab) / MuJoCo Warp. The original reproduction was implemented from the paper before the official code was released.
+
+The experimental branch `feat/official-window-value-normalization` adapts the newly released [official SuperMimic](https://github.com/HybridRobotics/supermimic): window-value reset sampling, WM/actor input normalization, WM LayerNorm/GELU, analytic soft termination and critic value bounds. Khan training defaults to `q_target=q_default+0.5*action`, without a reference residual. See [Khan branch configuration and training commands](docs/KHAN_OFFICIAL_PORT.md). The benchmark results below describe the earlier reproduction, not this unbenchmarked training configuration.
 
 ![G1 policy tracking BONES-SEED motions](media/g1_boneseed_highlights.gif)
 

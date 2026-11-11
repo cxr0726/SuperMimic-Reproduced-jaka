@@ -105,7 +105,17 @@ def deployment_schema(input_layout: InputLayout, policy_config: dict | None = No
         "orientation": "R_base(t)^T @ R_ref(t+k)",
         "rotation_6d_order": ["R00", "R01", "R10", "R11", "R20", "R21"],
         "sensor_scale_location": "caller, once; network scale buffers remain identity",
-        "running_normalization": False, "observation_noise": False,
+        "running_normalization": bool(policy_config.get("running_normalization", False)),
+        "normalization": {
+            "embedded_in_onnx": bool(policy_config.get("running_normalization", False)),
+            "formula": "(raw_feature - running_mean) / (running_std + 0.01)",
+            "sensor_history_statistics": "one shared statistic per raw sensor feature across history lags",
+            "khan_sensor_input": "caller omega*0.5 and qd*0.2 are inverted inside the graph before normalization",
+            "future_orientation_statistics": "independent flattened 30-dimensional window",
+            "goal_statistics": "independent per flattened goal dimension and future offset",
+            "updates_at_inference": False,
+        },
+        "observation_noise": False,
         "actor_stateful": False, "reference_motion_embedded": False,
         "action": {"meaning": "raw normalized joint-position action", "clip": None,
                    "tanh": False, "smoothing": False, "execution_noise": False,
@@ -161,6 +171,7 @@ def _metadata(ckpt: Path, cfg: dict, input_layout: InputLayout) -> dict[str, str
         "onnx_deployment_schema": json.dumps(deployment_schema(input_layout, cfg["policy"]), sort_keys=True),
         "robot_contract": json.dumps(contract, sort_keys=True),
         "policy_config": json.dumps(cfg["policy"], sort_keys=True),
+        "running_normalization": str(bool(cfg["policy"].get("running_normalization", False))).lower(),
     }
 
 

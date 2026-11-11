@@ -147,7 +147,9 @@ def main():
     limits = torch.stack((middle - factor * half_range, middle + factor * half_range), -1)
     heads = AnalyticHeads(G1Kinematics(model, device), spec.tracked_bodies,
                           spec.anchor_body, spec.root_body, limits, q0)
-    wm = WorldModel(cfg.world_model, heads, device)
+    mapping = ({name: checkpoint["wm"][name] for name in ("action_scale", "action_offset")}
+               if cfg.world_model.input_normalization else {})
+    wm = WorldModel(cfg.world_model, heads, device, **mapping)
     critic = Critic(cfg.critic, pcfg=cfg.policy, xi_dim=wm.spec.xi_dim).to(device)
     for name, network in (("wm", wm), ("critic", critic)):
         network.load_state_dict(checkpoint[name])

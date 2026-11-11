@@ -15,4 +15,5 @@ wandb/
 .ruff_cache/
 experiments/**/outputs/
 /ref_thirdparty/
+/official_ref/
 /thirdparty/
