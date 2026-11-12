@@ -143,9 +143,11 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
     cfg.policy.num_tracked_bodies = len(robot.tracked_bodies)
     cfg.policy.goal_dim = goal_dimension(layout, robot.num_joints, future, cfg.env.anchor_obs)
     if cfg.policy.action_mode == "auto":
-        # This experimental branch trains default-pose actions. Historical
-        # residual checkpoints remain playable via their explicit saved mode.
-        cfg.policy.action_mode = "default"
+        # Fresh Khan runs restore the clean-reference PD prior. Standalone
+        # PolicyCfg and checkpoint loaders retain their saved/legacy mode.
+        cfg.policy.action_mode = ("reference_residual"
+                                  if cfg.robot == "khan_mini" and layout == "isaac_khan"
+                                  else "default")
     if cfg.policy.goal_noise_z is None:
         cfg.policy.goal_noise_z = 0.01 if layout == "isaac_khan" else 0.0
     if cfg.policy.goal_noise_joint_pos is None:

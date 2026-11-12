@@ -2,8 +2,8 @@
 
 分支：`feat/official-window-value-normalization`。基于官方 SuperMimic
 `5efbf114e11f725c31d83e217be987c13c0e4ce2`，在现有 Khan 框架内适配。
-`main` 上已有训练方案保持在原提交。请为本分支新建训练 run；旧 residual
-策略仍可按其 checkpoint 配置 play/export，但不能用旧权重直接续训本次新结构。
+`main` 上已有训练方案保持在原提交。请为本次恢复参考残差的新配置新建训练 run；
+历史策略仍按其 checkpoint 保存的动作和网络配置 play/export。
 
 ## 默认组件
 
@@ -18,7 +18,7 @@
 | 想象终止 | 解析软阈值，softness=0.05；不训练 termination MLP |
 | critic | bootstrap、GAE target 仅上界限制，Khan 为 0.112/(1−0.99)=11.2 |
 | actor 输入 | obs/goal 运行归一化，输入维度仍为 465＋155=620 |
-| actor 动作 | **默认姿态相对动作**，PD target=`q_default+0.5*actions`，无参考 residual skip |
+| actor 动作 | **参考残差动作**，PD target=`q_ref_raw(t+1)+0.5*decoder_output`，beta=1 |
 | actor 网络 | encoder1024/512/256，decoder2048/1024/512/256，隐藏层均为LayerNorm/GELU，latent32 |
 | critic 网络 | 256/128，隐藏层为LayerNorm/GELU，最终输出仍为普通Linear |
 | Actor EMA | 0.995，采集/优化使用 live；eval/export 默认自动选择 EMA |
@@ -32,8 +32,37 @@ WM 仍使用现有 heading 表示（Khan67维状态特征）、66维速度/pose 
 8次真实transition监督及原误差尺度；没有同时改成官方33维纯速度预测模型或切换Muon。
 运行输入归一化取代WM原固定输入除数，输出scale和loss scale保持现有实现。
 
-`--reference-residual` 是显式对比选项，不是新训练默认。原有 encoder goal noise
-保留为 z±0.01m、q±0.05rad；critic/reward 不加该噪声，可用 `--no-goal-noise` 关闭。
+Khan的Isaac布局新训练默认启用参考残差，`--reference-residual` 可显式指定；
+`--no-reference-residual` 恢复默认姿态动作做消融。G1及Khan的旧SuperMimic布局
+仍使用原默认姿态动作。原有encoder goal noise保留为z±0.01m、q±0.05rad；
+critic/reward和参考直通分支保持干净，可用 `--no-goal-noise` 关闭encoder噪声。
+
+## 参考残差与运行归一化
+
+将clean、原始单位的goal与encoder输入明确分开：
+
+```text
+clean goal（关节值为rad） ── q_ref(t+1) ── beta*(q_ref-q0)/alpha ──┐
+        └─ encoder goal noise ── running normalization ── encoder  │
+sensor observations ── running normalization ── decoder residual ─┴─ actions
+```
+
+参考分支在调用encoder之前计算，不读取标准化值，也不读取加噪的encoder goal。
+当前Khan的goal窗口从t开始，offset=1选第二个关节块，即clean goal的47:74。
+alpha是实际执行器action scale，所有Khan关节为0.5；beta=1。
+除以alpha只是将物理角度映射为执行器动作坐标，不是使用运行mean/std标准化参考角度。
+
+```text
+actions = decoder_output + beta*(q_ref_raw(t+1)-q0)/alpha
+PD target = q0 + alpha*actions
+          = (1-beta)*q0 + beta*q_ref_raw(t+1) + alpha*decoder_output
+```
+
+运行归一化只作用于网络支路；不会修改clean goal或将其原地标准化。
+decoder为零且beta=1时，物理目标应等于原始参考q_ref(t+1)，与normalizer的
+mean/std、encoder噪声无关。参考分支保留梯度，不添加新的输出限幅或裁剪。
+物理采集、想象、EMA及ONNX都调用同一个Policy.forward，残差只叠加一次。
+Replay和last_action继续保存完整default-relative动作，WM在内部还原物理PD目标后归一化。
 
 ## 归一化与部署契约
 
@@ -52,6 +81,9 @@ ONNX 内嵌全部 actor 统计，C++ 不要再次标准化。EMA 的统计 buffe
 训练入口会检查 checkpoint 的动作、归一化、WM 结构和采样契约。
 本次还会检查Actor/Critic的LayerNorm与激活函数，拒绝把旧SiLU权重静默解释成新模型。
 历史未记录这些字段的checkpoint仍按SiLU、无隐藏LayerNorm加载用于play/export。
+此前本分支180k/200k使用default动作，它们仍按原配置play/export，但不能直接resume
+到本次reference-residual动作；训练入口会在加载权重前拒绝动作契约不匹配。
+相同配置的reference-residual checkpoint可以继续恢复。
 
 ## 自举后继边界
 
@@ -87,7 +119,7 @@ cd /home/jaka/Workspace/SuperMimic-Reproduced-jaka
 
 bash scripts/training/train_khan_compact_server.sh \
   --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
-  --run-name khan_8452_official_clip_ln_gelu_4096 \
+  --run-name khan_8452_official_residual_norm_4096 \
   --num-envs 4096
 ```
 
@@ -100,7 +132,7 @@ NPZ 混合库沿用原入口：
 ```bash
 bash scripts/training/train_khan_server.sh \
   --data-dir data/npz/khan_mini/mixed \
-  --run-name khan_mixed_official_clip_ln_gelu_4096 \
+  --run-name khan_mixed_official_residual_norm_4096 \
   --num-envs 4096
 ```
 
@@ -156,3 +188,22 @@ Khan 的 benchmark 或实机稳定性。仍需用新 run 与旧策略做受控�
 
 本次结果位于 `logs/smoke_clip_successor_ln_gelu_20261111/`。导出文件仅用于验证，
 属于50步smoke权重。以上结果证明链路与边界检查通过，不代表正式训练已收敛或实机性能提升。
+
+## 恢复参考残差验证（2026-11-12）
+
+- 原可选残差实现已使用clean raw goal；本次进一步在encoder调用前构造独立的
+  reference action，并将Khan Isaac新训练及两个server wrapper的默认模式改为残差。
+- 全量已有CPU回归724 passed、34 skipped；另有9项归一化残差专项，检查非零且
+  不同维度的mean/std、非均匀物理action scale、encoder噪声隔离、raw弧度梯度、
+  统计只读、编译梯度、EMA恢复及packed/split ONNX动态batch一致性。
+- 完整8452条PT库、8环境、50步GPU训练通过，保持正式网络宽度、WM batch2048、
+  policy batch4096、H32和学习率调度。实际完成40次WM、4次actor、80次critic优化，
+  参数更新且全有限，模型/optimizer/EMA/sampler扰动后恢复通过。
+- 本地测试启用激活重计算以适应12GB显存，delay关闭；server默认激活重计算关闭。
+  采集统计计数为400。8环境50步的Replay不足常规online-error诊断的2048行门槛，
+  终端nse8的nan表示该诊断缺测；训练loss、模型与记录的TB标量均有限。
+- 正式宽度的归一化残差EMA actor导出后，最大action和PD target误差均约2.38e-7。
+  旧200k归一化default策略、旧180k固定scale残差策略及新smoke策略均按保存配置加载。
+
+本次训练/导出验证产物位于 `logs/smoke_official_residual_norm_20261112/`；
+smoke仅用于训练链路验证，不是新模式正式训练结果或部署策略。

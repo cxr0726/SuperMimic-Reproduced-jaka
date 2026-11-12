@@ -276,16 +276,20 @@ class Policy(nn.Module):
 
     def forward(self, obs_hist: torch.Tensor, goal: torch.Tensor, interface: str = "motion",
                 *, encoder_goal: torch.Tensor | None = None) -> torch.Tensor:
-        action = self.decoder(self.encoders[interface](goal if encoder_goal is None else encoder_goal), obs_hist)
+        # Compose the reference branch in physical radians before the encoder
+        # sees goal noise or running normalization. Keep an independent action
+        # tensor rather than forwarding standardized reference joint values.
+        reference_action = None
         if self.cfg.action_mode == "reference_residual":
             q_ref = reference_joint_positions(
                 goal, layout=self.cfg.observation_layout, num_joints=self.cfg.num_joints,
                 future_frames=self.cfg.future_frames, frame_offset=self.cfg.reference_frame_offset,
             )
-            action = action + self.cfg.reference_residual_beta * (
+            reference_action = self.cfg.reference_residual_beta * (
                 q_ref - self.reference_q_default
             ) / self.reference_action_scale
-        return action
+        action = self.decoder(self.encoders[interface](goal if encoder_goal is None else encoder_goal), obs_hist)
+        return action if reference_action is None else action + reference_action
 
 
 class Critic(nn.Module):

@@ -60,7 +60,7 @@ def test_dry_run_selects_isaac_observations_without_overriding_original_optimiza
     cfg = parse_config(result.stdout)
     assert cfg.robot == "khan_mini" and cfg.env.num_envs == num_envs
     assert cfg.data.npz_dir == root / "data/npz/khan_mini/lafan1"
-    assert cfg.run_name == "khan_lafan1_official_window_norm" and cfg.log_root == root / "logs"
+    assert cfg.run_name == "khan_lafan1_official_residual_norm" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is cfg.data.library is None
     assert cfg.env.actuator_delay is False and cfg.env.merge_short_tail_bins is True
     assert cfg.env.delay_reset_first_step_no_delay is True
@@ -85,7 +85,7 @@ def test_dry_run_selects_isaac_observations_without_overriding_original_optimiza
     assert cfg.env.future_frames == cfg.policy.history == 5
     assert cfg.env.observation_layout == cfg.policy.observation_layout == "isaac_khan"
     assert cfg.policy.goal_dim == 155
-    assert cfg.policy.action_mode == "default"
+    assert cfg.policy.action_mode == "reference_residual"
     assert cfg.env.reset_sampler == "window_value"
     assert cfg.env.return_horizon == 20 and cfg.env.return_memory == 256
     assert cfg.world_model.input_normalization and cfg.world_model.hidden_layer_norm
@@ -153,7 +153,7 @@ def test_missing_data_and_existing_checkpoint_rejected(project):
     empty.mkdir()
     result = run_launcher(project, "--dry-run", "--data-dir", str(empty))
     assert result.returncode != 0 and "No converted Khan NPZ" in result.stderr
-    run = root / "logs/khan_lafan1_official_window_norm"
+    run = root / "logs/khan_lafan1_official_residual_norm"
     run.mkdir(parents=True)
     (run / "ckpt_latest.pt").touch()
     result = run_launcher(project, "--dry-run")
@@ -192,8 +192,11 @@ def test_delay_switch_keeps_h32_and_full_tail_merge(project, flags, enabled):
 
 
 @pytest.mark.parametrize("flags,action_mode,z_noise,q_noise", [
+    ([], "reference_residual", 0.01, 0.05),
+    (["--reference-residual"], "reference_residual", 0.01, 0.05),
     (["--no-reference-residual"], "default", 0.01, 0.05),
-    (["--no-goal-noise"], "default", 0.0, 0.0),
+    (["--reference-residual", "--no-reference-residual"], "default", 0.01, 0.05),
+    (["--no-goal-noise"], "reference_residual", 0.0, 0.0),
     (["--no-reference-residual", "--no-goal-noise"], "default", 0.0, 0.0),
     (["--no-reference-residual", "--reference-residual", "--no-goal-noise", "--goal-noise"],
      "reference_residual", 0.01, 0.05),
@@ -209,3 +212,8 @@ def test_action_space_and_encoder_noise_switches_are_independent(project, flags,
     assert cfg.policy_trainer.horizon == 32
     assert cfg.env.actuator_delay is False
     assert "critic/reward stay clean" in result.stdout
+    assert "reference skip uses raw clean radians" in result.stdout
+    if action_mode == "reference_residual":
+        assert "PD target=raw clean q_ref(t+1) + 0.5*decoder_output; beta 1" in result.stdout
+    else:
+        assert "PD target=q_default + 0.5*actor_output; reference skip OFF" in result.stdout

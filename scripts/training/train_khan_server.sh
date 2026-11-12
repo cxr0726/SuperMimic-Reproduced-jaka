@@ -5,13 +5,13 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 NUM_ENVS=4096
-RUN_NAME=khan_lafan1_official_window_norm
+RUN_NAME=khan_lafan1_official_residual_norm
 DATA_DIR="$PROJECT_DIR/data/npz/khan_mini/lafan1"
 RESUME=''
 STOP_AFTER=''
 DRY_RUN=0
 ACTUATOR_DELAY=False
-ACTION_MODE=default
+ACTION_MODE=reference_residual
 GOAL_NOISE_Z=0.01
 GOAL_NOISE_JOINT_POS=0.05
 
@@ -26,9 +26,11 @@ Optimization, H=32, UTD=0.4 and LR schedule reuse the repository defaults.
 Khan uses the Isaac observation layout: 5 reference
 frames, 5 history frames, goal 155 and policy input 465. The encoder goal has
 uniform z +/-0.01 m and q +/-0.05 rad noise; critic/reward stay clean.
-Actions use q_default + 0.5 * actor_output; reference residual is disabled. Activation
-recomputation remains disabled. Actuator delay is disabled by default for this
-server experiment; --actuator-delay enables held 0–20 ms delay with an immediate first step.
+Residual actions use raw clean q_ref(t+1) + 0.5 * decoder_output (beta 1).
+Only the encoder goal is noise-augmented and running-normalized; the reference
+skip uses raw joint positions in radians. Activation recomputation remains disabled.
+Actuator delay is disabled by default for this server experiment; --actuator-delay
+enables held 0–20 ms delay with an immediate first step.
 Khan uses full CAD convex feet, actual root reset clearance 0.05 m and a 605-dim
 critic. Dynamics DR (PD, ankle armature, waist mass) retains the 91-dim context
 including delay. Every incomplete final bin is merged into the preceding bin.
@@ -41,10 +43,10 @@ stay within their source clip; physical end timing is unchanged. Use a fresh run
 
 Options:
   --num-envs N                Parallel robot environments (default: 4096)
-  --run-name NAME             Directory under project logs/ (default: khan_lafan1_official_window_norm)
+  --run-name NAME             Directory under project logs/ (default: khan_lafan1_official_residual_norm)
   --data-dir PATH             Converted Khan NPZ directory (default: project data/npz/khan_mini/lafan1)
-  --no-reference-residual   Use default-pose actions (default for this branch)
-  --reference-residual      Opt in to next-reference residual actions for comparison
+  --no-reference-residual   Opt out to default-pose actions for comparison
+  --reference-residual      Use clean next-reference residual actions (default)
   --no-goal-noise           Disable encoder goal augmentation
   --goal-noise               Enable Isaac encoder goal noise (default)
   --no-actuator-delay        Disable actuator delay (default for this server experiment)
@@ -154,9 +156,9 @@ printf '[INFO] Official port defaults: window_value sampler; horizon 20; memory 
 if [[ "$ACTION_MODE" == default ]]; then
     printf '[INFO] Actions: default; PD target=q_default + 0.5*actor_output; reference skip OFF\n'
 else
-    printf '[INFO] Actions: reference_residual; PD target=q_ref(t+1) + 0.5*decoder_output; beta 1\n'
+    printf '[INFO] Actions: reference_residual; PD target=raw clean q_ref(t+1) + 0.5*decoder_output; beta 1\n'
 fi
-printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; critic/reward stay clean; default action has no reference skip\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
+printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; then running normalization; critic/reward stay clean; reference skip uses raw clean radians\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
 printf '[INFO] Khan: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$ACTUATOR_DELAY"
 printf '[INFO] Reset bins: merge every incomplete final bin; require >=32 remaining reference steps; first-step action-rate unchanged\n'
 printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; full convex feet\n'

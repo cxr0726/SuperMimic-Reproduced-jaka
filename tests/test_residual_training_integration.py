@@ -14,8 +14,8 @@ from supermimic.training.loop import Trainer, validate_policy_training_semantics
 
 def _small_policy_config(**overrides):
     cfg = TrainConfig(robot="khan_mini")
-    # Residual tests deliberately exercise the previous optional action space;
-    # fresh training on this branch now defaults to absolute default-pose actions.
+    # Keep fixed-scale legacy coverage; individual tests also enable the fresh
+    # running-normalization path without changing the checkpoint fallback.
     cfg.policy.action_mode = "reference_residual"
     cfg.policy.running_normalization = False
     cfg.policy.encoder_hidden = cfg.policy.decoder_hidden = (16,)
@@ -32,7 +32,7 @@ def _policy(cfg):
 
 
 @pytest.mark.parametrize("robot,mode,z_half,q_half,goal_dim", [
-    ("khan_mini", "default", 0.01, 0.05, 155),
+    ("khan_mini", "reference_residual", 0.01, 0.05, 155),
     ("g1", "default", 0.0, 0.0, 680),
 ])
 def test_fresh_defaults_resolve_by_layout_without_changing_optimization(
@@ -78,8 +78,12 @@ def test_explicit_legacy_and_noise_ablation_survive_default_resolution():
 
 @pytest.mark.parametrize("obs_noise", [False, True])
 @pytest.mark.parametrize("goal_noise", [False, True])
-def test_collection_passes_clean_reference_and_separate_encoder_copy(obs_noise, goal_noise):
-    cfg = _small_policy_config(**({} if goal_noise else
+@pytest.mark.parametrize("running_normalization", [False, True])
+def test_collection_passes_clean_reference_and_separate_encoder_copy(
+    obs_noise, goal_noise, running_normalization,
+):
+    cfg = _small_policy_config(running_normalization=running_normalization,
+                              **({} if goal_noise else
                                  {"goal_noise_z": 0.0, "goal_noise_joint_pos": 0.0}))
     policy = _policy(cfg)
     trainer = SimpleNamespace(policy=policy, cfg=SimpleNamespace(env=SimpleNamespace(obs_noise=obs_noise)))

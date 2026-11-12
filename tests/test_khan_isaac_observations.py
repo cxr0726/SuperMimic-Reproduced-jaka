@@ -227,7 +227,10 @@ def _tiny_library():
 
 @pytest.mark.parametrize("noise", [False, True])
 @pytest.mark.parametrize("action_mode", ["default", "reference_residual"])
-def test_imagination_builds_current_future_orientation_and_five_term_histories(noise, action_mode):
+@pytest.mark.parametrize("running_normalization", [False, True])
+def test_imagination_builds_current_future_orientation_and_five_term_histories(
+    noise, action_mode, running_normalization,
+):
     torch.manual_seed(101)
     lib = _tiny_library()
     policy_args = ({"default_joint_pos": lib.default_joint_pos,
@@ -236,8 +239,15 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(n
     policy = Policy(PolicyCfg(encoder_hidden=(12,), decoder_hidden=(12,), latent_dim=4,
                               history=5, future_frames=5, num_joints=27, goal_dim=155,
                               observation_layout="isaac_khan", num_tracked_bodies=1,
-                              action_mode=action_mode, goal_noise_z=.01, goal_noise_joint_pos=.05),
+                              action_mode=action_mode, goal_noise_z=.01, goal_noise_joint_pos=.05,
+                              running_normalization=running_normalization,
+                              hidden_layer_norm=running_normalization,
+                              hidden_activation="gelu" if running_normalization else "silu"),
                     **policy_args)
+    if running_normalization:
+        policy.update_normalization(torch.randn(7, 465) * 2 + 3,
+                                    torch.randn(7, 155) * .3 + 2)
+    buffers_before = {name: value.clone() for name, value in policy.named_buffers()}
     state = torch.zeros(2, 67)
     state[:, :3], state[:, 3:7] = lib._ref[:2, :3], lib._ref[:2, 3:7]
     state[:, 7:34] = lib.default_joint_pos
@@ -258,6 +268,9 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(n
     encoder_inputs = []
     encoder_hook = policy.encoders["motion"].register_forward_pre_hook(
         lambda module, args: encoder_inputs.append(args[0].detach().clone()))
+    decoder_outputs = []
+    decoder_hook = policy.decoder.register_forward_hook(
+        lambda module, args, output: decoder_outputs.append(output.detach().clone()))
 
     def transition(current, action, previous, context, ref):
         next_joint = current[:, 7:34] + action * 0.1
@@ -275,6 +288,7 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(n
                       obs_noise=noise, step_fn=transition)
     hook.remove()
     encoder_hook.remove()
+    decoder_hook.remove()
     assert len(captured) == 2 and captured[0][0].shape == (2, 465)
     assert rollout.goals.shape == (3, 2, 155)
     assert rollout.critic_goals.shape == (3, 2, 365)
@@ -291,6 +305,12 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(n
         torch.testing.assert_close(rollout.critic_goals[time], expected_critic, rtol=0, atol=1e-6)
         torch.testing.assert_close(rollout.goals[time], expected_critic[:, :155], rtol=0, atol=0)
         if time < 2:
+            if action_mode == "reference_residual":
+                expected_skip = (reference.joint_pos[:, 1] - lib.default_joint_pos) / .5
+                torch.testing.assert_close(rollout.actions[time] - decoder_outputs[time],
+                                           expected_skip, rtol=1e-6, atol=1e-6)
+            else:
+                torch.testing.assert_close(rollout.actions[time], decoder_outputs[time], rtol=0, atol=0)
             delta = encoder_inputs[time] - rollout.goals[time]
             assert torch.equal(delta[:, :15], torch.zeros_like(delta[:, :15]))
             assert delta[:, 15:20].abs().max() <= (.010001 if noise else 0.)
@@ -343,6 +363,8 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(n
     gradients = [parameter.grad for parameter in policy.parameters()]
     assert all(gradient is not None and torch.isfinite(gradient).all() for gradient in gradients)
     assert any(gradient.abs().sum() > 0 for gradient in gradients)
+    for name, value in policy.named_buffers():
+        torch.testing.assert_close(value, buffers_before[name], rtol=0, atol=0)
 
 
 def test_isaac_orientation_compiles_with_autograd():

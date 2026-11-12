@@ -126,7 +126,8 @@ def deployment_schema(input_layout: InputLayout, policy_config: dict | None = No
                    "reference_frame_offset": policy_config.get("reference_frame_offset", 1) if residual else None,
                    "residual_scale": "action_scale" if residual else None,
                    "reference_skip_embedded": residual,
-                   "reference_skip_input": "supplied clean goal, before encoder-only training noise" if residual else None},
+                   "reference_skip_input": "supplied clean goal, before encoder-only noise and running normalization" if residual else None,
+                   "reference_skip_units": "raw joint radians" if residual else None},
         "training_goal_noise": {
             "distribution": "independent additive uniform",
             "root_displacement_half_width": 0.0,
