@@ -136,7 +136,7 @@ def verify_production_config(cfg: TrainConfig) -> dict:
     reference_env.pop("compact_library")
     env.pop("reference_fk_compile")
     reference_env.pop("reference_fk_compile")
-    for key in ("anchor_obs", "observation_layout", "future_frames", "actuator_delay",
+    for key in ("anchor_obs", "observation_layout", "context_layout", "future_frames", "actuator_delay",
                 "actuator_delay_max_ms", "reset_root_z_offset", "merge_short_tail_bins",
                 "delay_reset_first_step_no_delay", "tail_bin_merge_fraction", "reset_min_remaining_steps"):
         env.pop(key)
@@ -146,6 +146,7 @@ def verify_production_config(cfg: TrainConfig) -> dict:
         "matches_train_config_optimization_defaults": True,
         "anchor_obs": cfg.env.anchor_obs,
         "observation_layout": cfg.env.observation_layout,
+        "context_layout": cfg.env.context_layout,
         "future_frames": cfg.env.future_frames,
         "history": cfg.policy.history,
         "action_mode": cfg.policy.action_mode,

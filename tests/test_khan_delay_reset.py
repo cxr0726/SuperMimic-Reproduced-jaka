@@ -31,7 +31,9 @@ DELAY_FIELDS = (
 
 
 def _cfg(**kwargs):
-    args = SuperMimicEnvCfgArgs(npz_files=["unused.npz"], robot="khan_mini", **kwargs)
+    args = SuperMimicEnvCfgArgs(
+        npz_files=["unused.npz"], robot="khan_mini", context_layout="khan_dr_v1", **kwargs,
+    )
     return make_env_cfg(args)
 
 
@@ -125,7 +127,7 @@ def test_first_step_rejects_fused_queue_partly_owned_by_another_action():
 @NEEDS_CUDA_DATA
 def test_explicitly_disabled_delay_has_no_queue_and_preserves_first_action_rate():
     env = make_env(SuperMimicEnvCfgArgs(
-        npz_files=[str(NPZ)], robot="khan_mini", num_envs=4,
+        npz_files=[str(NPZ)], robot="khan_mini", context_layout="khan_dr_v1", num_envs=4,
         actuator_delay=False, delay_reset_first_step_no_delay=True,
         merge_short_tail_bins=True,
         reset_noise=False, obs_noise=False, action_noise_std=0., seed=37,
@@ -172,7 +174,8 @@ def test_fresh_reset_targets_bypass_first_control_step_then_resume_lags():
     from mjlab.envs import ManagerBasedRlEnv
 
     cfg = make_env_cfg(SuperMimicEnvCfgArgs(
-        npz_files=[str(NPZ)], robot="khan_mini", num_envs=8, replay_capacity=32,
+        npz_files=[str(NPZ)], robot="khan_mini", context_layout="khan_dr_v1",
+        num_envs=8, replay_capacity=32,
         actuator_delay=True, delay_reset_first_step_no_delay=True,
         action_noise_std=.11, obs_noise=False, reset_noise=False,
         domain_randomization=True, sampling_mode="start", seed=37,
@@ -346,7 +349,8 @@ def delayed_khan():
     if not torch.cuda.is_available() or not NPZ.is_file():
         pytest.skip("needs CUDA and converted Khan LAFAN1")
     env = make_env(SuperMimicEnvCfgArgs(
-        npz_files=[str(NPZ)], robot="khan_mini", num_envs=8, replay_capacity=32,
+        npz_files=[str(NPZ)], robot="khan_mini", context_layout="khan_dr_v1",
+        num_envs=8, replay_capacity=32,
         action_noise_std=0.0, obs_noise=False, reset_noise=False,
         domain_randomization=True, sampling_mode="start", seed=37,
     ), device="cuda:0")

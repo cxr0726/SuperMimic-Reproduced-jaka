@@ -23,7 +23,7 @@ from supermimic.eval.benchmark import (
     save_results,
     summarize,
 )
-from supermimic.robots.contracts import robot_contract
+from supermimic.robots.contracts import checkpoint_context_layout, robot_contract
 from supermimic.robots.registry import get_robot_spec
 
 
@@ -51,6 +51,7 @@ def main(ckpt: Path, npz_dir: Path | None = None, clips: list[str] | None = None
         future_frames=cfg["env"]["future_frames"], anchor_obs=cfg["env"].get("anchor_obs", False),
         robot=robot.name, history_length=policy.cfg.history,
         observation_layout=policy.cfg.observation_layout,
+        context_layout=checkpoint_context_layout(cfg),
         reset_root_z_offset=cfg["env"].get("reset_root_z_offset"),
         reference_fk_compile=reference_fk_compile,
     )
@@ -83,7 +84,8 @@ def main(ckpt: Path, npz_dir: Path | None = None, clips: list[str] | None = None
         "reference_fk_compile": reference_fk_compile, "wall_time_s": elapsed,
         "executed_steps": sum(r.steps for r in results),
         "reference_frames": sum(r.frames for r in results),
-        "robot_contract": robot_contract(robot.name, observation_layout=policy.cfg.observation_layout),
+        "robot_contract": robot_contract(robot.name, observation_layout=policy.cfg.observation_layout,
+                                         env_config=cfg["env"]),
         "protocol": {"seed": 0, "start_frame": 0, "episodes_per_clip": 1,
                      "noise": False, "domain_randomization": False, "actuator_delay": False,
                      "deterministic_policy": True, "bitwise_physics_guaranteed": False,

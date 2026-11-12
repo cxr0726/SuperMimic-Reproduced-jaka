@@ -10,7 +10,7 @@ Differences from mjlab's BeyondMimic re-implementation (``mjlab.tasks.tracking``
     tracks the two reference neck joint positions and velocities;
   * terminations: pelvis height / tilt vs reference, no end-effector term, clip-end time-out;
   * events: no push; friction and encoder bias re-sampled per episode; COM at startup;
-    Khan also randomizes PD gains and ankle armature per episode, and waist mass at startup;
+    Khan randomizes PD gains per episode, with lower-body armature and waist mass at startup;
   * a ``ReplayRecorder`` streams transitions into a GPU replay buffer.
 """
 
@@ -52,7 +52,13 @@ from supermimic.robots.registry import (
     get_robot_spec,
     resolve_robot_environment,
 )
-from supermimic.sim_context import KHAN_ANKLE_JOINTS
+from supermimic.sim_context import (
+    KHAN_ANKLE_JOINTS,
+    KHAN_FOOT_BODIES,
+    KHAN_LOWER_BODY_JOINTS,
+    ContextKind,
+    resolve_context_layout,
+)
 
 
 class QuietSimulationCfg(SimulationCfg):
@@ -107,11 +113,13 @@ class SuperMimicEnvCfgArgs:
     debug_vis: bool = False  # draw the reference ghost in the viewer (scripts/play.py)
     robot: RobotName = "g1"
     observation_layout: ObservationLayoutOption = "auto"
+    context_layout: ContextKind | None = None  # Fresh Khan v2; checkpoints pass their saved layout.
     extra_command_kwargs: dict = field(default_factory=dict)
 
 
 def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     robot_spec = get_robot_spec(a.robot)
+    a.context_layout = resolve_context_layout(a.robot, a.context_layout)
     settings = resolve_robot_environment(
         a.robot, actuator_delay=a.actuator_delay,
         actuator_delay_max_ms=a.actuator_delay_max_ms,
@@ -133,7 +141,9 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     a.future_frames, a.history_length = resolve_observation_sizes(
         a.observation_layout, a.future_frames, a.history_length, a.anchor_obs,
     )
-    tracking_rewards = TrackingRewardCfg.for_joint_names(robot_spec.joint_names)
+    tracking_rewards = TrackingRewardCfg.for_joint_names(
+        robot_spec.joint_names, foot_tracking=a.context_layout == "khan_dr_v3",
+    )
     # ---------------------------------------------------------------- observations
     noise = (lambda lo, hi: Unoise(n_min=lo, n_max=hi)) if a.obs_noise else (lambda lo, hi: None)
     policy_terms = {
@@ -219,7 +229,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     pose_range = {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (-0.01, 0.01), "roll": (-0.1, 0.1), "pitch": (-0.1, 0.1), "yaw": (-0.2, 0.2)}
     vel_range = {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (-0.2, 0.2), "roll": (-0.52, 0.52), "pitch": (-0.52, 0.52), "yaw": (-0.78, 0.78)}
     command_kwargs = {
-        # Preserve the original sampler's reward-relative temperature after adding neck rewards.
+        # Preserve reward-relative sampling temperature as tracking terms grow.
         "g_max": 10.0 * (tracking_rewards.max_step_reward / 0.1),
         **a.extra_command_kwargs,
     }
@@ -261,7 +271,9 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=(robot_spec.com_body,)),
                 "operation": "add",
-                "ranges": {0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05)},
+                "ranges": ({0: (-0.035, 0.035), 1: (-0.07, 0.07), 2: (-0.07, 0.07)}
+                           if a.context_layout in ("khan_dr_v2", "khan_dr_v3") else
+                           {0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05)}),
             },
         )
         events["encoder_bias"] = EventTermCfg(
@@ -290,12 +302,16 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                     "operation": "scale", "kp_range": (0.8, 1.2), "kd_range": (0.8, 1.2),
                 },
             )
-            events["ankle_armature"] = EventTermCfg(
-                mode="reset",
-                func=khan_joint_armature,
+            legacy_armature = a.context_layout == "khan_dr_v1"
+            events["ankle_armature" if legacy_armature else "lower_body_armature"] = EventTermCfg(
+                mode="reset" if legacy_armature else "startup",
+                # Startup follows stock recompute_constants after all terms;
+                # only legacy reset sampling needs the partial-world refresh.
+                func=khan_joint_armature if legacy_armature else dr.joint_armature,
                 params={
                     "asset_cfg": SceneEntityCfg(
-                        "robot", joint_names=KHAN_ANKLE_JOINTS, preserve_order=True,
+                        "robot", joint_names=(KHAN_ANKLE_JOINTS if legacy_armature
+                                               else KHAN_LOWER_BODY_JOINTS), preserve_order=True,
                     ),
                     "operation": "scale", "ranges": (0.8, 1.2), "shared_random": False,
                 },
@@ -311,6 +327,19 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                     "operation": "add", "ranges": (-2.0, 3.0),
                 },
             )
+            if a.context_layout == "khan_dr_v3":
+                # Independent point payloads at each foot body's authored COM.
+                # No assumed payload shape: COM and rotational inertia stay
+                # authored; the stock startup event refreshes model constants.
+                events["foot_mass"] = EventTermCfg(
+                    mode="startup", func=dr.body_mass,
+                    params={
+                        "asset_cfg": SceneEntityCfg(
+                            "robot", body_names=KHAN_FOOT_BODIES, preserve_order=True,
+                        ),
+                        "operation": "add", "ranges": (0.0, 0.2), "shared_random": False,
+                    },
+                )
     else:
         # Evaluation protocol: foot friction fixed at 1.0, no other randomization.
         events["foot_friction"] = EventTermCfg(
@@ -349,6 +378,20 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             params={"command_name": "motion", "std": tracking_rewards.std_neck_vel,
                     "asset_cfg": neck_asset},
         )
+    if tracking_rewards.w_foot_pos:
+        rewards["motion_foot_pos"] = RewardTermCfg(
+            func=sm_rewards.motion_foot_position_error_exp,
+            weight=tracking_rewards.w_foot_pos,
+            params={"command_name": "motion", "std": tracking_rewards.std_foot_pos,
+                    "body_names": KHAN_FOOT_BODIES},
+        )
+    if tracking_rewards.w_foot_ori:
+        rewards["motion_foot_ori"] = RewardTermCfg(
+            func=sm_rewards.motion_foot_orientation_error_exp,
+            weight=tracking_rewards.w_foot_ori,
+            params={"command_name": "motion", "std": tracking_rewards.std_foot_ori,
+                    "body_names": KHAN_FOOT_BODIES},
+        )
 
     # ---------------------------------------------------------------- terminations
     terminations = {
@@ -363,7 +406,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         recorders["replay"] = ReplayRecorderCfg(params={
             "capacity": a.replay_capacity, "foot_geom_regex": robot_spec.foot_geom_regex,
             "com_body_name": robot_spec.com_body,
-            "context_layout": "khan_dr_v1" if a.robot == "khan_mini" else "base",
+            "context_layout": a.context_layout,
         })
 
     cfg = ManagerBasedRlEnvCfg(

@@ -8,11 +8,38 @@ from dataclasses import asdict
 from supermimic.envs.mdp.rewards import TrackingRewardCfg
 from supermimic.observation_layout import resolve_observation_layout
 from supermimic.robots.registry import RobotName, get_robot_spec, resolve_robot_environment
-from supermimic.sim_context import KHAN_ANKLE_JOINTS, SimContextLayout
+from supermimic.sim_context import (
+    KHAN_ANKLE_JOINTS,
+    KHAN_FOOT_BODIES,
+    KHAN_LOWER_BODY_JOINTS,
+    ContextKind,
+    SimContextLayout,
+    resolve_context_layout,
+)
+
+
+def checkpoint_context_layout(config: dict) -> ContextKind:
+    """Resolve saved physics, without applying fresh-training DR defaults.
+
+    The explicit environment field was introduced with v2. Older checkpoints
+    record the v1 layout in their WM config, or predate that config field.
+    """
+    robot = config.get("robot", "g1")
+    requested = config.get("env", {}).get("context_layout")
+    if requested is None:
+        requested = config.get("world_model", {}).get("state_spec", {}).get("context_layout")
+    if requested is None:
+        requested = "khan_dr_v1" if robot == "khan_mini" else "base"
+    return resolve_context_layout(robot, requested)
 
 
 def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_config: dict | None = None) -> dict:
     spec = get_robot_spec(robot)
+    reward_config = asdict(TrackingRewardCfg.for_joint_names(spec.joint_names))
+    # These fields did not exist in historical G1 or Khan v1/v2 contracts.
+    # Keep their serialized dictionaries identical for old play/eval/export.
+    for key in ("std_foot_pos", "std_foot_ori", "w_foot_pos", "w_foot_ori"):
+        reward_config.pop(key, None)
     contract = {
         "version": 1,
         "robot": robot,
@@ -21,7 +48,7 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
         "com_body": spec.com_body,
         "tracked_bodies": list(spec.tracked_bodies),
         "joint_names": list(spec.joint_names),
-        "reward_config": asdict(TrackingRewardCfg.for_joint_names(spec.joint_names)),
+        "reward_config": reward_config,
         "action_scale": spec.action_scale,
     }
     if robot == "khan_mini":
@@ -39,7 +66,10 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
                       ("actuator_delay", "actuator_delay_max_ms", "reset_root_z_offset")
                       if key in env_config},
         )
-        context = SimContextLayout(spec.num_joints, "khan_dr_v1")
+        # An absent field denotes the historical contract, never a new-run
+        # default. This keeps v6/v7 checkpoint validation unchanged.
+        kind = resolve_context_layout(robot, env_config.get("context_layout") or "khan_dr_v1")
+        context = SimContextLayout(spec.num_joints, kind)
         contract["simulation_schema"] = {
             **settings,
             "actuator_delay_enabled_in_training": settings["actuator_delay"] and env_config.get("domain_randomization", True),
@@ -75,6 +105,37 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
                 "delay_initial_pending_target": "first_processed_command_after_encoder_bias",
                 "delay_reset_scope": "only_reset_worlds_first_control_step_all_substeps",
             })
+        if kind in ("khan_dr_v2", "khan_dr_v3"):
+            contract["version"] = 8
+            schema = contract["simulation_schema"]
+            del schema["ankle_armature_joint_order"]
+            schema["lower_body_armature_joint_order"] = list(KHAN_LOWER_BODY_JOINTS)
+            randomization = schema["dynamics_randomization"]
+            del randomization["ankle_armature_factor"]
+            randomization["lower_body_armature_factor"] = {
+                "range": [0.8, 1.2], "mode": "startup", "independent_per_joint": True,
+            }
+            randomization["com_offset_m"] = {
+                "range": [[-0.035, 0.035], [-0.07, 0.07], [-0.07, 0.07]],
+                "mode": "startup", "body": spec.com_body, "frame": "body_local",
+            }
+        if kind == "khan_dr_v3":
+            contract["version"] = 9
+            contract["simulation_schema"]["foot_mass_body_order"] = list(KHAN_FOOT_BODIES)
+            contract["simulation_schema"]["dynamics_randomization"]["foot_mass_delta_kg"] = {
+                "range": [0.0, 0.2], "mode": "startup", "independent_per_body": True,
+                "bodies": list(KHAN_FOOT_BODIES), "operation": "add_to_nominal",
+                "inertia": "unchanged_COM_point_mass", "com": "unchanged",
+            }
+            foot_reward = TrackingRewardCfg.for_joint_names(spec.joint_names, foot_tracking=True)
+            contract["reward_config"] = asdict(foot_reward)
+            contract["foot_tracking_schema"] = {
+                "bodies": list(KHAN_FOOT_BODIES),
+                "reference_frame": "robot_anchor_xy_yaw_reanchor_reference_z_retained",
+                "aggregation": "mean_of_per_foot_exponentials",
+                "physical_and_imagined": True,
+                "max_step_reward": foot_reward.max_step_reward,
+            }
         if layout == "isaac_khan":
             contract["observation_schema"] = {
                 "future_frames": 5, "history": 5, "goal_dim": 155, "policy_dim": 465,

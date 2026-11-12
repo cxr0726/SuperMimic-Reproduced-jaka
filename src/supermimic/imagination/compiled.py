@@ -38,7 +38,9 @@ class ImagStep:
         cfg = wm.heads.reward_cfg
         self.term_names = (REWARD_TERM_NAMES
                            + (("motion_neck_pos",) if cfg.w_neck_pos else ())
-                           + (("motion_neck_vel",) if cfg.w_neck_vel else ()))
+                           + (("motion_neck_vel",) if cfg.w_neck_vel else ())
+                           + (("motion_foot_pos",) if cfg.w_foot_pos else ())
+                           + (("motion_foot_ori",) if cfg.w_foot_ori else ()))
         self._fn = self._step
         if compile_mode:
             mode = None if compile_mode == "default" else compile_mode

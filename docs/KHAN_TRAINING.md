@@ -1,5 +1,10 @@
 # Khan_mini 训练适配
 
+> **历史配置说明（2026-11-12）**：本页记录此前的v6/v7、ξ91训练适配。
+> 当前 `feat/official-window-value-normalization` 分支使用v9契约、`khan_dr_v3`、ξ101，
+> 已增加下肢startup armature、扩大COM范围、独立双脚附重与足部跟踪奖励。
+> 服务器启动与旧检查点兼容规则见 [当前分支说明](KHAN_OFFICIAL_PORT.md)。
+
 2026-11-09动作与goal更新：新Khan训练默认采用下一帧参考残差动作（beta=1、alpha=0.5），
 并仅给actor编码器的参考高度／关节角加入±0.01 m／±0.05 rad均匀噪声。
 环境原始goal、参考直通分支、critic、奖励和WM状态保持干净；不增加目标限幅。

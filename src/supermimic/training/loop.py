@@ -15,6 +15,7 @@ from supermimic.config import TrainConfig, resolve_training_observations
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
 from supermimic.envs.mdp.reset_sampling import reset_diagnostic_metrics
+from supermimic.envs.mdp.rewards import TrackingRewardCfg
 from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.observation_layout import goal_dimension
@@ -204,6 +205,7 @@ class Trainer:
                 future_frames=cfg.env.future_frames,
                 history_length=cfg.policy.history,
                 observation_layout=cfg.env.observation_layout,
+                context_layout=cfg.env.context_layout,
                 episode_length_s=cfg.env.episode_length_s,
                 action_noise_std=cfg.env.action_noise_std,
                 obs_noise=cfg.env.obs_noise,
@@ -238,7 +240,13 @@ class Trainer:
         robot = env.scene["robot"]
 
         fk = G1Kinematics(robot_spec.load_model(), device=self.device)
-        heads = AnalyticHeads(fk, robot_spec.tracked_bodies, robot_spec.anchor_body, robot_spec.root_body, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
+        heads = AnalyticHeads(
+            fk, robot_spec.tracked_bodies, robot_spec.anchor_body, robot_spec.root_body,
+            robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone(),
+            reward_cfg=TrackingRewardCfg.for_joint_names(
+                robot_spec.joint_names, foot_tracking=cfg.env.context_layout == "khan_dr_v3",
+            ),
+        )
         action_term = env.action_manager.get_term("joint_pos")
         q_default = robot.data.default_joint_pos[0].clone()
         scale = torch.as_tensor(action_term._scale, device=self.device).expand_as(

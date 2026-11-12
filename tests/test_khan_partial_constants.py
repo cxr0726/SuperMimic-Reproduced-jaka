@@ -27,7 +27,9 @@ DERIVED = {
 
 
 def test_khan_armature_event_retains_reset_sampling_without_global_recompute():
-    cfg = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused.npz"], robot="khan_mini"))
+    cfg = make_env_cfg(SuperMimicEnvCfgArgs(
+        npz_files=["unused.npz"], robot="khan_mini", context_layout="khan_dr_v1",
+    ))
     term = cfg.events["ankle_armature"]
     assert term.func is khan_joint_armature and term.mode == "reset"
     assert term.params["ranges"] == (0.8, 1.2)
@@ -42,7 +44,8 @@ def _make_env(*, stock=False):
     if not torch.cuda.is_available() or not NPZ.is_file():
         pytest.skip("needs CUDA and converted Khan LAFAN1")
     args = SuperMimicEnvCfgArgs(
-        npz_files=[str(NPZ)], robot="khan_mini", num_envs=8, replay_capacity=64,
+        npz_files=[str(NPZ)], robot="khan_mini", context_layout="khan_dr_v1",
+        num_envs=8, replay_capacity=64,
         action_noise_std=0.0, obs_noise=False, reset_noise=False,
         sampling_mode="start", seed=73,
     )

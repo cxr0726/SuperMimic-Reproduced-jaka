@@ -2,7 +2,7 @@
 
 分支：`feat/official-window-value-normalization`。基于官方 SuperMimic
 `5efbf114e11f725c31d83e217be987c13c0e4ce2`，在现有 Khan 框架内适配。
-`main` 上已有训练方案保持在原提交。请为本次恢复参考残差的新配置新建训练 run；
+`main` 上已有训练方案保持在原提交。请为当前新配置新建训练 run；
 历史策略仍按其 checkpoint 保存的动作和网络配置 play/export。
 
 ## 默认组件
@@ -16,7 +16,7 @@
 | WM 输入 | 状态、物理 PD 目标分别运行均值/方差归一化；ξ 保持范围归一化 |
 | WM 隐层 | 2048/2048/2048，Linear→LayerNorm→GELU |
 | 想象终止 | 解析软阈值，softness=0.05；不训练 termination MLP |
-| critic | bootstrap、GAE target 仅上界限制，Khan 为 0.112/(1−0.99)=11.2 |
+| critic | bootstrap、GAE target 仅上界限制，当前Khan为0.122/(1−0.99)=12.2 |
 | actor 输入 | obs/goal 运行归一化，输入维度仍为 465＋155=620 |
 | actor 动作 | **参考残差动作**，PD target=`q_ref_raw(t+1)+0.5*decoder_output`，beta=1 |
 | actor 网络 | encoder1024/512/256，decoder2048/1024/512/256，隐藏层均为LayerNorm/GELU，latent32 |
@@ -24,7 +24,7 @@
 | Actor EMA | 0.995，采集/优化使用 live；eval/export 默认自动选择 EMA |
 
 保留当前 clip 内分 bin、尾 bin 合并、物理及想象 H32 合法性、15 body/颈关节奖励、
-base_link anchor、91 维 ξ、Khan DR、reset 实际 root 抬高 0.05m、5/5 observation
+base_link anchor、Khan DR、reset 实际 root 抬高 0.05m、5/5 observation
 窗口以及原有优化参数和学习率调度。执行器 delay 和参考 FK 编译默认关闭。
 WM、Actor、Critic隐藏层均为Linear→LayerNorm→GELU。encoder最终latent仍经tanh，
 decoder动作输出和critic价值输出仍为普通Linear，不添加输出归一化或限幅。
@@ -84,6 +84,82 @@ ONNX 内嵌全部 actor 统计，C++ 不要再次标准化。EMA 的统计 buffe
 此前本分支180k/200k使用default动作，它们仍按原配置play/export，但不能直接resume
 到本次reference-residual动作；训练入口会在加载权重前拒绝动作契约不匹配。
 相同配置的reference-residual checkpoint可以继续恢复。
+
+## 下肢 startup armature 随机化（khan_dr_v2）
+
+v2阶段使用 `khan_dr_v2`；当前新训练使用下文的v3，旧v2保持可用。
+双腿各6轴（hip pitch/roll/yaw、knee、ankle pitch/roll）共12轴的armature
+分别乘 `U(0.8,1.2)`，每个并行世界仅在startup采样一次，所有reset保持不变。
+不包含腰部和上肢。名义关节参数保持原值；踝pitch/roll仍为0.02/0.01。
+Kp/Kd仍为每次reset独立乘 `U(0.8,1.2)`。
+
+`waist_yaw_Link`局部COM在startup采样：x±0.035m，y/z±0.07m；
+此前范围分别为±0.025m、±0.05m，本次扩大40%。腰部附加质量−2..3kg
+及其他随机化保持原语义；脚部质量和奖励尚未修改，服务器delay默认关闭。
+这不是整机COM直接移动上述距离。
+
+ξ扩展为99维：摩擦1、encoder bias27、COM3、Kp27、Kd27、下肢armature12、
+腰部附加质量1、delay1。armature来自实际模型字段读回，按上述双腿顺序排列；
+COM的范围归一化除数同步设为0.035/0.07/0.07。WM输入193维，critic613维；
+actor仍620维。startup事件通过mjlab标准常量刷新，reset不再刷新armature。
+
+历史检查点缺少env.context_layout时按其WM保存值或旧khan_dr_v1加载；
+旧v1仍为91维ξ、四个踝轴reset随机化及旧COM范围，用于play/eval/export。
+新v2记录独立的v8机器人契约，不能把v1的WM/critic直接resume到v2；请新建run。
+
+v2验证（2026-11-12）：纯CPU回归745通过；实际CUDA环境验证startup、partial/自动reset、
+ξ读回及MuJoCo派生常量，与CPU64常量计算在既有10ppm容差内一致。
+本地完整8452 PT、8环境运行50步，执行WM40/actor4/critic80次优化，参数全部有限；
+恢复后再运行50步成功。网络、batch及优化参数采用当前训练值；本机显存测试
+单独开启activation checkpoint，服务器默认仍关闭。旧official200k EMA与
+旧residual160k live检查点均按v1成功加载并前向。上述短测验证链路正确，
+不代替新配置的收敛、sim2real与单腿表现评估。
+
+## 双脚附加质量与独立跟踪（khan_dr_v3）
+
+当前新训练、NPZ及PT服务器脚本均选择 `khan_dr_v3`。在v2基础上增加：
+
+- 左右 `ankle_roll_Link` 各自独立在startup采样附加质量 `U(0,0.2) kg`，
+  加到原始质量上，均值0.1kg；后续完整、局部和自动reset保持，不累加。
+  假设附加点质量在该body原始COM处，保持局部COM和绕COM旋转惯量；
+  这是点载荷近似，不是未知真实足部质量分布的惯量校准。标准startup刷新派生常量。
+- ξ保留v2前99维，末尾加入 `foot_mass_delta` 两维（左、右，单位kg），
+  读回实际body质量减原始质量，范围归一化为 `(delta_mass-0.1)/0.1`。
+  总计101维，WM输入195维，critic615维；actor输入仍为620维。
+- 新增 `motion_foot_pos` / `motion_foot_ori`，各权重0.25，
+  std分别0.1m和0.25rad。两脚各自计算指数奖励后取平均，独立于原15body平均。
+  使用已有xy/yaw reference reanchor，保留参考z与roll/pitch；不消除足部高度差。
+  物理与想象使用同一奖励核、干净参考，想象复用已有FK，不添加contact/滑移项。
+
+对于位置误差e和姿态测地角误差theta，两项分别为：
+
+```text
+r_foot_pos = 0.02*0.25*mean_feet(exp(-||e||² / 0.1²))
+r_foot_ori = 0.02*0.25*mean_feet(exp(-theta² / 0.25²))
+```
+
+原奖励及惩罚权重保持，原始单步上界0.112→0.122，critic理论上界12.2；
+采样器价值尺度及归一化分母同步由实际奖励配置推导。train_ret与benchmark满分
+仍为1，但新旧奖励定义不同，不能只按数值横比。若全部奖励和惩罚统一乘
+0.1/0.122，理想最优策略与项间权重不变，但梯度/value数值也需要一起重标；
+目前没有必要为固定0.1引入这一步。只缩正奖励而保留惩罚则会改变目标权衡。
+
+v3使用v9机器人契约；历史v1/v2仍保持原奖励及质量，正常play/eval/export。
+关闭DR的名义评估不添加足部质量。v3与旧上下文维度/奖励不同，需要新建run；
+PT和NPZ参考数据都不需要重新转换。
+
+```bash
+bash scripts/training/train_khan_compact_server.sh \
+  --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
+  --run-name khan_8452_official_residual_dr_v3_feet_4096 --num-envs 4096
+```
+
+v3验证（2026-11-12，足部权重各0.25）：纯CPU756项通过；实际CUDA下两脚质量
+独立读回、startup跨reset保持、CPU64常量oracle及16随机状态全奖励物理/想象
+逐项一致性通过。完整8452 PT、8环境、50物理步完成WM40/actor4/critic80次优化，
+模型/EMA/优化器状态全部有限，checkpoint记录ξ101、单步上界0.122及sampler g_max12.2。
+网络和batch采用当前正式值；仅本机显存短测开启activation checkpoint，服务器仍关闭。
+旧v1/v2真实checkpoint契约和策略加载仍通过。此处验证实现一致性，效果需重新训练评估。
 
 ## 自举后继边界
 

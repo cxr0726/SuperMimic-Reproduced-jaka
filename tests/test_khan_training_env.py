@@ -32,7 +32,9 @@ NEEDS_CUDA_DATA = pytest.mark.skipif(
 
 def test_khan_config_uses_isaac_observation_and_extends_neck_tracking_reward():
     g1 = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused.npz"]))
-    khan = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused.npz"], robot="khan_mini"))
+    khan = make_env_cfg(SuperMimicEnvCfgArgs(
+        npz_files=["unused.npz"], robot="khan_mini", context_layout="khan_dr_v2",
+    ))
     spec = get_robot_spec("khan_mini")
     assert len(spec.tracked_bodies) == 15
     assert spec.tracked_bodies[0] == spec.root_body == spec.anchor_body == "base_link"
@@ -72,7 +74,12 @@ def test_khan_config_uses_isaac_observation_and_extends_neck_tracking_reward():
         assert term.time_out == original.time_out
         assert term.params == original.params
     assert khan.events["base_com"].params["asset_cfg"].body_names == (spec.com_body,)
-    assert khan.events["base_com"].params["ranges"] == g1.events["base_com"].params["ranges"]
+    assert khan.events["base_com"].params["ranges"] == {
+        0: (-0.035, 0.035), 1: (-0.07, 0.07), 2: (-0.07, 0.07),
+    }
+    assert g1.events["base_com"].params["ranges"] == {
+        0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05),
+    }
     for name in ("encoder_bias", "foot_friction"):
         assert khan.events[name].func is g1.events[name].func
         assert khan.events[name].mode == g1.events[name].mode == "reset"
@@ -96,7 +103,8 @@ def setup_khan():
     if not torch.cuda.is_available() or not NPZ.is_file():
         pytest.skip("needs CUDA and converted Khan LAFAN1")
     env = make_env(SuperMimicEnvCfgArgs(
-        npz_files=[str(NPZ)], robot="khan_mini", num_envs=8, replay_capacity=64,
+        npz_files=[str(NPZ)], robot="khan_mini", context_layout="khan_dr_v2",
+        num_envs=8, replay_capacity=64,
         obs_noise=False, seed=19,
     ), device="cuda:0")
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -128,7 +136,7 @@ def test_khan_spaces_observation_reward_history_and_replay(setup_khan):
     assert obs["policy"].shape == (8, 465)
     assert obs["goal"].shape == (8, 155)
     assert env.action_manager.total_action_dim == 27
-    assert io.read().shape == (8, 67) and rec.ctx.read().shape == (8, 91)
+    assert io.read().shape == (8, 67) and rec.ctx.read().shape == (8, 99)
     assert tuple(robot.joint_names) == spec.joint_names
     assert cmd.cfg.body_names == spec.tracked_bodies
     assert tuple(robot.body_names[index] for index in cmd.body_indexes.tolist()) == spec.tracked_bodies
@@ -191,7 +199,7 @@ def test_khan_spaces_observation_reward_history_and_replay(setup_khan):
     window = buf.sample_windows(32, 8)
     assert window.states.shape == (9, 32, 67)
     assert window.a_exec.shape == window.a_clean.shape == (8, 32, 27)
-    assert window.xi.shape == (32, 91)
+    assert window.xi.shape == (32, 99)
     for value in (window.states, window.a_exec, window.a_clean, window.xi, window.reward):
         assert torch.isfinite(value).all()
     assert 0.05 < (window.a_exec - window.a_clean).std() < 0.2
@@ -215,11 +223,11 @@ def test_khan_domain_randomization_and_reset_noise(setup_khan):
         env.reset()
         _refresh(env, cmd)
         before = rec.ctx.read()
-        assert before.shape == (8, 91)
+        assert before.shape == (8, 99)
         assert ((before[:, 0] >= 0.3) & (before[:, 0] <= 1.2)).all()
         assert before[:, 0].std() > 0.01
         assert before[:, 1:28].abs().max() <= 0.010001
-        limits = torch.tensor([0.025, 0.05, 0.05], device=env.device)
+        limits = torch.tensor([0.035, 0.07, 0.07], device=env.device)
         assert (before[:, 28:31].abs() <= limits + 1e-6).all()
         expected_com_id = robot.indexing.body_ids[robot.body_names.index(spec.com_body)]
         assert rec.ctx.com_body_global == int(expected_com_id)
@@ -299,7 +307,7 @@ def test_khan_root_terminations_and_state_io(setup_khan):
 def test_khan_anchor_goal_matches_reference_pose_in_robot_base_frame(obs_noise):
     """The actual mjlab goal appends one 3+6 anchor pose, with matching noise."""
     env = make_env(SuperMimicEnvCfgArgs(
-        npz_files=[str(NPZ)], robot="khan_mini", num_envs=4,
+        npz_files=[str(NPZ)], robot="khan_mini", context_layout="khan_dr_v2", num_envs=4,
         observation_layout="supermimic",
         anchor_obs=True, obs_noise=obs_noise, reset_noise=False,
         domain_randomization=False, action_noise_std=0.0,

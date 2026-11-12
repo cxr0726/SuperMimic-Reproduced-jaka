@@ -31,14 +31,14 @@ Only the encoder goal is noise-augmented and running-normalized; the reference
 skip uses raw joint positions in radians. Activation recomputation remains disabled.
 Actuator delay is disabled by default for this server experiment; --actuator-delay
 enables held 0–20 ms delay with an immediate first step.
-Khan uses full CAD convex feet, actual root reset clearance 0.05 m and a 605-dim
-critic. Dynamics DR (PD, ankle armature, waist mass) retains the 91-dim context
-including delay. Every incomplete final bin is merged into the preceding bin.
+Khan uses full CAD convex feet, actual root reset clearance 0.05 m and a 615-dim
+critic. Dynamics DR uses a 101-dim context: gains per reset, 12 leg armatures
+at startup, waist mass and COM at startup, including the delay parameter. Every incomplete final bin is merged into the preceding bin.
 Physical reset requires at least 32 remaining reference steps.
 No dataset is downloaded. This branch uses window-value sampling every 20
 physical steps (memory 256), WM input running normalization + LayerNorm/GELU,
 analytic soft termination, actor obs/goal running normalization, actor/critic
-LayerNorm/GELU hidden blocks and critic upper bounds (11.2). Bootstrap successors
+LayerNorm/GELU hidden blocks and critic upper bounds (12.2). Bootstrap successors
 stay within their source clip; physical end timing is unchanged. Use a fresh run.
 
 Options:
@@ -133,7 +133,7 @@ command=(
     "$VENV_PYTHON" -u -m supermimic.scripts.train
     --robot khan_mini --run-name "$RUN_NAME" --log-root "$PROJECT_DIR/logs"
     --data.npz-dir "$DATA_DIR" --env.num-envs "$NUM_ENVS"
-    --env.observation-layout isaac_khan --env.future-frames 5 --policy.history 5
+    --env.observation-layout isaac_khan --env.context-layout khan_dr_v3 --env.future-frames 5 --policy.history 5
     --policy.action-mode "$ACTION_MODE"
     --policy.goal-noise-z "$GOAL_NOISE_Z" --policy.goal-noise-joint-pos "$GOAL_NOISE_JOINT_POS"
     --env.actuator-delay "$ACTUATOR_DELAY" --env.delay-reset-first-step-no-delay True
@@ -152,14 +152,16 @@ printf '[INFO] Khan clips: %d; parallel environments: %s; learning batch: 4096; 
 printf '[INFO] Khan observations: future/history 5/5; goal 155; policy 465; activation recomputation: OFF\n'
 printf '[INFO] Actor hidden defaults: encoder 1024/512/256; decoder 2048/1024/512/256; EMA decay 0.995; training uses live, inference auto-selects EMA\n'
 printf '[INFO] Actor/Critic hidden blocks: Linear -> LayerNorm -> GELU; bootstrap successor: source-clip clamped\n'
-printf '[INFO] Official port defaults: window_value sampler; horizon 20; memory 256; WM input running norm + LayerNorm/GELU; analytic soft termination; actor obs/goal running norm; critic upper bound 11.2\n'
+printf '[INFO] Official port defaults: window_value sampler; horizon 20; memory 256; WM input running norm + LayerNorm/GELU; analytic soft termination; actor obs/goal running norm; critic upper bound 12.2\n'
 if [[ "$ACTION_MODE" == default ]]; then
     printf '[INFO] Actions: default; PD target=q_default + 0.5*actor_output; reference skip OFF\n'
 else
     printf '[INFO] Actions: reference_residual; PD target=raw clean q_ref(t+1) + 0.5*decoder_output; beta 1\n'
 fi
 printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; then running normalization; critic/reward stay clean; reference skip uses raw clean radians\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
-printf '[INFO] Khan: xi 91; critic 605; Kp/Kd and ankle armature x0.8-1.2; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$ACTUATOR_DELAY"
+printf '[INFO] Khan: xi 101; critic 615; Kp/Kd x0.8-1.2 per reset; 12 leg armatures x0.8-1.2 at startup; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$ACTUATOR_DELAY"
+printf '[INFO] Foot payload: independent left/right U(0,0.2) kg at startup, authored COM/inertia retained; foot pos/ori reward weights 0.25/0.25; raw reward cap 0.122\n'
+printf '[INFO] Waist local COM offset at startup: x +/-0.035 m, y/z +/-0.07 m\n'
 printf '[INFO] Reset bins: merge every incomplete final bin; require >=32 remaining reference steps; first-step action-rate unchanged\n'
 printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; full convex feet\n'
 printf '[COMMAND]'

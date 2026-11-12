@@ -23,6 +23,7 @@ from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
 from supermimic.eval.benchmark import PolicyWeights, load_policy_from_checkpoint
+from supermimic.robots.contracts import checkpoint_context_layout
 from supermimic.robots.registry import get_robot_spec
 
 
@@ -60,6 +61,7 @@ def main(
         future_frames=cfg["env"]["future_frames"],
         history_length=policy.cfg.history,
         observation_layout=policy.cfg.observation_layout,
+        context_layout=checkpoint_context_layout(cfg),
         episode_length_s=1.0e5,
         action_noise_std=0.0,
         obs_noise=False,

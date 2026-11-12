@@ -53,9 +53,12 @@ def test_extended_context_has_explicit_robot_order_and_normalized_bounds():
 
 
 def test_dr_is_khan_only_and_nominal_evaluation_removes_physical_events():
-    khan = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused.npz"], robot="khan_mini"))
+    khan = make_env_cfg(SuperMimicEnvCfgArgs(
+        npz_files=["unused.npz"], robot="khan_mini", context_layout="khan_dr_v1",
+    ))
     nominal = make_env_cfg(SuperMimicEnvCfgArgs(
-        npz_files=["unused.npz"], robot="khan_mini", domain_randomization=False,
+        npz_files=["unused.npz"], robot="khan_mini", context_layout="khan_dr_v1",
+        domain_randomization=False,
     ))
     g1 = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused.npz"], robot="g1"))
     added = set(khan.events) - set(g1.events)
@@ -75,7 +78,8 @@ def _make_env(dr):
     if not torch.cuda.is_available() or not NPZ.is_file():
         pytest.skip("needs CUDA and converted Khan LAFAN1")
     return make_env(SuperMimicEnvCfgArgs(
-        npz_files=[str(NPZ)], robot="khan_mini", num_envs=8, replay_capacity=64,
+        npz_files=[str(NPZ)], robot="khan_mini", context_layout="khan_dr_v1",
+        num_envs=8, replay_capacity=64,
         action_noise_std=0.0, obs_noise=False, reset_noise=False,
         domain_randomization=dr, sampling_mode="start", seed=73,
     ), device="cuda:0")

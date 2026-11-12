@@ -23,12 +23,14 @@ import torch
 from supermimic.config import EnvCfg, TrainConfig, resolve_training_observations
 from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
+from supermimic.envs.mdp.rewards import TrackingRewardCfg
 from supermimic.eval.benchmark import load_policy_from_checkpoint
 from supermimic.imagination.objective import policy_objective
 from supermimic.imagination.policy_trainer import PolicyTrainer, PolicyTrainerCfg
 from supermimic.imagination.rollout import imagine
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.policy.nets import Critic, CriticCfg, PolicyCfg
+from supermimic.robots.contracts import checkpoint_context_layout
 from supermimic.robots.registry import get_robot_spec
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
@@ -64,6 +66,8 @@ def restore_config(obj, saved):
             restore_config(current, value)
         else:
             setattr(obj, field.name, tuple(value) if isinstance(current, tuple) else value)
+    if isinstance(obj, TrainConfig):
+        obj.env.context_layout = checkpoint_context_layout(saved)
 
 
 def load_benchmark_checkpoint(path, device):
@@ -146,7 +150,10 @@ def main():
     middle, half_range = limits.mean(-1), .5 * (limits[:, 1] - limits[:, 0])
     limits = torch.stack((middle - factor * half_range, middle + factor * half_range), -1)
     heads = AnalyticHeads(G1Kinematics(model, device), spec.tracked_bodies,
-                          spec.anchor_body, spec.root_body, limits, q0)
+                          spec.anchor_body, spec.root_body, limits, q0,
+                          reward_cfg=TrackingRewardCfg.for_joint_names(
+                              spec.joint_names, foot_tracking=cfg.env.context_layout == "khan_dr_v3",
+                          ))
     mapping = ({name: checkpoint["wm"][name] for name in ("action_scale", "action_offset")}
                if cfg.world_model.input_normalization else {})
     wm = WorldModel(cfg.world_model, heads, device, **mapping)

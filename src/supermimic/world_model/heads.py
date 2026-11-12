@@ -16,6 +16,7 @@ import torch
 from supermimic.envs.mdp.rewards import (
     NECK_JOINT_NAMES,
     TrackingRewardCfg,
+    foot_body_indices,
     reanchor_reference,
     tracking_reward_terms,
 )
@@ -139,6 +140,10 @@ class AnalyticHeads:
         self.reward_cfg = reward_cfg or TrackingRewardCfg.for_joint_names(joint_names)
         if (self.reward_cfg.w_neck_pos or self.reward_cfg.w_neck_vel) and not self.neck_joint_ids:
             raise ValueError("Neck tracking reward requires neck joints in the FK model")
+        self.foot_body_ids = (
+            foot_body_indices(tracked_body_names)
+            if self.reward_cfg.w_foot_pos or self.reward_cfg.w_foot_ori else ()
+        )
 
     def robot_bodies(self, s: torch.Tensor) -> dict[str, torch.Tensor]:
         out = self.fk(s[..., :self.fk.nq], s[..., self.fk.nq:])
@@ -174,6 +179,7 @@ class AnalyticHeads:
             ref_joint_pos=ref.joint_pos,
             ref_joint_vel=ref.joint_vel,
             neck_joint_ids=self.neck_joint_ids,
+            foot_body_ids=self.foot_body_ids,
         )
 
     @staticmethod

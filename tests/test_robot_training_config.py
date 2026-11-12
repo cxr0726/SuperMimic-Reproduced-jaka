@@ -18,6 +18,7 @@ from supermimic.envs.tracking_env_cfg import (
     make_env_cfg,
 )
 from supermimic.robots.registry import get_robot_spec
+from supermimic.sim_context import SimContextLayout
 from supermimic.training.loop import Trainer
 
 
@@ -49,34 +50,52 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
         "motion_body_lin_vel": 1.0, "motion_body_ang_vel": 1.0,
         "action_rate_l2": -0.1, "joint_limit": -2.0,
         "motion_neck_pos": 0.5, "motion_neck_vel": 0.1,
+        "motion_foot_pos": 0.25, "motion_foot_ori": 0.25,
     }
+    assert sum(max(0.0, term.weight) for term in khan.rewards.values()) * .02 == pytest.approx(.122)
     assert khan.terminations == g1.terminations
     assert khan.terminations["root_height"].params["threshold"] == 0.25
     assert khan.terminations["root_tilt"].params["threshold"] == 0.8
     assert khan.terminations["time_out"].time_out and khan.terminations["clip_end"].time_out
     assert set(khan.events) - set(g1.events) == (
-        {"actuator_gains", "ankle_armature", "waist_mass"} if randomized else set()
+        {"actuator_gains", "lower_body_armature", "waist_mass", "foot_mass"} if randomized else set()
     )
     for name in g1.events:
         a, b = asdict(khan.events[name]), asdict(g1.events[name])
-        # The event operation is identical; only the selected body/geom differs.
+        # COM bounds are robot-specific; the event operation is identical.
         asset_a = a["params"].pop("asset_cfg")
         asset_b = b["params"].pop("asset_cfg")
         for key in ("body_names", "geom_names"):
             asset_a.pop(key)
             asset_b.pop(key)
+        if name == "base_com":
+            a["params"].pop("ranges")
+            b["params"].pop("ranges")
         assert asset_a == asset_b
         assert a == b
     if randomized:
         assert tuple(g1.events) == ("base_com", "encoder_bias", "foot_friction")
         assert tuple(khan.events) == (
             "base_com", "encoder_bias", "foot_friction",
-            "actuator_gains", "ankle_armature", "waist_mass",
+            "actuator_gains", "lower_body_armature", "waist_mass", "foot_mass",
         )
         assert khan.events["base_com"].mode == "startup"
         assert khan.events["base_com"].params["ranges"] == {
-            0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05)
+            0: (-0.035, 0.035), 1: (-0.07, 0.07), 2: (-0.07, 0.07)
         }
+        armature = khan.events["lower_body_armature"]
+        assert armature.mode == "startup"
+        assert armature.params["ranges"] == (0.8, 1.2)
+        assert len(armature.params["asset_cfg"].joint_names) == 12
+        assert khan.events["actuator_gains"].mode == "reset"
+        foot_mass = khan.events["foot_mass"]
+        assert foot_mass.mode == "startup"
+        assert foot_mass.params["operation"] == "add"
+        assert foot_mass.params["ranges"] == (0.0, 0.2)
+        assert foot_mass.params["shared_random"] is False
+        assert foot_mass.params["asset_cfg"].body_names == (
+            "Left_ankle_roll_Link", "Right_ankle_roll_Link",
+        )
         assert khan.events["base_com"].params["asset_cfg"].body_names == ("waist_yaw_Link",)
         assert khan.events["encoder_bias"].mode == "reset"
         assert khan.events["encoder_bias"].params["bias_range"] == (-0.01, 0.01)
@@ -102,7 +121,7 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
     assert action_a == action_b
     assert action_a["noise_std"] == 0.1
     command_a, command_b = asdict(khan.commands["motion"]), asdict(g1.commands["motion"])
-    assert command_a.pop("g_max") == pytest.approx(11.2)
+    assert command_a.pop("g_max") == pytest.approx(12.2)
     assert command_b.pop("g_max") == pytest.approx(10.0)
     assert command_a.pop("reset_root_z_offset") == 0.05
     assert command_b.pop("reset_root_z_offset") == 0.0
@@ -152,7 +171,7 @@ def test_robot_bindings_and_g1_compatibility_defaults():
     assert cfg.events["foot_friction"].params["asset_cfg"].geom_names == khan.foot_geom_regex
     assert cfg.recorders["replay"].params == {
         "capacity": 1000, "foot_geom_regex": khan.foot_geom_regex,
-        "com_body_name": khan.com_body, "context_layout": "khan_dr_v1",
+        "com_body_name": khan.com_body, "context_layout": "khan_dr_v3",
     }
     model = khan.load_model()
     assert all(name in [model.body(i).name for i in range(model.nbody)] for name in khan.tracked_bodies)
@@ -167,6 +186,8 @@ def test_robot_bindings_and_g1_compatibility_defaults():
 def test_production_compact_encoder_and_ema_preserve_optimizer_defaults():
     cfg = TrainConfig(robot="khan_mini")
     resolve_training_observations(cfg)
+    assert cfg.env.context_layout == cfg.world_model.state_spec.context_layout == "khan_dr_v3"
+    assert SimContextLayout(27, kind=cfg.env.context_layout).dim == 101
     assert cfg.world_model.hidden == (2048, 2048, 2048)
     assert cfg.policy.encoder_hidden == (1024, 512, 256)
     assert cfg.policy.decoder_hidden == (2048, 1024, 512, 256)

@@ -14,6 +14,7 @@ from supermimic.observation_layout import (
 )
 from supermimic.policy.nets import CriticCfg, PolicyCfg
 from supermimic.robots.registry import RobotName
+from supermimic.sim_context import ContextKind, resolve_context_layout
 from supermimic.world_model.wm_trainer import WMTrainerCfg
 from supermimic.world_model.world_model import WorldModelCfg
 
@@ -46,6 +47,7 @@ class EnvCfg:
     replay_capacity: int = 1000
     future_frames: int | None = None  # robot/layout default: G1=10, Khan Isaac=5
     observation_layout: Literal["auto", "supermimic", "isaac_khan"] = "auto"
+    context_layout: ContextKind | None = None  # None resolves fresh robot defaults.
     compact_library: bool = False
     reference_fk_compile: bool = False  # Opt-in: benchmark CUDA compact FK on the target GPU
     merge_short_tail_bins: bool | None = None  # Training default: Khan on, original G1 off
@@ -108,9 +110,8 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
     from supermimic.robots.registry import get_robot_spec, resolve_robot_environment
 
     robot = get_robot_spec(cfg.robot)
-    from supermimic.sim_context import context_kind_for_robot
-
-    cfg.world_model.state_spec.context_layout = context_kind_for_robot(cfg.robot)
+    cfg.env.context_layout = resolve_context_layout(cfg.robot, cfg.env.context_layout)
+    cfg.world_model.state_spec.context_layout = cfg.env.context_layout
     settings = resolve_robot_environment(
         cfg.robot, actuator_delay=cfg.env.actuator_delay,
         actuator_delay_max_ms=cfg.env.actuator_delay_max_ms,

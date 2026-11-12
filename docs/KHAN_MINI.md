@@ -135,11 +135,13 @@ pitch 为 **Kp=80、Kd=2、armature=0.02 kg·m²**，roll 为 **Kp=20、Kd=1、a
 其他关节的参数、力矩及速度元数据不变。旧版的0.069/0.0066是AB电机惯量反射到PR零位的
 固定对角近似，本次不再作为标称值。生成器、XML、profile与来源记录同步更新，重建不会恢复旧值。
 
-Khan训练默认对这四个踝armature每回合独立乘U[0.8,1.2]，因此pitch范围为0.016–0.024，
-roll范围为0.008–0.012 kg·m²；全27关节Kp/Kd也各自独立乘U[0.8,1.2]。
-腰部附重在startup采样−2～3 kg，作为COM处点质量增减，不修改该body的旋转惯量；
-nominal eval关闭这些随机化，使用本表标称值。完整DR、ξ91与checkpoint v6语义见
-[KHAN_TRAINING.md](KHAN_TRAINING.md)。
+当前feat分支的 `khan_dr_v3` 对双腿12轴armature在startup独立乘U[0.8,1.2]，
+reset保持；踝pitch范围仍为0.016–0.024、roll为0.008–0.012 kg·m²。
+全27关节Kp/Kd仍在每次reset各自独立乘U[0.8,1.2]。腰部startup附重−2～3 kg，
+左右脚startup各自独立附重0～0.2 kg，均采用原COM处点质量近似，不修改旋转惯量；
+腰部局部COM范围为x±0.035 m、y/z±0.07 m。nominal eval关闭这些随机化，使用本表标称值。
+完整DR、ξ101、足部奖励及v9检查点语义见 [当前分支说明](KHAN_OFFICIAL_PORT.md)。
+此前四踝reset随机化、ξ91与v6/v7语义保留于 [历史训练说明](KHAN_TRAINING.md)。
 
 **历史对照（2026-11-03，pitch=0.3与0.03，roll仍为0.016）：** 用 `khan_lafan1_delay_covex/ckpt_0100000.pt`
 在mixed全部480动作上进行零样本物理参数对照。固定checkpoint、0c6f13d代码、480并行环境、

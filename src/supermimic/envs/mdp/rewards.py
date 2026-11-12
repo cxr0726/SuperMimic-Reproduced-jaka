@@ -21,11 +21,14 @@ from typing import TYPE_CHECKING
 import torch
 from mjlab.utils.lab_api.math import quat_apply, quat_box_minus, quat_inv, quat_mul, yaw_quat
 
+from supermimic.sim_context import KHAN_FOOT_BODIES
+
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
     from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 NECK_JOINT_NAMES = ("Neck_yaw_joint", "Neck_pitch_joint")
+KHAN_FOOT_BODY_NAMES = KHAN_FOOT_BODIES
 
 
 @dataclass
@@ -48,18 +51,25 @@ class TrackingRewardCfg:
     std_neck_vel: float = 1.0
     w_neck_pos: float = 0.0
     w_neck_vel: float = 0.0
+    std_foot_pos: float = 0.1
+    std_foot_ori: float = 0.25
+    w_foot_pos: float = 0.0
+    w_foot_ori: float = 0.0
     dt: float = 0.02
 
     @classmethod
-    def for_joint_names(cls, joint_names: Sequence[str]) -> TrackingRewardCfg:
-        """Enable reference neck tracking for Khan while retaining the G1 reward."""
+    def for_joint_names(
+        cls, joint_names: Sequence[str], *, foot_tracking: bool = False,
+    ) -> TrackingRewardCfg:
+        """Keep legacy rewards unless foot tracking is explicitly enabled."""
+        cfg = cls(w_foot_pos=0.25, w_foot_ori=0.25) if foot_tracking else cls()
         if set(NECK_JOINT_NAMES).issubset(joint_names):
-            return cls(w_neck_pos=0.5, w_neck_vel=0.1)
-        return cls()
+            cfg.w_neck_pos, cfg.w_neck_vel = 0.5, 0.1
+        return cfg
 
     @property
     def max_step_reward(self) -> float:
-        return self.dt * (self.w_body_pos + self.w_body_ori + self.w_body_lin_vel + self.w_body_ang_vel + self.w_root_pos + self.w_root_ori + self.w_neck_pos + self.w_neck_vel)
+        return self.dt * (self.w_body_pos + self.w_body_ori + self.w_body_lin_vel + self.w_body_ang_vel + self.w_root_pos + self.w_root_ori + self.w_neck_pos + self.w_neck_vel + self.w_foot_pos + self.w_foot_ori)
 
 
 def joint_tracking_error_exp(
@@ -92,6 +102,66 @@ def motion_neck_velocity_error_exp(
     return joint_tracking_error_exp(
         robot.data.joint_vel[:, asset_cfg.joint_ids],
         command.joint_vel[:, asset_cfg.joint_ids], std,
+    )
+
+
+def foot_position_tracking_exp(
+    actual: torch.Tensor, reference: torch.Tensor, std: float,
+) -> torch.Tensor:
+    """Two independent foot kernels, averaged after exponentiation.
+
+    Both inputs are world-frame positions after the usual reference xy/yaw
+    re-anchoring. Reference height is retained, rather than subtracting each
+    pose's own root height. These are clean physical/FK quantities, not actor
+    observations or noisy goal tensors.
+    """
+    if std <= 0 or actual.shape[-2:] != (2, 3) or reference.shape != actual.shape:
+        raise ValueError("Foot position tracking requires two matching foot poses and a positive std")
+    return torch.exp(-(reference - actual).square().sum(-1) / std**2).mean(-1)
+
+
+def foot_orientation_tracking_exp(
+    actual: torch.Tensor, reference: torch.Tensor, std: float,
+) -> torch.Tensor:
+    """Mean of the two foot orientation kernels (geodesic angles in radians)."""
+    if std <= 0 or actual.shape[-2:] != (2, 4) or reference.shape != actual.shape:
+        raise ValueError("Foot orientation tracking requires two matching foot poses and a positive std")
+    return torch.exp(-_sq_quat_err(reference, actual) / std**2).mean(-1)
+
+
+def foot_body_indices(
+    tracked_body_names: Sequence[str], body_names: Sequence[str] = KHAN_FOOT_BODY_NAMES,
+) -> tuple[int, int]:
+    """Resolve the ordered feet in the tracked-body tensors, not entity body IDs."""
+    if len(body_names) != 2 or len(set(body_names)) != 2:
+        raise ValueError("Foot tracking requires two distinct foot body names")
+    try:
+        return tuple(tracked_body_names.index(name) for name in body_names)
+    except ValueError as exc:
+        raise ValueError("Foot tracking requires both feet in the tracked bodies") from exc
+
+
+def motion_foot_position_error_exp(
+    env: ManagerBasedRlEnv, command_name: str, std: float,
+    body_names: Sequence[str] = KHAN_FOOT_BODY_NAMES,
+) -> torch.Tensor:
+    """Simulator foot position reward with the same re-anchoring as body tracking."""
+    command = env.command_manager.get_term(command_name)
+    ids = foot_body_indices(command.cfg.body_names, body_names)
+    return foot_position_tracking_exp(
+        command.robot_body_pos_w[..., ids, :], command.body_pos_relative_w[..., ids, :], std,
+    )
+
+
+def motion_foot_orientation_error_exp(
+    env: ManagerBasedRlEnv, command_name: str, std: float,
+    body_names: Sequence[str] = KHAN_FOOT_BODY_NAMES,
+) -> torch.Tensor:
+    """Simulator foot orientation reward, independently averaged across the feet."""
+    command = env.command_manager.get_term(command_name)
+    ids = foot_body_indices(command.cfg.body_names, body_names)
+    return foot_orientation_tracking_exp(
+        command.robot_body_quat_w[..., ids, :], command.body_quat_relative_w[..., ids, :], std,
     )
 
 
@@ -144,6 +214,7 @@ def tracking_reward_terms(
     ref_joint_pos: torch.Tensor | None = None,
     ref_joint_vel: torch.Tensor | None = None,
     neck_joint_ids: Sequence[int] = (),
+    foot_body_ids: Sequence[int] = (),
 ) -> dict[str, torch.Tensor]:
     """Per-term weighted, dt-scaled rewards (N,) plus 'total'."""
     ra_pos = robot_body_pos_w[..., anchor_index, :]
@@ -188,6 +259,17 @@ def tracking_reward_terms(
         terms["motion_neck_vel"] = dt * cfg.w_neck_vel * joint_tracking_error_exp(
             joint_vel[..., neck_joint_ids], ref_joint_vel[..., neck_joint_ids], cfg.std_neck_vel,
         )
+    if cfg.w_foot_pos or cfg.w_foot_ori:
+        if len(foot_body_ids) != 2 or len(set(foot_body_ids)) != 2:
+            raise ValueError("Foot tracking rewards require the two tracked foot body IDs")
+        if cfg.w_foot_pos:
+            terms["motion_foot_pos"] = dt * cfg.w_foot_pos * foot_position_tracking_exp(
+                robot_body_pos_w[..., foot_body_ids, :], rel_pos[..., foot_body_ids, :], cfg.std_foot_pos,
+            )
+        if cfg.w_foot_ori:
+            terms["motion_foot_ori"] = dt * cfg.w_foot_ori * foot_orientation_tracking_exp(
+                robot_body_quat_w[..., foot_body_ids, :], rel_quat[..., foot_body_ids, :], cfg.std_foot_ori,
+            )
     total = terms["motion_global_root_pos"]
     for k, v in terms.items():
         if k != "motion_global_root_pos":

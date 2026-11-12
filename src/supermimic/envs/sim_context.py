@@ -5,7 +5,13 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from supermimic.sim_context import ContextKind, KHAN_ANKLE_JOINTS, SimContextLayout
+from supermimic.sim_context import (
+    KHAN_ANKLE_JOINTS,
+    KHAN_FOOT_BODIES,
+    KHAN_LOWER_BODY_JOINTS,
+    ContextKind,
+    SimContextLayout,
+)
 
 XI_DIM = 33
 
@@ -26,7 +32,7 @@ class SimContext:
         self.com_nominal = torch.as_tensor(
             np.array(env.sim.mj_model.body_ipos[self.com_body_global]), dtype=torch.float32, device=env.device
         )
-        if context_layout == "khan_dr_v1":
+        if context_layout in ("khan_dr_v1", "khan_dr_v2", "khan_dr_v3"):
             self._init_khan()
 
     def _init_khan(self) -> None:
@@ -39,7 +45,7 @@ class SimContext:
         buffers = {}
         for actuator in self.robot.actuators:
             if not isinstance(actuator, BuiltinPositionActuator):
-                raise ValueError("khan_dr_v1 requires joint BuiltinPositionActuators")
+                raise TypeError(f"{self.layout.kind} requires joint BuiltinPositionActuators")
             targets.append(torch.as_tensor(actuator.target_ids, device=self.env.device).reshape(-1))
             controls.append(actuator.global_ctrl_ids.reshape(-1))
             buffer = actuator._delay_buffer
@@ -55,10 +61,18 @@ class SimContext:
         self.delay_buffer = next(iter(buffers.values()), None)
         self.kp_nominal = self.env.sim.get_default_field("actuator_gainprm")[self.ctrl_ids, 0]
         self.kd_nominal = -self.env.sim.get_default_field("actuator_biasprm")[self.ctrl_ids, 2]
-        ankle_ids = [self.robot.joint_names.index(name) for name in KHAN_ANKLE_JOINTS]
-        self.ankle_dof_ids = self.robot.indexing.joint_v_adr.reshape(-1)[ankle_ids]
-        self.armature_nominal = self.env.sim.get_default_field("dof_armature")[self.ankle_dof_ids]
+        joints = (KHAN_ANKLE_JOINTS if self.layout.kind == "khan_dr_v1"
+                  else KHAN_LOWER_BODY_JOINTS)
+        armature_ids = [self.robot.joint_names.index(name) for name in joints]
+        self.armature_dof_ids = self.robot.indexing.joint_v_adr.reshape(-1)[armature_ids]
+        if self.layout.kind == "khan_dr_v1":
+            self.ankle_dof_ids = self.armature_dof_ids  # Historical diagnostics.
+        self.armature_nominal = self.env.sim.get_default_field("dof_armature")[self.armature_dof_ids]
         self.mass_nominal = self.env.sim.get_default_field("body_mass")[self.com_body_global]
+        if self.layout.kind == "khan_dr_v3":
+            foot_ids = [self.robot.body_names.index(name) for name in KHAN_FOOT_BODIES]
+            self.foot_body_global_ids = self.robot.indexing.body_ids.reshape(-1)[foot_ids]
+            self.foot_mass_nominal = self.env.sim.get_default_field("body_mass")[self.foot_body_global_ids]
         for value in (self.kp_nominal, self.kd_nominal, self.armature_nominal):
             if not torch.isfinite(value).all() or (value <= 0).any():
                 raise ValueError("Khan gain/armature normalization requires positive nominal parameters")
@@ -84,16 +98,19 @@ class SimContext:
             com = (ipos[self.com_body_global] - self.com_nominal).expand(n, 3)
         bias = self.robot.data.encoder_bias
         values = [friction.reshape(n, 1), bias, com]
-        if self.layout.kind == "khan_dr_v1":
+        if self.layout.kind in ("khan_dr_v1", "khan_dr_v2", "khan_dr_v3"):
             kp = self._field("actuator_gainprm", self.ctrl_ids, 2)[..., 0] / self.kp_nominal
             kd = -self._field("actuator_biasprm", self.ctrl_ids, 2)[..., 2] / self.kd_nominal
-            armature = self._field("dof_armature", self.ankle_dof_ids, 1) / self.armature_nominal
+            armature = self._field("dof_armature", self.armature_dof_ids, 1) / self.armature_nominal
             mass = self._field("body_mass", self.com_body_global, 1).reshape(n, 1) - self.mass_nominal
             # Official explicit/auto reset writes controls (and draws the lag)
             # before record_post_reset. Read it; never sample a second value.
             lag = (self.delay_buffer.current_lags.reshape(n, 1).float()
                    if self.delay_buffer is not None else torch.zeros(n, 1, device=self.env.device))
             values.extend((kp, kd, armature, mass, lag))
+        if self.layout.kind == "khan_dr_v3":
+            # Added point payload at the authored COM: read kg, not a mass factor.
+            values.append(self._field("body_mass", self.foot_body_global_ids, 1) - self.foot_mass_nominal)
         xi = torch.cat(values, dim=-1)
         assert xi.shape == (n, self.xi_dim)
         return xi.clone()

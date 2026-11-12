@@ -48,11 +48,13 @@ def test_default_npz_behavior_preserved(smoke):
     assert args.num_envs == 32 and args.steps == 50 and not args.activation_checkpoint
 
 
-def test_library_config_preserves_production_optimization(smoke, tmp_path):
+@pytest.mark.parametrize("context_layout", [None, "khan_dr_v1", "khan_dr_v2", "khan_dr_v3"])
+def test_library_config_preserves_production_optimization(smoke, tmp_path, context_layout):
     packed = tmp_path / "motions.pt"
     packed.write_bytes(b"CLI placeholder")
     args = smoke.parse_args(["--library", str(packed), "--num-envs", "8", "--steps", "50", "--activation-checkpoint"])
     cfg = smoke.TrainConfig(robot="khan_mini")
+    cfg.env.context_layout = context_layout
     smoke.configure_data_source(cfg, args)
     cfg.env.num_envs = args.num_envs
     cfg.env.observation_layout = args.observation_layout
@@ -62,6 +64,7 @@ def test_library_config_preserves_production_optimization(smoke, tmp_path):
     assert cfg.data.library == packed.resolve() and cfg.data.npz_dir is None
     assert cfg.env.compact_library
     assert result["matches_train_config_optimization_defaults"]
+    assert result["context_layout"] == cfg.env.context_layout == (context_layout or "khan_dr_v3")
     assert result["warmup_iterations"] == 40 and result["lr_schedule_total_iterations"] == 320000
 
 

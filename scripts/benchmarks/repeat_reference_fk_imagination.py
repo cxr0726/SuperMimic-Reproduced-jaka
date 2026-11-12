@@ -29,6 +29,7 @@ from benchmark_reference_fk_imagination import (
 
 from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
+from supermimic.envs.mdp.rewards import TrackingRewardCfg
 from supermimic.imagination.objective import policy_objective
 from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.imagination.rollout import imagine
@@ -146,7 +147,10 @@ def main():
     middle, half_range = limits.mean(-1), .5 * (limits[:, 1] - limits[:, 0])
     limits = torch.stack((middle - factor * half_range, middle + factor * half_range), -1)
     heads = AnalyticHeads(G1Kinematics(model, device), spec.tracked_bodies,
-                          spec.anchor_body, spec.root_body, limits, q0)
+                          spec.anchor_body, spec.root_body, limits, q0,
+                          reward_cfg=TrackingRewardCfg.for_joint_names(
+                              spec.joint_names, foot_tracking=cfg.env.context_layout == "khan_dr_v3",
+                          ))
     mapping = ({name: checkpoint["wm"][name] for name in ("action_scale", "action_offset")}
                if cfg.world_model.input_normalization else {})
     wm = WorldModel(cfg.world_model, heads, device, **mapping)
