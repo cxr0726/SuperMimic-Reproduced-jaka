@@ -552,3 +552,161 @@ Khan 的 benchmark 或实机稳定性。仍需用新 run 与旧策略做受控�
 
 本次训练/导出验证产物位于 `logs/smoke_official_residual_norm_20261112/`；
 smoke仅用于训练链路验证，不是新模式正式训练结果或部署策略。
+
+## 混合Muon训练优化器（2026-11-13）
+
+新训练的WM、Actor与Critic均选择混合Muon，分组参考官方
+`official_ref/supermimic/src/supermimic/learners/learner_utils.py::build_optimizers`：
+每个MLP中间Linear的二维weight使用Muon，首层/末层Linear weight、bias及LayerNorm
+等向量参数使用fused capturable Adam。Muon组weight decay为0.1，Adam组为0；
+“混合Muon”不是将Adam设置为`fused=True`，也不是对所有二维矩阵一概使用Muon。
+模型结构、物理/DR、obs、参考残差动作、采样器、WM10 batch、H32及Critic5×4
+更新预算保持当前配置。相对原Adam，这会改变优化方向并引入Muon组的衰减，属于
+训练算法变更，不能保证相同seed轨迹、收敛速度或最终跟踪/实机性能不变。
+
+| 项目 | 官方SuperMimic | 本次实现 | 本地PartyMimic默认 |
+|---|---|---|---|
+| 中间Linear weight | Muon | Muon | Muon；Actor默认还把首尾矩阵放Muon |
+| 首尾/向量参数 | fused capturable Adam | fused capturable Adam | WM剩余组FlatAdam；Actor向量fused Adam；Critic为FlatAdam |
+| Muon学习率 | Python float，捕获后固定 | GPU标量，原址更新，沿用本仓库cosine schedule | 自定义tensor-LR Muon步骤 |
+| Muon weight decay | PyTorch Muon默认0.1 | 0.1，仅Muon组 | 默认0.1，仅Muon组 |
+| 网络前向autocast | 依其配置 | 不新增，模型/状态张量保持FP32 | 默认MLP BF16 |
+
+Muon所用Newton-Schulz正交化内部会转为BF16，随后把更新转回参数dtype；因此只能
+说网络/状态仍是FP32，不能宣称Muon全部计算均为FP32。该内部BF16也是PyTorch
+Muon/Party实现的一部分，不等同于为WM/Actor网络启用BF16 autocast。
+
+官方Muon使用Python学习率，完整更新捕获后该值固化在图中。本次保留现有cosine
+调度，需要在图中读取稳定地址的GPU学习率；Muon步骤据此适配，学习率在图外
+原址更新，动量及Adam step继续随每次实际更新推进。不能同时声称与官方捕获后
+固定Muon LR逐位相同。切换优化器也不改变checkpoint/ONNX中的网络结构。
+
+两个server wrapper统一新增`--optimizer muon|adam`，默认Muon；该选项同时控制
+WM、Actor和Critic，具体学习率、betas和decay数值由TrainConfig拥有。新实验建议
+使用新的run-name，不把Adam动量直接解释为Muon状态；恢复时会核查优化器算法，
+不匹配则明确报错。旧Adam run使用`--optimizer adam`继续，仍保留CDF/融合等可选
+执行开关。独立trainer dataclass继续默认Adam，避免历史配置缺字段被误读成Muon。
+
+服务器紧凑库新训练示例：
+
+```bash
+bash scripts/training/train_khan_compact_server.sh \
+  --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
+  --run-name khan_8452_muon_4096 \
+  --num-envs 4096 --optimizer muon
+```
+
+旧Adam实验恢复时显式选择原算法，例如：
+
+```bash
+bash scripts/training/train_khan_compact_server.sh \
+  --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
+  --run-name YOUR_ADAM_RUN --num-envs 4096 --optimizer adam \
+  --resume /home/jaka/Workspace/SuperMimic-Reproduced-jaka/logs/YOUR_ADAM_RUN/ckpt_latest.pt
+```
+
+NPZ入口`train_khan_server.sh --data-dir ... --optimizer muon`使用同一套优化器选择。
+`--dry-run`验证路径并打印命令，不读取checkpoint内容；优化器状态兼容性由真实
+训练入口在恢复时核查。
+
+两入口CPU launcher检查78项通过，覆盖默认Muon、显式Adam、覆盖顺序、非法参数、
+原有路径/已有checkpoint保护、环境清理及真实Tyro CLI解析，确认学习预算和
+物理/obs/action配置保持。此检查不启动训练或CUDA，不替代Muon更新的数值/GPU验证。
+环境清单仍为`torch>=2.14.0`，server setup与uv.lock锁定的实测版本为2.14.1+cu130，
+包含Muon及其Newton-Schulz helpers；本次不修改依赖锁版本。
+
+### Muon实现与验证边界
+
+新增`training/optimizers.py`统一组合两种优化器。两组共享一次backward和全模型
+梯度裁剪，随后按官方Adam→Muon的顺序更新各自参数；没有把每个子组分别裁剪。
+Muon使用momentum=0.95、Nesterov、NS5、eps=1e-7、`match_rms_adamw`，更新倍率为
+`0.2*sqrt(max(rows,cols))`；decay使用基础学习率，不乘该shape倍率。
+临时冻结不会改变参数归属；没有梯度的参数由原生优化器跳过。
+
+相同外部梯度、正式网络尺寸、3次计数warmup后捕获并重放，共8次优化，包含变化
+学习率及两次LR=0。对照官方规则构造的原生Torch Muon＋fused capturable Adam：
+
+| 网络 | 参数数 | Muon矩阵 | 最大参数绝对差 |
+|---|---:|---:|---:|
+| WM | 8,941,634 | 2 | 1.17e-10 |
+| Actor | 4,616,507 | 5 | 3.73e-9 |
+| Critic | 191,489 | 1 | 3.73e-9 |
+
+Muon动量逐位相同；学习率张量地址保持，LR=0时所有权重逐位不变，动量与step
+仍按原生优化器规则推进。测试没有把“Muon等同于旧Adam”作为判据。
+
+```bash
+.venv/bin/python scripts/benchmarks/verify_muon_updates.py \
+  --output logs/muon_formal_optimizer_parity.json
+```
+
+完整mjlab验证使用8452紧凑库、8个物理环境，保持正式WM2048³、Actor当前网络、
+WM batch2048/window8/10次、Actor batch4096/H32、Critic5×4和320k调度。
+120个物理步完成WM320/Actor32/Critic640次，EMA32；实际擦除优化器状态和扰动
+权重后的恢复通过。另从该checkpoint重新建立环境，运行60步，完成额外8个学习块，
+累计WM400/Actor40/Critic800、EMA40，两图重建并重放成功，所有参数与优化器状态
+有限。本地为12GB显存启用activation checkpoint，服务器默认仍关闭。
+最终代码的记录：`logs/smoke_khan_muon_final_20261113/summary.json`及
+`logs/smoke_khan_muon_final_resume_20261113/verification.json`。
+
+新checkpoint存储优化器算法及参数name/shape/dtype分组。恢复先验证三份优化器再
+复制模型；历史缺字段按Adam解释，不会静默把Adam动量当Muon momentum。
+模型state_dict和ONNX结构未增加Muon参数。恢复后的40步buffer预填期间，终端未
+计算的学习诊断可能显示nan占位；本次模型/优化器有限性检查与该占位无关。
+
+扩展GPU回归还定位并修复了一个在74b2082上也能复现的兼容问题：关闭编译时，
+TorchScript动态profiling会改变checkpoint重算的saved-tensor计划，可能产生
+metadata不匹配或在CUDA Graph内触发不允许的动态优化。`rotations.py`现在使用
+mjlab保存的完全相同Python函数体，为脚本依赖建立独立globals，解析奖励也
+复用此入口。没有复制/修改公式，没有更改mjlab对象或全局JIT设置。Dynamo原本
+也读取这些原函数体。专项检查覆盖原始函数体身份、上下游隔离、CPU/CUDA及
+FP32/FP64的值与所有输入梯度，另扰动上游ScriptFunction的profiling历史后重复
+执行未编译checkpoint+完整捕获，防止仅靠测试顺序偶然通过。
+该兼容修复也改变了未编译参考FK/物理reward的调度路径，不宣称其带来加速。
+
+另观察到录制期间会自动循环GC并收集对象；旧trainer/graph资源的析构不应发生
+在另一张图录制中。冷capture前先回收，录制期间局部禁用自动GC，finally精确
+恢复进入时的开关状态；不覆盖warmup/replay，不添加优化步。测试包括已关闭GC、
+正常/异常退出，以及body意外开启GC后的恢复；没有使用通用捕获失败后静默fallback。
+
+最终CPU非slow回归902项通过、74项按CUDA/环境条件跳过、14项slow未运行。GPU
+环境专项组合在两个独立进程均103项通过，包含Muon更新、旧Adam捕获、LR/噪声/
+恢复、旋转值及输入梯度、Script profiling历史扰动和GC生命周期。
+日志：`logs/muon_final_release_cpu_20261113.log`及
+`logs/muon_rotation_gc_release_gpu2_20261113.log`、`gpu3`同名前缀文件。
+另补测参考FK编译、Actor/Critic融合、WM整窗融合共41项，均通过；覆盖G1/Khan、
+多查询形状、保留输出生命周期、下游奖励/状态梯度、归一化原址更新及bootstrap
+梯度。首次编译耗时单独存在，不把这组检查当作吞吐量基准。
+日志：`logs/muon_compiled_math_gpu_20261113.log`。
+
+### 仍有差异和值得单独测试的组件
+
+- 当前Critic中间矩阵为Muon/decay0.1，与官方一致；Party Critic则为FlatAdam，
+  全部参数无decay。衰减按每次optimizer step应用：本仓库每学习块WM10次、Actor
+  1次、Critic20次；不能把相同0.1数字当作跨预算的相同累计强度。保持官方baseline
+  后，可独立消融Critic Adam或更小Muon decay，不与其他改动捆绑。
+- 官方Critic每学习块生成一次排列，5个epoch复用；本仓库与Party每epoch重新
+  shuffle。当前图内抽样/CDF、独立图池、cosine LR也不等同官方图外固定输入/
+  共享pool/捕获后固定Muon标量LR。
+- 本仓库仍保留Khan观测、参考残差动作、机器人物理/DR和奖励；Muon迁移没有把
+  这些全部改为G1官方配置，WM表示和积分也没有改变。
+
+优先建议：
+
+1. Party设备端finite gate：同时跳过参数、动量、step与decay，并记录次数。当前
+   仓库和官方都没有此保护；只把非有限梯度置零不等于跳过Adam/Muon更新。
+2. Party WM输出归一化及真实一步增量std损失尺度。当前与官方都主要是输入
+   running norm＋固定误差权重；本仓库需分别推导实际预测correction和完整一步
+   增量，不能把next-state std直接替换out_scale。
+3. Party Critic完整输入RunningNorm。当前与官方实际Critic均无此层（隐层LN不是
+   输入归一化）。迁移时须保证Actor forward/backward期间统计不变，并验证
+   bootstrap对state的梯度。
+4. Party接触匹配/anti-slip想象奖励。需用Khan足底几何标定标签，检查跪地、腾空
+   动作，并分别维护物理采样回报与想象Critic奖励上界，不能直接沿用Vmax12.2。
+5. Party value-gradient consistency。它可能改善bootstrap梯度方向，但涉及额外
+   状态梯度、二阶/近似Jacobian计算及显存；现有detach的Critic前缀缓存不能直接
+   作为该损失的可微输入。
+
+后四项都应独立消融，不能只因参考库包含就承诺收益。以上短测试验证分组、数学
+实现与执行链路；Muon改变优化方向且加入decay，NS内部使用BF16，无法据此证明
+长训练的最终回报、困难动作或实机表现不会下降。

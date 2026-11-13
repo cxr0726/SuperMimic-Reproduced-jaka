@@ -1,9 +1,10 @@
 """Rotation helpers (torch, batched, quaternions in **wxyz**).
 
-Re-exports mjlab's `lab_api.math` primitives so the whole project shares one
-convention with the environment's reward and command code, and adds the few
-operations the world model needs: rotation-vector exp/log, 6D rotation
-representation and heading (yaw) frames.
+Uses the unchanged Python bodies of mjlab's ``lab_api.math`` primitives so the
+project shares its rotation conventions without a TorchScript profiling
+executor inside checkpoint recomputation/CUDA Graph capture. Global mjlab/JIT
+settings remain untouched. Adds rotation-vector exp/log, 6D representation and
+heading (yaw) frames.
 
 All functions are differentiable and work on arbitrary leading batch dims.
 """
@@ -11,18 +12,50 @@ All functions are differentiable and work on arbitrary leading batch dims.
 from __future__ import annotations
 
 import math
+from types import FunctionType
 
 import torch
-from mjlab.utils.lab_api.math import (  # noqa: F401  (re-exported)
-    matrix_from_quat,
-    quat_apply,
-    quat_apply_inverse,
-    quat_conjugate,
-    quat_error_magnitude,
-    quat_from_angle_axis,
-    quat_inv,
-    quat_mul,
-    yaw_quat,
+from mjlab.utils.lab_api import math as _mjlab_math
+
+
+def _python_math_body(function, cache):
+    """Clone a primitive and its scripted dependencies into private globals.
+
+    TorchDynamo already uses ``_torchdynamo_inline`` to access these same
+    bodies. Eager autograd needs them too: TorchScript can change its saved
+    tensor plan between a checkpoint's forward and recomputation, or start
+    profiling an optimized plan during an outer CUDA Graph capture.
+    """
+    if id(function) in cache:
+        return cache[id(function)]
+    body = function if isinstance(function, FunctionType) else getattr(function, "_torchdynamo_inline", None)
+    if not isinstance(body, FunctionType):
+        raise RuntimeError(  # noqa: TRY004 -- dependency compatibility, not a caller's argument type
+            "mjlab rotation primitives must expose their Python body for checkpoint/CUDA Graph safety; "
+            "the installed TorchScript/mjlab API is incompatible"
+        )
+    namespace = dict(body.__globals__)
+    result = FunctionType(body.__code__, namespace, body.__name__, body.__defaults__, body.__closure__)
+    cache[id(function)] = result  # Register before following dependencies/cycles.
+    result.__qualname__, result.__doc__ = body.__qualname__, body.__doc__
+    result.__annotations__ = dict(body.__annotations__)
+    result.__kwdefaults__ = None if body.__kwdefaults__ is None else dict(body.__kwdefaults__)
+    for name in body.__code__.co_names:
+        dependency = namespace.get(name)
+        if (isinstance(dependency, torch.jit.ScriptFunction)
+                or isinstance(dependency, FunctionType) and dependency.__globals__ is body.__globals__):
+            namespace[name] = _python_math_body(dependency, cache)
+    return result
+
+
+_PRIMITIVE_NAMES = (
+    "matrix_from_quat", "quat_apply", "quat_apply_inverse", "quat_conjugate",
+    "quat_error_magnitude", "quat_from_angle_axis", "quat_inv", "quat_mul", "yaw_quat", "quat_box_minus",
+)
+_primitive_cache = {}
+(matrix_from_quat, quat_apply, quat_apply_inverse, quat_conjugate, quat_error_magnitude,
+ quat_from_angle_axis, quat_inv, quat_mul, yaw_quat, quat_box_minus) = (
+    _python_math_body(getattr(_mjlab_math, name), _primitive_cache) for name in _PRIMITIVE_NAMES
 )
 
 _EPS = 1.0e-8

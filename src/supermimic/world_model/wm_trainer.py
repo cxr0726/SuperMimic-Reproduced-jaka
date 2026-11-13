@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 
@@ -11,10 +12,10 @@ from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.training.cuda_graph import (
     CapturedUpdate,
     graph_state,
-    prepare_adam_for_capture,
     replay_sampling_key,
 )
 from supermimic.training.distributed import allreduce_grads, world_size
+from supermimic.training.optimizers import build_training_optimizer, prepare_training_optimizer
 from supermimic.world_model.heads import ReferenceFrame
 from supermimic.world_model.world_model import WorldModel
 
@@ -27,6 +28,8 @@ class WMTrainerCfg:
     lr: float = 2e-4
     grad_clip: float = 1.0
     weight_decay: float = 0.0
+    optimizer: Literal["adam", "muon"] = "adam"  # Standalone/legacy default; fresh training selects Muon.
+    muon_weight_decay: float = 0.1  # Official torch.optim.Muon default, only for intermediate matrices.
     compile: str | None = "default"
     compile_full_window: bool = True
     cuda_graph: bool = False
@@ -45,14 +48,17 @@ class WorldModelTrainer:
         self.wm = wm
         self.lib = lib
         self.cfg = cfg
-        self.opt = torch.optim.Adam(wm.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
         self._device = next(wm.parameters()).device
         self.capture_enabled = cfg.cuda_graph and self._device.type == "cuda" and world_size() == 1
+        self.opt = build_training_optimizer(
+            wm, kind=cfg.optimizer, lr=cfg.lr, adam_weight_decay=cfg.weight_decay,
+            muon_weight_decay=cfg.muon_weight_decay, capture=self.capture_enabled,
+        )
         self.compile_full_window = bool(cfg.compile and cfg.compile_full_window)
         self._buffer: ReplayBuffer | None = None
         self._prepared = None
         if self.capture_enabled:
-            prepare_adam_for_capture(self.opt, self._device)
+            prepare_training_optimizer(self.opt, self._device)
 
         # Reusing a model with a different execution configuration must release
         # the previous callables; neither wrapper belongs in its state_dict.
@@ -94,7 +100,7 @@ class WorldModelTrainer:
         self.update_graph.invalidate()
         self._prepared = None
         if self.capture_enabled:
-            prepare_adam_for_capture(self.opt, self._device)
+            prepare_training_optimizer(self.opt, self._device)
 
     def loss_on(self, w: WindowBatch):
         k, n = w.frame.shape
@@ -149,7 +155,7 @@ class WorldModelTrainer:
         self.update_graph.check_configuration()
         if self.capture_enabled:
             # Restore old Adam checkpoints before the first recording as well.
-            prepare_adam_for_capture(self.opt, self._device)
+            prepare_training_optimizer(self.opt, self._device)
             self._prepared = buffer.prepare_windows(self.cfg.window)
         metrics = self.update_graph()
         # Only CPU diagnostics leave the complete update graph.

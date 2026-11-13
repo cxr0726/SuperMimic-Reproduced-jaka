@@ -84,7 +84,7 @@ class TrainConfig:
         input_normalization=True, hidden_layer_norm=True, hidden_activation="gelu",
         termination_mode="analytic",
     ))
-    wm_trainer: WMTrainerCfg = field(default_factory=lambda: WMTrainerCfg(cuda_graph=True))
+    wm_trainer: WMTrainerCfg = field(default_factory=lambda: WMTrainerCfg(cuda_graph=True, optimizer="muon"))
     # Auto applies only to fresh training. Standalone PolicyCfg/checkpoint loading
     # retains the original action space when these fields are absent.
     policy: PolicyCfg = field(default_factory=lambda: PolicyCfg(
@@ -96,6 +96,7 @@ class TrainConfig:
     ))
     policy_trainer: PolicyTrainerCfg = field(default_factory=lambda: PolicyTrainerCfg(
         critic_value_bound=True, cuda_graph=True, batch_reference_encoder=True,
+        optimizer="muon", critic_optimizer="muon",
     ))
     schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
     resume: Path | None = None

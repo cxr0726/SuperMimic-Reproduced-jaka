@@ -7,13 +7,36 @@ Physical collection and reset remain outside these graphs.
 
 from __future__ import annotations
 
+import gc
 import math
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 
 import torch
 from torch import nn
 
 _UNSET_CONFIGURATION = object()
+
+
+@contextmanager
+def _recording_gc_guard():
+    """Release old cycles before recording, never from inside a CUDA capture.
+
+    Trainers own bound update methods and graph pools, so abandoned trainers
+    can form Python cycles. Their CUDA resources must not be finalized by an
+    automatic collection while another graph is being recorded. Replay and
+    ordinary counted warm-up do not enter this scope.
+    """
+    enabled = gc.isenabled()
+    gc.collect()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
+        else:
+            gc.disable()
 
 
 def replay_sampling_key(buffer) -> tuple | None:
@@ -231,9 +254,10 @@ class CapturedUpdate:
                     torch.cuda.current_stream(device).wait_stream(self._stream)
                     return self._metrics(outputs)
                 torch.cuda.synchronize(device)
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph, stream=self._stream):
-                    self._outputs = self.fn()
+                with _recording_gc_guard():
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=self._stream):
+                        self._outputs = self.fn()
                 self._graph = graph
                 self._identity = self._storage_identity(self.state())
                 self.phase = "capture"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Single-GPU Khan training with current actor/EMA and original optimization values.
+# Single-GPU Khan training with current actor/EMA, hybrid Muon and production schedule.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -14,6 +14,7 @@ UPDATE_CAPTURE=1
 BATCH_REFERENCE_ENCODER=1
 LEARNER_FUSION=1
 REPLAY_SAMPLING=''
+OPTIMIZER=muon
 ACTUATOR_DELAY=False
 ACTION_MODE=reference_residual
 GOAL_NOISE_Z=0.01
@@ -26,7 +27,11 @@ Usage: bash scripts/training/train_khan_server.sh [options]
 Single GPU, Khan_mini, current repository training parameters.
 Encoder hidden layers are 1024/512/256; decoder is 2048/1024/512/256.
 Actor EMA decay is 0.995.
-Optimization, H=32, UTD=0.4 and LR schedule reuse the repository defaults.
+H=32, UTD=0.4 and the LR schedule reuse the repository defaults.
+WM, Actor and Critic use hybrid Muon: hidden matrices use Muon with decay 0.1;
+input/output Linear weights, biases and LayerNorm use fused capturable Adam with
+zero decay. --optimizer adam selects the previous Adam path for all three.
+Network/state tensors stay FP32; Muon's Newton-Schulz calculation internally uses BF16.
 Khan uses the Isaac observation layout: 5 reference
 frames, 5 history frames, goal 155 and policy input 465. The encoder goal has
 uniform z +/-0.01 m and q +/-0.05 rad noise; critic/reward stay clean.
@@ -62,6 +67,7 @@ Options:
   --learner-fusion          Compile full WM window and Actor/Critic blocks (default)
   --no-learner-fusion       Use the d98f4df single-step compilation boundary
   --replay-sampling MODE    cdf (default) or multinomial; same legal-pair distribution
+  --optimizer MODE          muon (default) or adam; selects WM, Actor and Critic together
   --resume PATH               Restore a Khan checkpoint with the same data/configuration
   --stop-after-iterations N   Optional execution limit; retains the 320k LR schedule
   --dry-run                  Validate paths and print the command without importing CUDA or training
@@ -69,6 +75,8 @@ Options:
 
 The default run executes up to 320000 vectorized control steps. Use a new
 run-name for a fresh run; existing checkpoints are never silently overwritten.
+Start a fresh run when changing optimizer algorithms. To resume an Adam run,
+pass --optimizer adam; training rejects optimizer/checkpoint algorithm mismatch.
 HELP
 }
 
@@ -97,6 +105,7 @@ while (($#)); do
         --learner-fusion) LEARNER_FUSION=1; shift ;;
         --no-learner-fusion) LEARNER_FUSION=0; shift ;;
         --replay-sampling) need_value "$@"; REPLAY_SAMPLING="$2"; shift 2 ;;
+        --optimizer) need_value "$@"; OPTIMIZER="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown option: $1 (use --help)" ;;
@@ -105,6 +114,7 @@ done
 
 positive_integer "$NUM_ENVS" || die '--num-envs must be a positive integer'
 [[ -z "$REPLAY_SAMPLING" || "$REPLAY_SAMPLING" == cdf || "$REPLAY_SAMPLING" == multinomial ]] || die '--replay-sampling must be cdf or multinomial'
+[[ "$OPTIMIZER" == muon || "$OPTIMIZER" == adam ]] || die '--optimizer must be muon or adam'
 [[ -z "$STOP_AFTER" ]] || positive_integer "$STOP_AFTER" || \
     die '--stop-after-iterations must be a positive integer'
 [[ -n "$RUN_NAME" && "$RUN_NAME" != . && "$RUN_NAME" != .. && "$RUN_NAME" != */* \
@@ -158,6 +168,8 @@ command=(
     --env.actuator-delay "$ACTUATOR_DELAY" --env.delay-reset-first-step-no-delay True
     --env.merge-short-tail-bins True --env.tail-bin-merge-fraction 1.0
     --env.reset-min-remaining-steps 32
+    --wm-trainer.optimizer "$OPTIMIZER"
+    --policy-trainer.optimizer "$OPTIMIZER" --policy-trainer.critic-optimizer "$OPTIMIZER"
 )
 # TrainConfig owns the enabled defaults; only append explicit opt-outs.
 if ((!UPDATE_CAPTURE)); then
@@ -182,7 +194,13 @@ fi
 printf '[INFO] Khan clips: %d; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "${#NPZ_FILES[@]}" "$NUM_ENVS"
 printf '[INFO] Learner execution: full-update capture=%s; batched reference encoder=%s; collection/reset unchanged\n' "$UPDATE_CAPTURE" "$BATCH_REFERENCE_ENCODER"
-printf '[INFO] Learner fusion=%s; replay sampling=%s; FP32 and original learning budget retained\n' "$LEARNER_FUSION" "${REPLAY_SAMPLING:-cdf}"
+printf '[INFO] Learner fusion=%s; replay sampling=%s; FP32 model/state tensors and original learning budget retained\n' "$LEARNER_FUSION" "${REPLAY_SAMPLING:-cdf}"
+if [[ "$OPTIMIZER" == muon ]]; then
+    printf '[INFO] WM/Actor/Critic optimizer: hybrid Muon; hidden matrices Muon (decay 0.1); input/output weights and vectors fused capturable Adam (decay 0); live LR follows cosine schedule\n'
+    printf '[INFO] Muon Newton-Schulz internally uses BF16; network autocast remains OFF\n'
+else
+    printf '[INFO] WM/Actor/Critic optimizer: Adam; previous optimizer path; use this to resume matching Adam checkpoints\n'
+fi
 printf '[INFO] Khan observations: future/history 5/5; goal 155; policy 465; activation recomputation: OFF\n'
 printf '[INFO] Actor hidden defaults: encoder 1024/512/256; decoder 2048/1024/512/256; EMA decay 0.995; training uses live, inference auto-selects EMA\n'
 printf '[INFO] Actor/Critic hidden blocks: Linear -> LayerNorm -> GELU; bootstrap successor: source-clip clamped\n'

@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
-from mjlab.utils.lab_api.math import quat_apply, quat_box_minus, quat_inv, quat_mul, yaw_quat
 
+from supermimic.kinematics.rotations import quat_apply, quat_box_minus, quat_inv, quat_mul, yaw_quat
 from supermimic.sim_context import KHAN_FOOT_BODIES
 
 if TYPE_CHECKING:
