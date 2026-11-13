@@ -62,6 +62,18 @@ def test_learning_execution_flags_can_disable_capture_without_changing_batches(p
     assert cfg.policy_trainer.horizon == 32 and cfg.schedule.updates_per_env_step == .4
 
 
+def test_fusion_and_cdf_controls_keep_original_budget(project):
+    result = run_launcher(project, "--dry-run", "--no-learner-fusion", "--replay-sampling", "multinomial")
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    assert not cfg.wm_trainer.compile_full_window and not cfg.policy_trainer.compile_networks
+    assert cfg.replay_sampling == "multinomial"
+    assert cfg.wm_trainer.batches_per_update == 10 and cfg.policy_trainer.critic_epochs == 5
+    assert cfg.wm_trainer.cuda_graph and cfg.policy_trainer.cuda_graph
+    invalid = run_launcher(project, "--dry-run", "--replay-sampling", "invalid")
+    assert invalid.returncode != 0 and "cdf or multinomial" in invalid.stderr
+
+
 @pytest.mark.parametrize("num_envs", [4096, 1024])
 def test_dry_run_selects_isaac_observations_without_overriding_original_optimization(project, num_envs):
     root, _ = project

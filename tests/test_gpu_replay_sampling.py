@@ -23,8 +23,8 @@ def _put(buffer, env, serial, *, terminal=False, start=False, frame=None, clip=0
     )
 
 
-def _ring(device="cpu"):
-    buffer = ReplayBuffer(4, 16, 2, 1, 2, device)
+def _ring(device="cpu", sampling="multinomial"):
+    buffer = ReplayBuffer(4, 16, 2, 1, 2, device, sampling=sampling)
     for env in range(4):
         start = True
         for serial in range(25 + 2 * env):
@@ -69,15 +69,17 @@ def _oracle_starts(buffer, hist, *, horizon=None, ends=None):
     }
 
 
-def test_prepared_masks_equal_independent_ring_oracles_and_storage_is_stable(monkeypatch):
-    buffer = _ring()
+@pytest.mark.parametrize("sampling", ["multinomial", "cdf"])
+def test_prepared_masks_equal_independent_ring_oracles_and_storage_is_stable(monkeypatch, sampling):
+    buffer = _ring(sampling=sampling)
     ends = torch.tensor([32])
     windows = buffer.prepare_windows(3)
     starts = buffer.prepare_starts(4, horizon=4, clip_last=ends)
     assert set(windows.weights.nonzero().flatten().tolist()) == _oracle_windows(buffer, 3)
     assert set(starts.weights.nonzero().flatten().tolist()) == _oracle_starts(buffer, 4, horizon=4, ends=ends)
     old_weights = windows.weights.clone()
-    addresses = windows.weights.data_ptr(), starts.weights.data_ptr()
+    addresses = (windows.weights.data_ptr(), starts.weights.data_ptr(),
+                 windows.cdf.data_ptr(), starts.cdf.data_ptr())
     calls = []
     original = buffer._preflight_selection
     monkeypatch.setattr(buffer, "_preflight_selection", lambda *a: (calls.append(1), original(*a))[-1])
@@ -88,13 +90,15 @@ def test_prepared_masks_equal_independent_ring_oracles_and_storage_is_stable(mon
     assert buffer.prepare_windows(3) is windows
     assert not torch.equal(windows.weights, old_weights)
     assert buffer.prepare_starts(4, horizon=4, clip_last=ends) is starts
-    assert addresses == (windows.weights.data_ptr(), starts.weights.data_ptr())
+    assert addresses == (windows.weights.data_ptr(), starts.weights.data_ptr(),
+                         windows.cdf.data_ptr(), starts.cdf.data_ptr())
     assert len(calls) == 2
     assert set(windows.weights.nonzero().flatten().tolist()) == _oracle_windows(buffer, 3)
 
 
-def test_horizon_dependency_and_manual_bookkeeping_changes_invalidate_selection():
-    buffer = ReplayBuffer(1, 16, 2, 1, 2, "cpu")
+@pytest.mark.parametrize("sampling", ["multinomial", "cdf"])
+def test_horizon_dependency_and_manual_bookkeeping_changes_invalidate_selection(sampling):
+    buffer = ReplayBuffer(1, 16, 2, 1, 2, "cpu", sampling=sampling)
     for serial in range(8):
         _put(buffer, 0, serial, start=serial == 0)
     ends = torch.tensor([9])
@@ -113,15 +117,16 @@ def test_horizon_dependency_and_manual_bookkeeping_changes_invalidate_selection(
     assert buffer.prepare_starts(3, horizon=4, clip_last=ends) is not selection
 
 
-def test_uniformity_is_over_legal_env_time_pairs_not_over_environments():
+@pytest.mark.parametrize("sampling", ["multinomial", "cdf"])
+def test_uniformity_is_over_legal_env_time_pairs_not_over_environments(sampling):
     torch.manual_seed(17)
-    buffer = ReplayBuffer(2, 32, 2, 1, 2, "cpu")
+    buffer = ReplayBuffer(2, 32, 2, 1, 2, "cpu", sampling=sampling)
     for env, count in ((0, 18), (1, 5)):
         for serial in range(count):
             _put(buffer, env, serial, start=serial == 0)
     selection = buffer.prepare_windows(2)
     allowed = sorted(_oracle_windows(buffer, 2))
-    env, row = buffer._sample_from_mask(selection.weights, 100_000)
+    env, row = buffer._sample_from_selection(selection, 100_000)
     indices = env * buffer.T + row
     counts = torch.bincount(indices, minlength=buffer.E * buffer.T)
     assert set(indices.unique().tolist()) == set(allowed)
@@ -133,9 +138,10 @@ def test_uniformity_is_over_legal_env_time_pairs_not_over_environments():
     assert expected_env0 > .8  # An env-uniform regression would put this at .5.
 
 
-def test_prepared_start_history_backfill_and_previous_action_match_ring_contents():
+@pytest.mark.parametrize("sampling", ["multinomial", "cdf"])
+def test_prepared_start_history_backfill_and_previous_action_match_ring_contents(sampling):
     torch.manual_seed(4)
-    buffer = _ring()
+    buffer = _ring(sampling=sampling)
     selection = buffer.prepare_starts(5, horizon=4, clip_last=torch.tensor([100]))
     # Keep the exact same dependency object when consuming this prepared mask.
     starts = buffer.sample_starts(1024, 5, horizon=4, clip_last=selection.dependency, prepared=selection)
@@ -159,8 +165,9 @@ def test_prepared_start_history_backfill_and_previous_action_match_ring_contents
         torch.testing.assert_close(starts.prev_action[column], expected[-1])
 
 
-def test_empty_selection_fails_at_preflight_and_wrong_selection_is_rejected():
-    buffer = ReplayBuffer(1, 16, 2, 1, 2, "cpu")
+@pytest.mark.parametrize("sampling", ["multinomial", "cdf"])
+def test_empty_selection_fails_at_preflight_and_wrong_selection_is_rejected(sampling):
+    buffer = ReplayBuffer(1, 16, 2, 1, 2, "cpu", sampling=sampling)
     with pytest.raises(RuntimeError, match="no sampleable rows"):
         buffer.prepare_windows(2)
     with pytest.raises(RuntimeError, match="full reference horizon"):
@@ -176,12 +183,14 @@ def test_empty_selection_fails_at_preflight_and_wrong_selection_is_rejected():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_cuda_graph_sampling_is_fresh_legal_and_refreshes_after_writes(monkeypatch):
-    buffer = _ring("cuda:0")
+@pytest.mark.parametrize("sampling", ["multinomial", "cdf"])
+def test_cuda_graph_sampling_is_fresh_legal_and_refreshes_after_writes(monkeypatch, sampling):
+    buffer = _ring("cuda:0", sampling=sampling)
     ends = torch.tensor([100], device="cuda:0")
     windows = buffer.prepare_windows(3)
     starts = buffer.prepare_starts(4, horizon=4, clip_last=ends)
-    addresses = windows.weights.data_ptr(), starts.weights.data_ptr()
+    addresses = (windows.weights.data_ptr(), starts.weights.data_ptr(),
+                 windows.cdf.data_ptr(), starts.cdf.data_ptr())
 
     def sample():
         w = buffer.sample_windows(128, 3, prepared=windows)
@@ -214,7 +223,8 @@ def test_cuda_graph_sampling_is_fresh_legal_and_refreshes_after_writes(monkeypat
             _put(buffer, env, serial, start=serial == 40)
     assert buffer.prepare_windows(3) is windows
     assert buffer.prepare_starts(4, horizon=4, clip_last=ends) is starts
-    assert addresses == (windows.weights.data_ptr(), starts.weights.data_ptr())
+    assert addresses == (windows.weights.data_ptr(), starts.weights.data_ptr(),
+                         windows.cdf.data_ptr(), starts.cdf.data_ptr())
     graph.replay()
     legal_windows = {float(buffer.s[i // buffer.T, i % buffer.T, 0]) for i in _oracle_windows(buffer, 3)}
     legal_starts = {float(buffer.s[i // buffer.T, i % buffer.T, 0]) for i in

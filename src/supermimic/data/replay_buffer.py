@@ -11,6 +11,7 @@ can use it as their last target state and the termination head gets positive lab
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 
@@ -39,12 +40,12 @@ class StartBatch:
 
 @dataclass
 class PreparedReplaySelection:
-    """Fixed-storage legal-row weights for one kind of replay sampling.
+    """Fixed-storage legal-row distribution for one kind of replay sampling.
 
     Preparation belongs outside a captured update. Repeating preparation while
     replay is unchanged is free of device-to-host reads. After collection the
     caller refreshes the *same* storage before replaying its CUDA graph. Sampling
-    itself contains only fixed-shape GPU operations and fresh multinomial RNG.
+    itself contains only fixed-shape GPU operations and fresh random draws.
     """
 
     owner: int
@@ -52,14 +53,26 @@ class PreparedReplaySelection:
     key: tuple
     weights: torch.Tensor  # flattened (E*T,), 1 for each legal start
     count: torch.Tensor  # scalar long, kept on the replay device
+    cdf: torch.Tensor  # integer cumulative legal counts; used by the CDF sampler
     dependency: torch.Tensor | None = None
     revision: tuple | None = None
 
 
 class ReplayBuffer:
-    def __init__(self, num_envs: int, capacity: int, state_dim: int, act_dim: int, xi_dim: int, device):
+    def __init__(self, num_envs: int, capacity: int, state_dim: int, act_dim: int, xi_dim: int, device,
+                 sampling: Literal["multinomial", "cdf"] = "multinomial"):
+        if sampling not in ("multinomial", "cdf"):
+            raise ValueError("Replay sampling must be 'multinomial' or 'cdf'")
+        if num_envs < 1 or capacity < 1:
+            raise ValueError("Replay environment count and capacity must be positive")
+        # Integer counts above this limit are no longer exactly represented by
+        # the float64 random-rank multiplication. Real replay tables are much
+        # smaller (4096 x 1000 entries in the standard server configuration).
+        if num_envs * capacity > 2**53:
+            raise ValueError("Replay sampling supports at most 2**53 rows")
         self.E, self.T = num_envs, capacity
         self.device = torch.device(device)
+        self.sampling = sampling
         E, T = num_envs, capacity
         f = lambda *shape: torch.zeros(E, T, *shape, device=self.device)
         self.s = f(state_dim)
@@ -122,7 +135,7 @@ class ReplayBuffer:
         # and tests; reading these CPU metadata counters never synchronizes CUDA.
         tensors = (self.valid, self.terminal, self.ptr)
         tensors += (self.frame, self.clip) if starts else (self.ep_id,)
-        return (self._write_revision, *(x._version for x in tensors),
+        return (self.sampling, self._write_revision, *(x._version for x in tensors),
                 None if dependency is None else dependency._version)
 
     def _prepared_storage(self, kind: str, key: tuple, dependency=None) -> PreparedReplaySelection:
@@ -131,7 +144,9 @@ class ReplayBuffer:
             self._prepared[cache_key] = PreparedReplaySelection(
                 owner=id(self), kind=kind, key=key,
                 weights=torch.zeros(self.E * self.T, device=self.device),
-                count=torch.zeros((), dtype=torch.long, device=self.device), dependency=dependency,
+                count=torch.zeros((), dtype=torch.long, device=self.device),
+                cdf=torch.zeros(self.E * self.T, dtype=torch.long, device=self.device),
+                dependency=dependency,
             )
         return self._prepared[cache_key]
 
@@ -141,6 +156,17 @@ class ReplayBuffer:
         # Failing here avoids multinomial's device assertion poisoning CUDA.
         if int(selection.count.item()) == 0:
             raise RuntimeError(message)
+
+    def _refresh_selection(self, selection: PreparedReplaySelection, mask: torch.Tensor) -> None:
+        """Refresh fixed storage once per replay revision, outside CUDA graphs."""
+        selection.weights.copy_(mask.reshape(-1))
+        if self.sampling == "cdf":
+            # No normalization or float32 prefix sums: every legal row adds
+            # exactly one, including tables with more than 2**24 entries.
+            torch.cumsum(mask.reshape(-1), dim=0, dtype=torch.long, out=selection.cdf)
+            selection.count.copy_(selection.cdf[-1])
+        else:
+            selection.count.copy_(mask.sum())
 
     @torch.no_grad()
     def prepare_windows(self, k: int) -> PreparedReplaySelection:
@@ -156,8 +182,7 @@ class ReplayBuffer:
         revision = self._selection_revision(starts=False)
         if selection.revision != revision:
             mask = self.window_mask(k)
-            selection.weights.copy_(mask.reshape(-1))
-            selection.count.copy_(mask.sum())
+            self._refresh_selection(selection, mask)
             self._preflight_selection(selection, "replay buffer has no sampleable rows yet")
             selection.revision = revision
         return selection
@@ -200,8 +225,7 @@ class ReplayBuffer:
         revision = self._selection_revision(starts=True, dependency=clip_last)
         if selection.revision != revision:
             mask = self.start_mask(hist, horizon=horizon, clip_last=clip_last)
-            selection.weights.copy_(mask.reshape(-1))
-            selection.count.copy_(mask.sum())
+            self._refresh_selection(selection, mask)
             message = ("replay buffer has no sampleable starts with a full reference horizon and valid history"
                        if horizon is not None else "replay buffer has no sampleable rows yet")
             self._preflight_selection(selection, message)
@@ -238,13 +262,28 @@ class ReplayBuffer:
         return idx // self.T, idx % self.T
 
     @torch.no_grad()
+    def _sample_from_selection(self, selection: PreparedReplaySelection, n: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+            raise ValueError("Number of replay samples must be a positive integer")
+        if self.sampling == "multinomial":
+            return self._sample_from_mask(selection.weights, n)
+        # Sampling a global legal rank, rather than choosing an environment
+        # first, preserves uniformity over all legal env x time pairs. The
+        # dynamic upper bound stays on device; torch.randint(high=count) would
+        # need a host scalar and cannot be used inside the update graph.
+        ranks = (torch.rand(n, dtype=torch.float64, device=self.device) * selection.count).long()
+        ranks = torch.minimum(ranks, selection.count - 1)
+        idx = torch.searchsorted(selection.cdf, ranks, right=True)
+        return idx // self.T, idx % self.T
+
+    @torch.no_grad()
     def sample_windows(
         self, n: int, k: int, *, prepared: PreparedReplaySelection | None = None,
     ) -> WindowBatch:
         if prepared is None:
             prepared = self.prepare_windows(k)
         self._check_prepared(prepared, "windows", (k,))
-        e, t = self._sample_from_mask(prepared.weights, n)
+        e, t = self._sample_from_selection(prepared, n)
         offs = torch.arange(k + 1, device=self.device)
         tt = (t[None, :] + offs[:, None]) % self.T  # (k+1, n)
         ee = e[None, :].expand(k + 1, n)
@@ -275,7 +314,7 @@ class ReplayBuffer:
         if prepared is None:
             prepared = self.prepare_starts(hist, horizon=horizon, clip_last=clip_last)
         self._check_prepared(prepared, "starts", (hist, horizon, None if clip_last is None else id(clip_last)))
-        e, t = self._sample_from_mask(prepared.weights, n)
+        e, t = self._sample_from_selection(prepared, n)
         offs = torch.arange(hist, device=self.device) - (hist - 1)  # -(hist-1) .. 0
         tt = (t[None, :] + offs[:, None]) % self.T  # (hist, n)
         ee = e[None, :].expand(hist, n)

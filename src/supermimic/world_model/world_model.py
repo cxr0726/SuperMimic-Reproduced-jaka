@@ -139,6 +139,67 @@ class WorldModel(nn.Module):
     def enable_compile(self, mode: str | None = "default") -> None:
         self._loss_step_fn = torch.compile(self._loss_step, mode=None if mode == "default" else mode, dynamic=False) if mode else self._loss_step
 
+    def _window_rollout(self, initial_state: torch.Tensor, actions: torch.Tensor,
+                        xi: torch.Tensor) -> torch.Tensor:
+        """Predict every transition in a replay window without teacher forcing.
+
+        Keeping this complete recurrence in one tensor-only function lets
+        Inductor optimize its forward and backward together. The replay schema
+        contains k+1 states and k actions: all k transitions are retained.
+        """
+        state = initial_state
+        predictions = []
+        for action in actions.unbind(0):
+            state = self.step(state, action, xi)
+            predictions.append(state)
+        return torch.stack(predictions)
+
+    def _window_losses(self, predictions: torch.Tensor, targets: torch.Tensor,
+                       done: torch.Tensor, ref_root_pos: torch.Tensor,
+                       ref_root_quat: torch.Tensor):
+        """Batch analytic errors/termination over time, preserving Eq. 1.
+
+        Leading dimensions are (k, batch). Only the dynamics recurrence is
+        sequential; target errors and termination features have no dependence
+        between time indices and can be evaluated in one batch.
+        """
+        error = self.spec.error_vector(predictions, targets)
+        squared_error = error.square()
+        reference = ReferenceFrame(None, None, None, None, ref_root_pos, ref_root_quat)
+        features = self.heads.termination_features(
+            predictions[..., :3], predictions[..., 3:7], reference,
+        )
+        logits = self._termination_from_features(features)
+        term_bce = (F.binary_cross_entropy_with_logits(logits, done, reduction="none")
+                    if self.cfg.termination_mode == "learned" else torch.zeros_like(done))
+        # Equal weighting of every transition and sample, exactly as in the
+        # stepwise sum of per-step batch means (up to FP reduction order).
+        state_loss = squared_error.sum(-1).mean()
+        term_loss = term_bce.mean()
+        loss = state_loss + self.cfg.term_loss_weight * term_loss
+        with torch.no_grad():
+            metrics = {
+                "state_loss": state_loss.detach(),
+                "term_bce": term_loss.detach(),
+                "nse_1step": squared_error[0].mean(),
+                "nse_kstep": squared_error[-1].mean(),
+                "term_acc": ((logits > 0).float() == done).float().mean(),
+            }
+        return loss, metrics
+
+    def window_loss_full(self, states: torch.Tensor, a_exec: torch.Tensor,
+                         xi: torch.Tensor, done: torch.Tensor,
+                         ref_root_pos: torch.Tensor, ref_root_quat: torch.Tensor):
+        """Tensor-only complete rollout plus batched loss, eager or compiled.
+
+        Execution wrappers are installed by WorldModelTrainer and do not add
+        parameters/buffers or update normalization statistics.
+        """
+        rollout = getattr(self, "_window_rollout_fn", None) or self._window_rollout
+        losses = getattr(self, "_window_losses_fn", None) or self._window_losses
+        predictions = rollout(states[0], a_exec, xi)
+        return losses(predictions, states[1:], done, ref_root_pos, ref_root_quat)
+
     def window_loss(self, states: torch.Tensor, a_exec: torch.Tensor, xi: torch.Tensor, done: torch.Tensor, refs: list[ReferenceFrame]):
         """k-step autoregressive loss.
 

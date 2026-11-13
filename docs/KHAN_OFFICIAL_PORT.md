@@ -256,6 +256,180 @@ randomization和actuator delay；还补丁TorchArray写入、禁用嵌套Warp st
 Torch/Warp stream。当前Khan每次reset的PD/摩擦/bias、Recorder的terminal额外行和
 动态env IDs需另行适配，不能直接套用这部分，也不是本次学习图捕获的前置条件。
 
+## 整窗融合与合法采样CDF（2026-11-13）
+
+第一阶段（H32 encoder批量化、GPU合法采样和完整学习图）已提交并推送为
+`d98f4df0e70df648f089181d24e616affbfeb6ce`。该提交仍用multinomial和单步WM编译，
+可作为服务器对照版本。以下是随后开发的独立执行优化。
+
+`TrainConfig.replay_sampling`提供`cdf`/`multinomial`两种实现。CDF在学习块前按
+replay revision刷新固定地址int64累计合法数量；图内用GPU float64随机合法秩和
+`searchsorted`，避免每个minibatch重建410万项权重分布。WM与Actor各有独立CDF，
+4096×1000时两张表合计62.5 MiB。合法规则、全局env×time等权和空集预检保持，
+不采用官方先env等权或Party的cut-mask/有限候选替代。两引擎不保证随机映射或
+随机数消耗相同；同seed不保证逐样本一致，但目标采样分布不变。
+本机CUDA实测batch2048/4096时，抽样后RNG状态及紧接randn相同，但抽样位置不同；
+CPU部分批量路径甚至逐样本相同。不能笼统说CDF必然多消耗随机数或立即改变噪声。
+
+`wm_trainer.compile_full_window`编译完整8个transition的递推及time×batch批量
+误差/终止loss。每轮仍10个batch；未减少为7次预测或缩小网络。
+`policy_trainer.compile_networks`编译encoder、decoder、Critic forward、带gather/
+scale/cat/MLP/MSE的Critic minibatch loss及GAE。H32的状态递推保持，噪声位于
+checkpoint/网络编译之外；bootstrap保留对想象state与误差特征的梯度。
+编译callable由trainer持有，不替换注册模型，state_dict与ONNX结构保持。
+
+外层完整CUDA Graph拥有捕获，内部编译块关闭嵌套cudagraph。精度保持FP32，没有
+加入BF16/TF32覆盖或更换Adam；编译融合及批量规约可能改变浮点舍入顺序，因此
+固定输入的前向/反向专项检查使用FP32容差；这不代表连续优化后的模型仍逐元素
+接近，尤其不能把小网络检查外推为正式网络长期数值一致。详见下文正式尺寸排查。
+输入运行统计仍只由真实采集更新。物理采集/reset、DR、obs、奖励及学习预算不变。
+
+两种服务器wrapper增加`--learner-fusion`/`--no-learner-fusion`及
+`--replay-sampling cdf|multinomial`，可以分别消融。源码侧的完整对照命令：
+
+```bash
+.venv/bin/python scripts/benchmarks/benchmark_learner_updates.py \
+  --suite fusion --config logs/YOUR_RUN/config.json \
+  --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
+  --num-envs 8 --warmup 4 --samples 7 --output logs/cdf_fusion_benchmark.json
+```
+
+四组使用同一真实replay与初始模型/统计、fresh Adam和相同学习预算，依次比较
+第一阶段实现、仅CDF、CDF+WM融合、CDF+全部网络融合。冷编译/捕获成本单独记录。
+采样引擎切换前先释放学习图，prepare按新模式刷新固定存储，随后重新捕获。
+
+模式变化保护：学习图记录replay对象身份与采样模式的纯CPU配置key。若同进程
+CDF↔multinomial切换，在prepare写表前等待旧图使用结束并失效，随后按正常计数
+warmup、重新捕获。固定CDF训练只更新表内容，不改变key、不重捕获，也不增加
+GPU同步；非法模式在优化和prepare之前拒绝。启动时选择CDF不会触发旧图分支问题。
+
+本机正式尺寸实测（4070 SUPER、8个物理环境预填、activation checkpoint开启，
+与上一节相同网络/batch/H32/更新预算，4轮计数warmup后测7轮）：
+
+| 执行模式 | WM中位数 | Actor/Critic中位数 | 合计中位数 |
+|---|---:|---:|---:|
+| 第一阶段：multinomial、单步编译 | 392.23 ms | 746.56 ms | 1139.56 ms |
+| 仅改CDF | 392.20 ms | 746.88 ms | 1137.06 ms |
+| CDF + WM整窗融合 | 381.28 ms | 737.94 ms | 1119.56 ms |
+| CDF + 全部融合 | 380.68 ms | 682.53 ms | 1062.43 ms |
+
+完整融合合计耗时约下降6.8%，非数量级提速；8环境表很小，CDF收益落在波动内。
+每组包含warmup共执行WM110/Actor11/Critic220次，计数均准确，指标均有限。
+各列中位数独立计算。后端矩阵乘精度在同进程四组中一致（本机新API记录TF32），
+源码未新增精度覆盖；float32张量不等于声明每个内部乘法都使用IEEE单精度尾数。
+结果：`logs/benchmark_cdf_fusion_formal_20261113.json`。
+
+实际采样实现的独立4096×1000表测试（标量replay字段，不运行物理或网络）：
+
+```bash
+.venv/bin/python scripts/benchmarks/benchmark_replay_sampler.py \
+  --num-envs 4096 --capacity 1000 --samples 30 \
+  --output logs/replay_sampler_4096.json
+```
+
+每轮10次WM抽样加1次Actor抽样，multinomial抽样阶段15.57 ms，CDF为0.207 ms；
+两种合法表准备分别4.78/4.84 ms。含准备约20.35→5.05 ms；该结果只能代表采样
+部分，不能外推为完整训练相同倍率。两张CDF额外62.5 MiB。
+结果：`logs/benchmark_replay_sampler_cdf_4096_20261113.json`。
+
+验证：最终全库非slow CPU回归836项通过、47项因CUDA等条件跳过、14项slow未运行。
+固定WindowBatch/
+StartBatch及Critic排列后比对loss、states/actions/xi与全部参数梯度、优化结果；
+覆盖analytic/learned终止、运行归一化开关、FP32/FP64数学oracle。实际GPU测试覆盖
+整窗编译、Actor/Critic完整图、activation checkpoint开关、两采样器、LR变化、
+噪声新鲜性、EMA、恢复重捕获，以及图捕获后原地更新Actor/WM统计仍读取新值。
+最终完整mjlab正式网络运行120物理步，准确WM320/Actor32/Critic640次优化，EMA32，
+两图均捕获并重放，模型/EMA/优化器状态均有限；实际擦除优化器状态、扰动权重后，
+checkpoint恢复检查也通过。见
+`logs/smoke_cdf_fusion_release_120_20261113/summary.json`。
+这些检查验证执行语义与数值容差，不证明新旧同seed曲线相同或长期性能完全相同。
+
+### d98f4df与未加速执行的数值排查
+
+`tests/test_accelerated_baseline_equivalence.py`直接读取b024710的ReplayBuffer及
+rollout源码进行历史对照；multinomial抽样/历史回填/RNG状态相同，H32带噪声与无噪声
+的动作、目标及Actor梯度在原FP32容差内一致。GPU小网络检查覆盖6个学习块，准确
+WM60/Actor6/Critic120次；另用正式网络、WM batch2048/Actor batch4096作独立诊断。
+
+正式尺寸诊断保留H32、WM窗口8、10个WM batch和5×4个Critic minibatch。8个物理环境
+采集96步后，固定初始模型/运行统计、replay、抽样和Critic排列；只为配对关闭想象
+obs噪声。每种执行方式从逐位相同的模型开始，额外验证Actor更新前后WM全部参数、
+已有梯度值及存储地址不变。`--report-only`只放宽诊断的逐元素接近断言，不放宽
+NaN/Inf、优化步数、EMA预算和WM污染断言；不能将其退出0解释为数值接近通过。
+
+```bash
+.venv/bin/python scripts/benchmarks/verify_learner_execution.py \
+  --config logs/YOUR_RUN/config.json \
+  --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
+  --num-envs 8 --updates 5 --report-only --output logs/learner_execution_diagnostic.json
+```
+
+相同梯度隔离试验明确发现普通Adam与capturable Adam不逐位相同：前向、loss、
+原始梯度和两阶动量相同，但普通Adam的Python浮点偏差校正与GPU FP32标量校正有
+舍入差异。例如beta2=0.999、step=1时，1-beta2^step分别约为0.0010000000000000009
+和0.0009999871253967285。10次相同梯度更新后，权重最大差1.19e-6；正式WM相同
+探针预测最大差9.58e-5。优化器类型、超参数和FP32模型未改，不等于底层算术逐位相同。
+
+反复使用同一小批replay进行50次WM、5次Actor、100次Critic更新的压力试验中，
+误差确实会放大，不能全部表述为逐元素容差通过。对未加速执行，d98组最终Actor
+最大差0.00590、WM混合状态向量最大差0.09332、Critic最大差0.09535；完整融合组
+相应为0.00691、0.20126、0.14410。WM状态含多种物理量，该最大差不是某个高度误差。
+这些是极小固定样本/固定排列的敏感性诊断，并非真实训练质量评估。
+
+关键隔离：保留capturable Adam但关闭图后，WM在每轮与d98逐位相同，包括第4次
+捕获和第5次重放；Actor最终二者最大差1.95e-4。只批量encoder、不改Adam时，
+WM与未加速组始终相同，Actor最终最大差4.86e-5。结果支持舍入差异经连续优化
+放大，并未发现WM图重放独自引入错误更新。报告：
+`logs/formal_learner_capture_control_20261113.json`和
+`logs/isolate_d98_wm_optimizer_20261113.json`。这仍不足以保证长期收敛/实机质量
+完全相同；需要多seed长训练与统一benchmark确认。
+
+补充变化样本对照：`scripts/benchmarks/verify_learner_execution_sequence.py`在32个
+物理环境预填96步后，预生成80批WM、8批Actor及40个随机Critic排列，各执行方式
+共享相同序列。GPU计数器随实际执行推进，并逐轮核对，确保第4轮图捕获不额外
+消耗一批数据；每种方式都精确执行WM80/Actor8/Critic160次。它绕过随机抽样引擎
+以隔离学习计算，CDF分布正确性由独立采样测试验证。
+
+```bash
+.venv/bin/python scripts/benchmarks/verify_learner_execution_sequence.py \
+  --config logs/YOUR_RUN/config.json \
+  --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
+  --num-envs 32 --updates 8 --output logs/learner_varying_sequence.json
+```
+
+第8个学习块后，相对未加速路径的结果如下。这是冷启动小replay、固定运行统计的
+连续优化诊断，不是已收敛策略的跟踪指标，也不能称为“全部逐元素一致通过”。
+
+| 路径 | Actor输出最大差 | WM混合状态向量相对L2差 | Critic输出最大差 |
+|---|---:|---:|---:|
+| d98f4df | 0.02830 | 4.46% | 0.38080 |
+| CDF+完整融合 | 0.01277 | 6.83% | 0.33216 |
+
+因此误差放大不只发生在反复使用同一批样本时。进一步逐批哈希检查定位到：仅改
+encoder的组，在执行任何Actor之前的第2个WM minibatch就开始出现反向差异；该批
+全部replay字段、真实root参考、更新前权重/buffer/Adam状态相同，前向loss和NSE
+指标相同，而梯度范数657.36962890625与657.369873046875相差约3.7e-7（相对值）。
+这排除了该案例的数据错配、Actor污染WM或图多执行一次；反向的浮点执行差异
+可以经后续优化放大，不能一概把正式训练漂移全部归于capturable Adam。
+相同未加速路径重复运行时，80个WM minibatch逐位相同，但Actor仍有约0.00120
+输出漂移，表明整个学习系统也不能假定任意重复执行都逐位确定。
+结果：`logs/formal_learner_varying_sequence_20261113.json`及
+`logs/varying_sequence_wm_hash_audit_20261113.json`。
+另一次直接保存梯度的复核中，第2批前向loss及梯度范数也逐位相同，但原始梯度
+相对L2差1.166e-6，clip后的最大元素差5.215e-8；第1批梯度仍逐位相同。该批尚无
+Actor或Graph执行，进一步排除数据/采样/想象队列问题。见
+`logs/varying_sequence_wm_gradient_audit_20261113.json`。
+
+上述正式尺寸诊断和120步真实训练均保持FP32张量及本机已有TF32后端设置，因
+12GB显存启用activation checkpoint；正式服务器默认仍关闭。单项GPU测试另覆盖
+checkpoint开/关、历史Adam恢复、实时LR/归一化更新、fresh noise、两采样器互切
+及重捕获。最终两组GPU回归分别9项及21项通过。
+
+服务器wrapper保留独立对照开关：`--replay-sampling multinomial --no-learner-fusion`
+保留d98的批量encoder及完整捕获；再加`--no-update-capture --no-batch-reference-encoder`
+则回到未加速的学习执行方式。切换执行方式不改变模型结构或学习预算，但不能
+承诺相同seed抽样/优化/物理轨迹一致，也不承诺跨硬件逐位可复现。
+
 ## 自举后继边界
 
 采样器每20次物理step更新一次；单个环境reset不重启统计窗口。普通窗口末使用

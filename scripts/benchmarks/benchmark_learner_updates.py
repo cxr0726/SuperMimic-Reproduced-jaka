@@ -41,6 +41,13 @@ MODES = {
     "batched_eager": (True, False),
     "batched_captured": (True, True),
 }
+FUSION_MODES = {
+    # All modes keep the pushed d98f4df encoder batching and full update graphs.
+    "captured_baseline": ("multinomial", False, False),
+    "captured_cdf": ("cdf", False, False),
+    "captured_cdf_wm_fusion": ("cdf", True, False),
+    "captured_cdf_full_fusion": ("cdf", True, True),
+}
 
 
 def _cpu_state(module):
@@ -73,6 +80,23 @@ def _summary(values):
             "min": min(values), "max": max(values), "samples": values}
 
 
+def _precision_settings():
+    # PyTorch 2.14 rejects the legacy getter once a dependency has selected
+    # per-backend precision. Metadata must never change or block the workload.
+    result = {}
+    probes = {
+        "global_fp32_precision": lambda: torch.backends.fp32_precision,
+        "cuda_matmul_fp32_precision": lambda: torch.backends.cuda.matmul.fp32_precision,
+        "cudnn_fp32_precision": lambda: torch.backends.cudnn.fp32_precision,
+    }
+    for name, probe in probes.items():
+        try:
+            result[name] = probe()
+        except (AttributeError, RuntimeError) as error:
+            result[name] = f"unavailable: {error}"
+    return result
+
+
 def _steps(optimizer):
     counts = [int(value["step"]) for value in optimizer.state.values() if "step" in value]
     return {"min": min(counts, default=0), "max": max(counts, default=0), "parameters": len(counts)}
@@ -103,6 +127,8 @@ def _release_learners(trainer):
             optimizer.state.clear()
     trainer.wm_trainer, trainer.policy_trainer = None, None
     trainer.wm._loss_step_fn = None
+    trainer.wm._window_rollout_fn = None
+    trainer.wm._window_losses_fn = None
     for module in (trainer.wm, trainer.policy, trainer.critic):
         module.zero_grad(set_to_none=True)
         module.requires_grad_(True)
@@ -165,8 +191,13 @@ def _run_mode(trainer, mode, snapshot, seed, warmup, samples):
         raise AssertionError("Mode did not restore identical initial parameters/statistics")
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    batch_encoder, capture = MODES[mode]
     wm_cfg, pi_cfg = copy.deepcopy(trainer.cfg.wm_trainer), copy.deepcopy(trainer.cfg.policy_trainer)
+    if mode in FUSION_MODES:
+        sampler, wm_cfg.compile_full_window, pi_cfg.compile_networks = FUSION_MODES[mode]
+        trainer.buffer.sampling = sampler
+        batch_encoder, capture = True, True
+    else:
+        batch_encoder, capture = MODES[mode]
     wm_cfg.cuda_graph = pi_cfg.cuda_graph = capture
     pi_cfg.batch_reference_encoder = batch_encoder
     init_begin = time.perf_counter()
@@ -198,6 +229,9 @@ def _run_mode(trainer, mode, snapshot, seed, warmup, samples):
             raise AssertionError(f"{mode}: unexpected {name} optimizer count {actual}, expected {count}")
     result = {
         "mode": mode, "batch_reference_encoder": batch_encoder, "cuda_graph": capture,
+        "replay_sampling": trainer.buffer.sampling,
+        "wm_compile_full_window": wm_cfg.compile_full_window,
+        "policy_compile_networks": pi_cfg.compile_networks,
         "learner_init_ms": init_ms, "warmup_including_compile_capture_ms": sum(r["total_ms"] for r in warm_rows),
         "warmup_blocks": warm_rows, "measured_blocks": samples,
         "timing": {key: _summary([row[key] for row in rows]) for key in rows[0]},
@@ -225,6 +259,8 @@ def main():
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--suite", choices=("capture", "fusion"), default="capture",
+                        help="capture: original three-way comparison; fusion: d98f4df vs CDF and wider compilation")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if not torch.cuda.is_available() or torch.device(args.device).type != "cuda":
@@ -273,12 +309,16 @@ def main():
             "python_source_sha256": _source_hash(),
             "gpu": torch.cuda.get_device_name(torch.device(args.device)),
             "device": args.device, "source_config": str(args.config) if args.config else None,
+            "suite": args.suite,
+            "precision": _precision_settings(),
             "source_checkpoint": str(args.checkpoint) if args.checkpoint else None,
             "seed": cfg.seed, "config": asdict(cfg), "prefill": prefill,
             "dimensions": _dimensions(trainer),
             "initial_model_state_sha256": _state_hash(snapshot),
             "protocol": {"same_replay_and_initial_parameters": True, "fresh_optimizers_per_mode": True,
-                         "same_prepared_gpu_sampler": True, "physical_collection_during_timing": False,
+                         "same_prepared_gpu_sampler": args.suite == "capture",
+                         "same_legal_env_time_distribution": True,
+                         "physical_collection_during_timing": False,
                          "normalizer_updates_during_timing": False,
                          "same_seed_not_identical_rng_draw_order": True,
                          "wm_capture_scope": "one graph for all WM minibatches in a learning block",
@@ -293,7 +333,7 @@ def main():
                                           "critic_optimizer_steps": cfg.policy_trainer.critic_epochs * cfg.policy_trainer.critic_minibatches},
             "warmup_requested": args.warmup, "warmup_actual": warmup, "modes": [],
         }
-        for mode in MODES:
+        for mode in FUSION_MODES if args.suite == "fusion" else MODES:
             report["modes"].append(_run_mode(trainer, mode, snapshot, cfg.seed, warmup, args.samples))
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(report, indent=2, default=str) + "\n")

@@ -13,6 +13,8 @@ STOP_AFTER=''
 DRY_RUN=0
 UPDATE_CAPTURE=1
 BATCH_REFERENCE_ENCODER=1
+LEARNER_FUSION=1
+REPLAY_SAMPLING=''
 ACTUATOR_DELAY=False
 ACTION_MODE=reference_residual
 GOAL_NOISE_Z=0.01
@@ -60,6 +62,9 @@ Options:
   --no-update-capture       Use ordinary learner updates for comparison
   --batch-reference-encoder Batch reference-only goals across H32 (default)
   --no-batch-reference-encoder  Encode each imagined step separately
+  --learner-fusion          Compile full WM window and Actor/Critic blocks (default)
+  --no-learner-fusion       Use the d98f4df single-step compilation boundary
+  --replay-sampling MODE    cdf (default) or multinomial; same legal-pair distribution
   --resume PATH              Restore a Khan checkpoint with matching data/configuration/assets
   --stop-after-iterations N  Optional execution limit; retains the 320k LR schedule
   --dry-run                 Check paths and print command without executing Python or training
@@ -97,6 +102,9 @@ while (($#)); do
         --no-update-capture) UPDATE_CAPTURE=0; shift ;;
         --batch-reference-encoder) BATCH_REFERENCE_ENCODER=1; shift ;;
         --no-batch-reference-encoder) BATCH_REFERENCE_ENCODER=0; shift ;;
+        --learner-fusion) LEARNER_FUSION=1; shift ;;
+        --no-learner-fusion) LEARNER_FUSION=0; shift ;;
+        --replay-sampling) need_value "$@"; REPLAY_SAMPLING="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown option: $1 (use --help)" ;;
@@ -104,6 +112,7 @@ while (($#)); do
 done
 
 positive_integer "$NUM_ENVS" || die '--num-envs must be a positive integer'
+[[ -z "$REPLAY_SAMPLING" || "$REPLAY_SAMPLING" == cdf || "$REPLAY_SAMPLING" == multinomial ]] || die '--replay-sampling must be cdf or multinomial'
 [[ -z "$STOP_AFTER" ]] || positive_integer "$STOP_AFTER" || \
     die '--stop-after-iterations must be a positive integer'
 [[ -n "$RUN_NAME" && "$RUN_NAME" != . && "$RUN_NAME" != .. && "$RUN_NAME" != */* \
@@ -173,6 +182,12 @@ fi
 if ((!BATCH_REFERENCE_ENCODER)); then
     command+=(--policy-trainer.no-batch-reference-encoder)
 fi
+if ((!LEARNER_FUSION)); then
+    command+=(--wm-trainer.no-compile-full-window --policy-trainer.no-compile-networks)
+fi
+if [[ -n "$REPLAY_SAMPLING" ]]; then
+    command+=(--replay-sampling "$REPLAY_SAMPLING")
+fi
 if [[ -n "$STOP_AFTER" ]]; then
     command+=(--schedule.stop-after-iterations "$STOP_AFTER")
 fi
@@ -185,6 +200,7 @@ printf '[INFO] Khan compact library: %s\n' "$LIBRARY"
 printf '[INFO] Reference FK: %s; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "$REFERENCE_FK_MODE" "$NUM_ENVS"
 printf '[INFO] Learner execution: full-update capture=%s; batched reference encoder=%s; collection/reset unchanged\n' "$UPDATE_CAPTURE" "$BATCH_REFERENCE_ENCODER"
+printf '[INFO] Learner fusion=%s; replay sampling=%s; FP32 and original learning budget retained\n' "$LEARNER_FUSION" "${REPLAY_SAMPLING:-cdf}"
 printf '[INFO] Khan observations: future/history 5/5; goal 155; policy 465; activation recomputation: OFF\n'
 printf '[INFO] Actor hidden defaults: encoder 1024/512/256; decoder 2048/1024/512/256; EMA decay 0.995; training uses live, inference auto-selects EMA\n'
 printf '[INFO] Actor/Critic hidden blocks: Linear -> LayerNorm -> GELU; bootstrap successor: source-clip clamped\n'

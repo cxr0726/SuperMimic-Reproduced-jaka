@@ -7,10 +7,42 @@ Physical collection and reset remain outside these graphs.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable
 
 import torch
 from torch import nn
+
+_UNSET_CONFIGURATION = object()
+
+
+def replay_sampling_key(buffer) -> tuple | None:
+    """Host-only dispatch values that a recorded replay sampler specializes.
+
+    Tensor contents (including the refreshed CDF) deliberately do not belong in
+    this key: their addresses are stable and graphs must read their new values.
+    Legacy diagnostic buffers without a sampler setting keep their old path.
+    """
+    if buffer is None:
+        return None
+    sampling = getattr(buffer, "sampling", "multinomial")
+    if not isinstance(sampling, str) or sampling not in ("multinomial", "cdf"):
+        raise ValueError("Replay sampling must be 'multinomial' or 'cdf'")
+    return id(buffer), sampling
+
+
+def _validate_configuration_key(key) -> None:
+    """Require immutable CPU metadata; comparing a CUDA tensor can synchronize."""
+    if key is None or type(key) in (bool, int, float, str, bytes):
+        # NaN is not equal to itself and cannot form a stable configuration.
+        if isinstance(key, float) and math.isnan(key):
+            raise ValueError("Captured configuration keys cannot contain NaN")
+        return
+    if isinstance(key, (tuple, frozenset)):
+        for value in key:
+            _validate_configuration_key(value)
+        return
+    raise TypeError("Captured configuration must contain immutable CPU scalars/tuples, not tensors or mutable values")
 
 
 def graph_state(
@@ -87,16 +119,22 @@ class CapturedUpdate:
     no host reads and no mutation of Python training counters. Returned metrics
     are detached and cloned out of the graph pool. CPU and distributed updates
     use an explicit eager fallback; no collectives are captured.
+
+    ``configuration`` may return immutable CPU metadata used by Python branches
+    in ``fn``. A change invalidates the old recording before any replay and
+    restarts counted warm-up. Tensor values remain live without recapture.
     """
 
     def __init__(
         self, fn: Callable[[], dict[str, torch.Tensor]],
         state: Callable[[], Iterable[torch.Tensor]], *,
         enabled: bool = True, warmup: int = 3, label: str = "update",
+        configuration: Callable[[], object] | None = None,
     ):
         if isinstance(warmup, bool) or not isinstance(warmup, int) or warmup < 1:
             raise ValueError("CUDA Graph warmup must be a positive number of counted updates")
         self.fn, self.state = fn, state
+        self.configuration = configuration
         self.enabled, self.warmup, self.label = enabled, warmup, label
         self.calls, self.phase, self.is_replay = 0, "eager", False
         self._remaining = warmup
@@ -105,6 +143,8 @@ class CapturedUpdate:
         self._outputs: dict[str, torch.Tensor] = {}
         self._identity: tuple = ()
         self._fallback_reported = False
+        self._configuration_key = _UNSET_CONFIGURATION
+        self.configuration_invalidations = 0
 
     @property
     def captured(self) -> bool:
@@ -116,6 +156,31 @@ class CapturedUpdate:
         self._outputs, self._identity = {}, ()
         self._remaining = self.warmup
         self.phase, self.is_replay = "eager", False
+        self._configuration_key = _UNSET_CONFIGURATION
+
+    def check_configuration(self) -> None:
+        """Invalidate changed Python dispatch before refreshing closed-over inputs.
+
+        Trainers call this before prepare writes to a sampler's fixed storage.
+        ``__call__`` checks again, so standalone callers also cannot replay an
+        obsolete branch. This check itself never performs a training update.
+        """
+        if self.configuration is None:
+            return
+        key = self.configuration()
+        _validate_configuration_key(key)
+        if self._configuration_key is not _UNSET_CONFIGURATION and key != self._configuration_key:
+            was_captured = self.captured
+            if was_captured and self._stream is not None:
+                # A rare hot switch may follow asynchronous replay. Complete
+                # its uses of the private pool before releasing that graph.
+                # The ordinary, fixed-configuration path never synchronizes.
+                torch.cuda.synchronize(self._stream.device)
+            self.invalidate()
+            self.configuration_invalidations += 1
+            if was_captured:
+                print(f"[INFO] {self.label} CUDA Graph: invalidated because execution configuration changed")
+        self._configuration_key = key
 
     @staticmethod
     def _storage_identity(state: Iterable[torch.Tensor]) -> tuple:
@@ -128,6 +193,7 @@ class CapturedUpdate:
         return {key: value.detach().clone() for key, value in outputs.items()}
 
     def __call__(self) -> dict[str, torch.Tensor]:
+        self.check_configuration()
         self.calls += 1
         self.is_replay = False
         if not self.enabled:

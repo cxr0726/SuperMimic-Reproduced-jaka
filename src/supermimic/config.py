@@ -77,6 +77,7 @@ class TrainConfig:
     seed: int = 0
     device: str = "cuda:0"
     robot: RobotName = "g1"
+    replay_sampling: Literal["multinomial", "cdf"] = "cdf"  # Execution only; uniform legal env/time pairs.
     data: DataCfg = field(default_factory=DataCfg)
     env: EnvCfg = field(default_factory=EnvCfg)
     world_model: WorldModelCfg = field(default_factory=lambda: WorldModelCfg(

@@ -101,6 +101,9 @@ def imagine(
     tensor_metrics: bool = False,
     validate_horizon: bool = True,
     checkpoint_preserve_rng_state: bool = True,
+    encode_goal_fn=None,
+    decode_from_latent_fn=None,
+    policy_forward_fn=None,
 ) -> ImagRollout:
     """Imagine H transitions, optionally sharing one reference-encoder call.
 
@@ -109,6 +112,11 @@ def imagine(
     replay sampler. State-dependent legacy anchor goals stay stepwise.
     """
     device = start.state.device
+    # Trainer-owned compiled callables keep collection, registered modules and
+    # deployment state_dicts unchanged. Standalone callers retain eager methods.
+    encode_goal_fn = getattr(policy, "encode_goal", None) if encode_goal_fn is None else encode_goal_fn
+    decode_from_latent_fn = getattr(policy, "decode_from_latent", None) if decode_from_latent_fn is None else decode_from_latent_fn
+    policy_forward_fn = policy if policy_forward_fn is None else policy_forward_fn
     n = start.state.shape[0]
     if horizon < 1:
         raise ValueError("imagination horizon must be positive")
@@ -231,11 +239,11 @@ def imagine(
         if activation_checkpoint:
             with set_checkpoint_early_stop(False):
                 latents = checkpoint(
-                    policy.encode_goal, clean_goals, encoder_goal=encoder_goals,
+                    encode_goal_fn, clean_goals, encoder_goal=encoder_goals,
                     use_reentrant=False, preserve_rng_state=checkpoint_preserve_rng_state,
                 )
         else:
-            latents = policy.encode_goal(clean_goals, encoder_goal=encoder_goals)
+            latents = encode_goal_fn(clean_goals, encoder_goal=encoder_goals)
         latents = latents.reshape(horizon, n, -1)
 
     def ref_at(t):
@@ -278,18 +286,18 @@ def imagine(
             # as RuntimeError. Complete recomputation preserves eager compatibility.
             with set_checkpoint_early_stop(False):
                 if batch_encoder:
-                    a = checkpoint(policy.decode_from_latent, obs_flat, goals[-1], latents[t],
+                    a = checkpoint(decode_from_latent_fn, obs_flat, goals[-1], latents[t],
                                    use_reentrant=False, preserve_rng_state=checkpoint_preserve_rng_state)
                 else:
-                    a = checkpoint(policy, obs_flat, goals[-1], **encoder_kwargs,
+                    a = checkpoint(policy_forward_fn, obs_flat, goals[-1], **encoder_kwargs,
                                    use_reentrant=False, preserve_rng_state=checkpoint_preserve_rng_state)
                 step_result = checkpoint(
                     step_fn, s, a, a_prev, start.xi, ref,
                     use_reentrant=False, preserve_rng_state=checkpoint_preserve_rng_state,
                 )
         else:
-            a = (policy.decode_from_latent(obs_flat, goals[-1], latents[t]) if batch_encoder else
-                 policy(obs_flat, goals[-1], **encoder_kwargs))
+            a = (decode_from_latent_fn(obs_flat, goals[-1], latents[t]) if batch_encoder else
+                 policy_forward_fn(obs_flat, goals[-1], **encoder_kwargs))
             step_result = step_fn(s, a, a_prev, start.xi, ref)
         if returns_body_poses:
             s_next, r, term_vec, logits, obs_clean, anchor_pose, body_pos, body_quat = step_result

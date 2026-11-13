@@ -8,7 +8,12 @@ import torch
 
 from supermimic.data.replay_buffer import ReplayBuffer, WindowBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
-from supermimic.training.cuda_graph import CapturedUpdate, graph_state, prepare_adam_for_capture
+from supermimic.training.cuda_graph import (
+    CapturedUpdate,
+    graph_state,
+    prepare_adam_for_capture,
+    replay_sampling_key,
+)
 from supermimic.training.distributed import allreduce_grads, world_size
 from supermimic.world_model.heads import ReferenceFrame
 from supermimic.world_model.world_model import WorldModel
@@ -23,6 +28,7 @@ class WMTrainerCfg:
     grad_clip: float = 1.0
     weight_decay: float = 0.0
     compile: str | None = "default"
+    compile_full_window: bool = True
     cuda_graph: bool = False
     cuda_graph_warmup: int = 3  # Counted complete updates, not extra minibatches.
 
@@ -42,10 +48,26 @@ class WorldModelTrainer:
         self.opt = torch.optim.Adam(wm.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
         self._device = next(wm.parameters()).device
         self.capture_enabled = cfg.cuda_graph and self._device.type == "cuda" and world_size() == 1
+        self.compile_full_window = bool(cfg.compile and cfg.compile_full_window)
         self._buffer: ReplayBuffer | None = None
         self._prepared = None
         if self.capture_enabled:
             prepare_adam_for_capture(self.opt, self._device)
+
+        # Reusing a model with a different execution configuration must release
+        # the previous callables; neither wrapper belongs in its state_dict.
+        wm._window_rollout_fn = wm._window_losses_fn = None
+        if self.compile_full_window:
+            def compile_window(fn):
+                if self.capture_enabled:
+                    return torch.compile(fn, dynamic=False, options={"triton.cudagraphs": False})
+                return torch.compile(fn, mode=None if cfg.compile == "default" else cfg.compile,
+                                     dynamic=False)
+
+            wm._loss_step_fn = None
+            wm._window_rollout_fn = compile_window(wm._window_rollout)
+            wm._window_losses_fn = compile_window(wm._window_losses)
+        elif self.capture_enabled:
             # Full-update capture owns CUDA Graph execution. A nested
             # reduce-overhead graph would capture/reuse the same backward
             # independently and can overwrite the outer graph's saved tensors.
@@ -57,6 +79,7 @@ class WorldModelTrainer:
         self.update_graph = CapturedUpdate(
             self._train_update, self._capture_state, enabled=cfg.cuda_graph,
             warmup=cfg.cuda_graph_warmup, label="WM update",
+            configuration=lambda: replay_sampling_key(self._buffer),
         )
 
     def set_lr(self, lr: float) -> None:
@@ -77,6 +100,11 @@ class WorldModelTrainer:
         k, n = w.frame.shape
         # Only the root pose of the references is needed for the termination features.
         r = self.lib.ref(w.frame.reshape(-1))
+        if self.compile_full_window:
+            return self.wm.window_loss_full(
+                w.states, w.a_exec, w.xi, w.done,
+                r.root_pos_w.reshape(k, n, 3), r.root_quat_w.reshape(k, n, 4),
+            )
         refs = [ReferenceFrame(None, None, None, None, r.root_pos_w[j * n : (j + 1) * n], r.root_quat_w[j * n : (j + 1) * n]) for j in range(k)]
         return self.wm.window_loss(w.states, w.a_exec, w.xi, w.done, refs)
 
@@ -87,6 +115,8 @@ class WorldModelTrainer:
                 extra.extend(value for value in vars(obj).values() if isinstance(value, torch.Tensor))
         if self._prepared is not None:
             extra.extend((self._prepared.weights, self._prepared.count))
+            if getattr(self._prepared, "cdf", None) is not None:
+                extra.append(self._prepared.cdf)
         return graph_state((self.wm,), (self.opt,), extra)
 
     def _train_batch(self) -> dict[str, torch.Tensor]:
@@ -112,9 +142,11 @@ class WorldModelTrainer:
         return {key: value / self.cfg.batches_per_update for key, value in aggregate.items()}
 
     def update(self, buffer: ReplayBuffer) -> dict[str, float]:
+        replay_sampling_key(buffer)  # Validate host dispatch before refreshing GPU selections.
         if self._buffer is not None and buffer is not self._buffer and self.update_graph.captured:
             raise ValueError("Replacing replay storage requires invalidating the WM update graph")
         self._buffer = buffer
+        self.update_graph.check_configuration()
         if self.capture_enabled:
             # Restore old Adam checkpoints before the first recording as well.
             prepare_adam_for_capture(self.opt, self._device)

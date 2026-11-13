@@ -237,6 +237,10 @@ class Trainer:
         self.lib = self.command.library
         self.recorder = env.recorder_manager.get_term("replay")
         self.buffer = self.recorder.buffer
+        if cfg.replay_sampling not in ("multinomial", "cdf"):
+            raise ValueError("replay_sampling must be multinomial or cdf")
+        self.buffer.sampling = cfg.replay_sampling
+        print(f"[INFO] replay sampling: {cfg.replay_sampling}; uniform legal environment/time pairs")
         robot = env.scene["robot"]
 
         fk = G1Kinematics(robot_spec.load_model(), device=self.device)

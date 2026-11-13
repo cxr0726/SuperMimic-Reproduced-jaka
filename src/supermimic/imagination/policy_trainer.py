@@ -13,7 +13,12 @@ from supermimic.imagination.objective import gae_targets, policy_objective
 from supermimic.imagination.rollout import ImagRollout, imagine
 from supermimic.policy.ema import ActorEMA
 from supermimic.policy.nets import Critic, Policy
-from supermimic.training.cuda_graph import CapturedUpdate, graph_state, prepare_adam_for_capture
+from supermimic.training.cuda_graph import (
+    CapturedUpdate,
+    graph_state,
+    prepare_adam_for_capture,
+    replay_sampling_key,
+)
 from supermimic.training.distributed import allreduce_grads
 from supermimic.world_model.heads import ReferenceFrame
 from supermimic.world_model.world_model import WorldModel
@@ -46,6 +51,7 @@ class PolicyTrainerCfg:
     batch_reference_encoder: bool = True
     cuda_graph: bool = False  # Execution-only: full H32 actor + critic update.
     cuda_graph_warmup: int = 3  # Counted training updates, not extra optimizer steps.
+    compile_networks: bool = True  # Fuse actor networks, critic fits and GAE when compile is enabled.
 
 
 def critic_value_ceiling(max_step_reward: float, gamma: float) -> float:
@@ -117,6 +123,31 @@ class PolicyTrainer:
             self.step_fn._fn = torch.compile(
                 self.step_fn._step, dynamic=False, options={"triton.cudagraphs": False},
             )
+        # Keep compiled callables on the trainer, not in the registered model
+        # tree. Collection, EMA, state_dict and ONNX retain the original actor.
+        # Compile small functional boundaries rather than the whole H32 BPTT.
+        self._imagine_networks = {}
+        self._critic_value_fn = critic
+        self._critic_fit_loss_fn = None
+        self._gae_targets_fn = gae_targets
+        if cfg.compile_networks and cfg.compile:
+            options = dict(torch._inductor.list_mode_options(cfg.compile))
+            # The full learner owns graph recording; separate nested graphs
+            # can overwrite activations required by later BPTT/checkpointing.
+            options["triton.cudagraphs"] = False
+
+            def compile_block(fn):
+                return torch.compile(fn, dynamic=False, options=options)
+
+            if isinstance(policy, Policy):
+                self._imagine_networks = {
+                    "encode_goal_fn": compile_block(policy.encode_goal),
+                    "decode_from_latent_fn": compile_block(policy.decode_from_latent),
+                    "policy_forward_fn": compile_block(policy.forward),
+                }
+            self._critic_value_fn = compile_block(critic.forward)
+            self._critic_fit_loss_fn = compile_block(self._critic_minibatch_loss)
+            self._gae_targets_fn = compile_block(gae_targets)
         if self._capture_enabled:
             prepare_adam_for_capture(self.opt, device)
             prepare_adam_for_capture(self.critic_opt, device)
@@ -127,6 +158,7 @@ class PolicyTrainer:
         self._captured_update = CapturedUpdate(
             self._update_tensors, self._graph_state, enabled=self._capture_enabled,
             warmup=cfg.cuda_graph_warmup, label="Actor/Critic",
+            configuration=lambda: replay_sampling_key(self._active_buffer),
         )
 
     def set_lr(self, lr: float) -> None:
@@ -153,6 +185,10 @@ class PolicyTrainer:
         extra.extend(v for v in vars(self.lib).values() if isinstance(v, torch.Tensor))
         if self._prepared_starts is not None:
             extra.append(self._prepared_starts.weights)
+            extra.append(self._prepared_starts.count)
+            cdf = getattr(self._prepared_starts, "cdf", None)
+            if cdf is not None:
+                extra.append(cdf)
         return graph_state(modules, (self.opt, self.critic_opt), extra)
 
     def reset_capture(self) -> None:
@@ -202,8 +238,18 @@ class PolicyTrainer:
             errors = torch.cat([prefix, bootstrap], dim=0).reshape(H1, n, -1)
         return feat, goals, ro.e_root, errors
 
+    def _critic_minibatch_loss(self, feat, goals, xi, root_error, errors, indices, targets):
+        """Fuse gather/scale/concatenation/MLP/MSE without another full input copy."""
+        predictions = self.critic(
+            feat[indices], goals[indices], xi[indices], root_error[indices],
+            errors[indices] if errors is not None else None,
+        )
+        return torch.nn.functional.mse_loss(predictions, targets[indices])
+
     def update(self, buffer: ReplayBuffer, xi_norm_fn=None) -> dict[str, float]:
+        replay_sampling_key(buffer)  # Reject invalid hot switches before preparing or replaying.
         self._active_buffer = buffer
+        self._captured_update.check_configuration()
         self._prepared_starts = (buffer.prepare_starts(
             self.cfg.history, horizon=self.cfg.horizon, clip_last=self.lib.clip_last,
         ) if hasattr(buffer, "prepare_starts") else None)
@@ -237,12 +283,13 @@ class PolicyTrainer:
             batch_reference_encoder=cfg.batch_reference_encoder, tensor_metrics=True,
             validate_horizon=self._prepared_starts is None,
             checkpoint_preserve_rng_state=not self._capture_enabled,
+            **self._imagine_networks,
         )
         feat, goals, e_root, errors = self._critic_inputs(ro)
         raw_bootstrap = None
         if cfg.use_critic:
-            raw_bootstrap = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1],
-                                        errors[-1] if errors is not None else None)
+            raw_bootstrap = self._critic_value_fn(feat[-1], goals[-1], xi_norm, e_root[-1],
+                                                  errors[-1] if errors is not None else None)
             v_H = (raw_bootstrap.clamp(max=self.value_ceiling)
                    if cfg.critic_value_bound else raw_bootstrap)
         else:
@@ -279,10 +326,11 @@ class PolicyTrainer:
                 errors_d = errors.detach() if errors is not None else None
                 H1, n, _ = feat_d.shape
                 xi_rep = xi_norm[None].expand(H1, n, -1)
-                values = self.critic(feat_d.reshape(H1 * n, -1), goals_d.reshape(H1 * n, -1),
-                                     xi_rep.reshape(H1 * n, -1), e_root_d.reshape(H1 * n, -1),
-                                     errors_d.reshape(H1 * n, -1) if errors_d is not None else None).reshape(H1, n)
-                raw_targets = gae_targets(ro.rewards.detach(), ro.dhat[1:].detach(), values, cfg.gamma, cfg.gae_lambda)  # (H, n)
+                values = self._critic_value_fn(feat_d.reshape(H1 * n, -1), goals_d.reshape(H1 * n, -1),
+                                              xi_rep.reshape(H1 * n, -1), e_root_d.reshape(H1 * n, -1),
+                                              errors_d.reshape(H1 * n, -1) if errors_d is not None else None).reshape(H1, n)
+                raw_targets = self._gae_targets_fn(ro.rewards.detach(), ro.dhat[1:].detach(), values,
+                                                   cfg.gamma, cfg.gae_lambda)  # (H, n)
                 targets = (raw_targets.clamp(max=self.value_ceiling)
                            if cfg.critic_value_bound else raw_targets)
                 X_feat = feat_d[:-1].reshape(-1, feat_d.shape[-1])
@@ -298,9 +346,12 @@ class PolicyTrainer:
                 perm = torch.randperm(N, device=Y.device)
                 for i in range(cfg.critic_minibatches):
                     idx = perm[i * mb : (i + 1) * mb]
-                    pred = self.critic(X_feat[idx], X_goal[idx], X_xi[idx], X_er[idx],
-                                       X_errors[idx] if X_errors is not None else None)
-                    closs = torch.nn.functional.mse_loss(pred, Y[idx])
+                    if self._critic_fit_loss_fn is None:
+                        pred = self.critic(X_feat[idx], X_goal[idx], X_xi[idx], X_er[idx],
+                                           X_errors[idx] if X_errors is not None else None)
+                        closs = torch.nn.functional.mse_loss(pred, Y[idx])
+                    else:
+                        closs = self._critic_fit_loss_fn(X_feat, X_goal, X_xi, X_er, X_errors, idx, Y)
                     self.critic_opt.zero_grad(set_to_none=not self._capture_enabled)
                     closs.backward()
                     allreduce_grads(self.critic)
