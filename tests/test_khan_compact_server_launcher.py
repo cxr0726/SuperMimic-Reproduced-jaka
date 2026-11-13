@@ -88,7 +88,7 @@ def test_fusion_and_cdf_controls_keep_original_budget(project):
 
 
 @pytest.mark.parametrize("num_envs", [4096, 1024])
-def test_default_compact_run_preserves_original_training_configuration(project, num_envs):
+def test_default_compact_run_preserves_current_training_configuration(project, num_envs):
     root, _ = project
     result = run_launcher(project, "--dry-run", "--num-envs", str(num_envs))
     assert result.returncode == 0, result.stderr
@@ -134,12 +134,14 @@ def test_default_compact_run_preserves_original_training_configuration(project, 
     assert cfg.wm_trainer.batch_size == 2048
     assert cfg.schedule.total_iterations == 320000
     assert cfg.schedule.updates_per_env_step == 0.4
-    # The wrapper owns no duplicate network or optimizer hyperparameter lists.
+    # Numeric hyperparameters remain owned by TrainConfig; Bash selects the algorithm.
     assert not any(
         flag.startswith(("--world-model.", "--wm-trainer.", "--policy.",
                          "--policy-trainer.", "--critic.", "--schedule."))
         and flag not in {"--policy.history", "--policy.action-mode",
-                          "--policy.goal-noise-z", "--policy.goal-noise-joint-pos"}
+                          "--policy.goal-noise-z", "--policy.goal-noise-joint-pos",
+                          "--wm-trainer.optimizer", "--policy-trainer.optimizer",
+                          "--policy-trainer.critic-optimizer"}
         for flag in printed_command(result.stdout)[4:]
     )
     assert not (root / "data/npz").exists()
@@ -198,6 +200,8 @@ def test_existing_checkpoint_requires_explicit_resume_and_keeps_full_lr_schedule
     (["--resume", "missing.pt"], "checkpoint does not exist"),
     (["--data-dir", "data/npz"], "--library"),
     (["--policy-trainer.batch-size", "128"], "Unknown option"),
+    (["--optimizer", "sgd"], "muon or adam"),
+    (["--optimizer", "--dry-run"], "requires a value"),
 ])
 def test_invalid_arguments_rejected_before_training(project, args, expected):
     result = run_launcher(project, "--dry-run", *args)
@@ -238,6 +242,34 @@ def test_missing_runtime_files_fail_before_execution(project, missing):
     assert "Missing" in result.stderr
     if missing.endswith("python"):
         assert "setup_server_env.sh" in result.stderr and "--project-dir" in result.stderr
+
+
+@pytest.mark.parametrize("flags,expected", [
+    ([], "muon"),
+    (["--optimizer", "muon"], "muon"),
+    (["--optimizer", "adam"], "adam"),
+    (["--optimizer", "muon", "--optimizer", "adam"], "adam"),
+    (["--optimizer", "adam", "--optimizer", "muon"], "muon"),
+])
+def test_optimizer_switch_reaches_all_three_networks_without_changing_budget(project, flags, expected):
+    root, _ = project
+    result = run_launcher(project, "--dry-run", *flags)
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    assert cfg.wm_trainer.optimizer == cfg.policy_trainer.optimizer == expected
+    assert cfg.policy_trainer.critic_optimizer == expected
+    assert cfg.wm_trainer.muon_weight_decay == cfg.policy_trainer.muon_weight_decay == .1
+    assert cfg.policy_trainer.critic_muon_weight_decay == .1
+    assert cfg.wm_trainer.batch_size == 2048 and cfg.wm_trainer.batches_per_update == 10
+    assert cfg.policy_trainer.batch_size == 4096 and cfg.policy_trainer.horizon == 32
+    assert cfg.policy_trainer.critic_epochs == 5 and cfg.policy_trainer.critic_minibatches == 4
+    assert cfg.schedule.total_iterations == 320000 and cfg.schedule.updates_per_env_step == .4
+    assert cfg.policy_trainer.cuda_graph and cfg.wm_trainer.cuda_graph
+    assert cfg.env.compact_library and not cfg.env.reference_fk_compile
+    assert cfg.env.actuator_delay is False and cfg.policy.action_mode == "reference_residual"
+    label = "optimizer: hybrid Muon" if expected == "muon" else "optimizer: Adam"
+    assert label in result.stdout
+    assert not (root / "logs").exists()
 
 
 def test_actual_exec_cleans_environment_preserves_gpu_selection_and_changes_directory(project):

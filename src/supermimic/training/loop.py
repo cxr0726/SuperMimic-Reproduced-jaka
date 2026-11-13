@@ -28,6 +28,7 @@ from supermimic.training.distributed import (
     finalize,
     init_distributed,
 )
+from supermimic.training.optimizers import validate_training_optimizer_state
 from supermimic.training.schedule import cosine_lr
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.wm_trainer import WorldModelTrainer
@@ -91,6 +92,31 @@ def validate_critic_architecture(saved_critic: dict, requested) -> None:
     if mismatches:
         raise ValueError(f"Checkpoint critic architecture differs: {mismatches}; start a new run "
                          "or explicitly request the saved architecture to resume")
+
+
+def validate_optimizer_configuration(saved: dict, requested: TrainConfig) -> None:
+    """Missing optimizer fields denote the historical all-Adam algorithm.
+
+    Changing algorithms is a fresh experiment, not an implicit conversion of
+    Adam moments into Muon momentum. Check this before copying any model state.
+    """
+    choices = (
+        ("WM", "wm_trainer", "optimizer", "muon_weight_decay"),
+        ("Actor", "policy_trainer", "optimizer", "muon_weight_decay"),
+        ("Critic", "policy_trainer", "critic_optimizer", "critic_muon_weight_decay"),
+    )
+    for label, section, field_name, decay_name in choices:
+        previous = saved.get(section, {})
+        current = getattr(requested, section)
+        previous_kind, kind = previous.get(field_name, "adam"), getattr(current, field_name)
+        if previous_kind != kind:
+            raise ValueError(
+                f"Checkpoint {label} optimizer differs: {previous_kind!r} versus {kind!r}; "
+                "start a new run for Muon, or select the checkpoint's original optimizer "
+                "(--optimizer adam in the server launcher for historical Adam runs)"
+            )
+        if kind == "muon" and previous.get(decay_name, .1) != getattr(current, decay_name):
+            raise ValueError(f"Checkpoint {label} Muon weight decay differs; use matching settings or start a new run")
 
 
 def load_sampler_state(command, checkpoint: dict) -> bool:
@@ -292,6 +318,19 @@ class Trainer:
                   f"collection enabled={cfg.env.obs_noise}, imagination enabled={cfg.policy_trainer.obs_noise}; "
                   "critic and reward references stay clean")
             print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
+            for label, optimizer in (("WM", self.wm_trainer.opt), ("Actor", self.policy_trainer.opt),
+                                     ("Critic", self.policy_trainer.critic_opt)):
+                kinds = [group.get("optimizer_kind", "adam") for group in optimizer.param_groups]
+                matrices = sum(len(group["params"]) for group, kind in zip(optimizer.param_groups, kinds)
+                               if kind == "muon")
+                print(f"[INFO] {label} optimizer: {'Muon + fused capturable Adam' if 'muon' in kinds else 'Adam'}; "
+                      f"Muon matrices={matrices}; weight decay="
+                      f"{[group.get('weight_decay', 0.) for group in optimizer.param_groups]}")
+            if "muon" in (cfg.wm_trainer.optimizer, cfg.policy_trainer.optimizer,
+                          cfg.policy_trainer.critic_optimizer):
+                print("[INFO] Muon uses official momentum=0.95, Nesterov, NS=5, match_rms_adamw; "
+                      "Newton-Schulz internally uses BF16; model parameters stay FP32; "
+                      "both optimizer learning rates follow the live cosine schedule")
             print(f"[INFO] policy hidden layers: encoder={cfg.policy.encoder_hidden}, "
                   f"decoder={cfg.policy.decoder_hidden}; "
                   f"actor EMA decay={cfg.policy_trainer.ema_decay:g} "
@@ -422,6 +461,11 @@ class Trainer:
             if ck.get("sampler_contract") != self.command.sampler_contract:
                 raise ValueError("Checkpoint window-value sampler contract differs; start a new run")
             self.command.window_sampler.validate_state_dict(ck.get("window_sampler"))
+        validate_optimizer_configuration(ck["config"], self.cfg)
+        for name, optimizer in (("wm_opt", self.wm_trainer.opt),
+                                ("policy_opt", self.policy_trainer.opt),
+                                ("critic_opt", self.policy_trainer.critic_opt)):
+            validate_training_optimizer_state(optimizer, ck[name])
         self.wm.load_state_dict(ck["wm"])
         self.policy.load_state_dict(ck["policy"])
         self.critic.load_state_dict(ck["critic"])

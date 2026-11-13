@@ -162,6 +162,8 @@ def small_trainer(tmp_path):
     trainer.iteration, trainer.num_updates = 32000, 12784
     trainer.cfg = TrainConfig()
     # This fixture verifies historical sampler/optimizer recovery with toy MLPs.
+    trainer.cfg.wm_trainer.optimizer = "adam"
+    trainer.cfg.policy_trainer.optimizer = trainer.cfg.policy_trainer.critic_optimizer = "adam"
     trainer.cfg.world_model = WorldModelCfg()
     trainer.cfg.policy.running_normalization = False
     trainer.cfg.policy_trainer.critic_value_bound = False

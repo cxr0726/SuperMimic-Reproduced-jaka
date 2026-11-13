@@ -33,6 +33,7 @@ from supermimic.policy.nets import Critic, CriticCfg, PolicyCfg
 from supermimic.robots.contracts import checkpoint_context_layout
 from supermimic.robots.registry import get_robot_spec
 from supermimic.world_model.heads import AnalyticHeads
+from supermimic.world_model.wm_trainer import WMTrainerCfg
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 
 
@@ -58,6 +59,10 @@ def restore_config(obj, saved):
             setattr(obj, field.name, current)
         elif isinstance(current, PolicyTrainerCfg):
             current = PolicyTrainerCfg()
+            setattr(obj, field.name, current)
+        elif isinstance(current, WMTrainerCfg):
+            # Missing optimizer fields in old checkpoints mean all Adam.
+            current = WMTrainerCfg()
             setattr(obj, field.name, current)
         elif isinstance(current, EnvCfg):
             current = EnvCfg(reset_sampler="legacy")

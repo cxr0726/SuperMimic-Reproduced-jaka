@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 
@@ -16,10 +17,10 @@ from supermimic.policy.nets import Critic, Policy
 from supermimic.training.cuda_graph import (
     CapturedUpdate,
     graph_state,
-    prepare_adam_for_capture,
     replay_sampling_key,
 )
 from supermimic.training.distributed import allreduce_grads
+from supermimic.training.optimizers import build_training_optimizer, prepare_training_optimizer
 from supermimic.world_model.heads import ReferenceFrame
 from supermimic.world_model.world_model import WorldModel
 
@@ -34,6 +35,10 @@ class PolicyTrainerCfg:
     gae_lambda: float = 0.95
     lr: float = 2e-4
     betas: tuple[float, float] = (0.9, 0.95)
+    optimizer: Literal["adam", "muon"] = "adam"
+    critic_optimizer: Literal["adam", "muon"] = "adam"
+    muon_weight_decay: float = 0.1
+    critic_muon_weight_decay: float = 0.1
     grad_clip_norm: float = 1.0
     grad_clip_value: float = 0.1
     critic_lr: float = 2e-4
@@ -102,8 +107,6 @@ class PolicyTrainer:
         if cfg.use_critic and cfg.critic_value_bound and self.value_ceiling is None:
             raise ValueError("Critic value bounds need the world model's reward ceiling and gamma < 1")
         self.ema = ActorEMA(policy, cfg.ema_decay) if cfg.ema_decay > 0 else None
-        self.opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, betas=cfg.betas)
-        self.critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
         from supermimic.imagination.compiled import ImagStep
 
         self._active_buffer: ReplayBuffer | None = None
@@ -112,6 +115,14 @@ class PolicyTrainer:
         self._capture_enabled = bool(cfg.cuda_graph and device.type == "cuda" and not (
             torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
         ))
+        self.opt = build_training_optimizer(
+            policy, kind=cfg.optimizer, lr=cfg.lr, betas=cfg.betas,
+            muon_weight_decay=cfg.muon_weight_decay, capture=self._capture_enabled,
+        )
+        self.critic_opt = build_training_optimizer(
+            critic, kind=cfg.critic_optimizer, lr=cfg.critic_lr,
+            muon_weight_decay=cfg.critic_muon_weight_decay, capture=self._capture_enabled,
+        )
         self.step_fn = ImagStep(
             wm, lib.default_joint_pos, compile_mode=None if self._capture_enabled else cfg.compile,
             observation_layout=cfg.observation_layout,
@@ -149,8 +160,8 @@ class PolicyTrainer:
             self._critic_fit_loss_fn = compile_block(self._critic_minibatch_loss)
             self._gae_targets_fn = compile_block(gae_targets)
         if self._capture_enabled:
-            prepare_adam_for_capture(self.opt, device)
-            prepare_adam_for_capture(self.critic_opt, device)
+            prepare_training_optimizer(self.opt, device)
+            prepare_training_optimizer(self.critic_opt, device)
             if self.ema is not None:
                 self.ema.enable_cuda_graph()
         elif cfg.cuda_graph:
@@ -196,8 +207,8 @@ class PolicyTrainer:
         self._captured_update.invalidate()
         if self._capture_enabled:
             device = next(self.policy.parameters()).device
-            prepare_adam_for_capture(self.opt, device)
-            prepare_adam_for_capture(self.critic_opt, device)
+            prepare_training_optimizer(self.opt, device)
+            prepare_training_optimizer(self.critic_opt, device)
 
     def _critic_inputs(self, ro: ImagRollout):
         H1, n, _ = ro.states.shape

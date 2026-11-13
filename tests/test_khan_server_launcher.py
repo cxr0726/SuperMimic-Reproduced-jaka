@@ -75,7 +75,7 @@ def test_fusion_and_cdf_controls_keep_original_budget(project):
 
 
 @pytest.mark.parametrize("num_envs", [4096, 1024])
-def test_dry_run_selects_isaac_observations_without_overriding_original_optimization(project, num_envs):
+def test_dry_run_selects_isaac_observations_without_overriding_production_budget(project, num_envs):
     root, _ = project
     result = run_launcher(project, "--dry-run", "--num-envs", str(num_envs))
     assert result.returncode == 0, result.stderr
@@ -120,13 +120,15 @@ def test_dry_run_selects_isaac_observations_without_overriding_original_optimiza
     assert cfg.policy.goal_noise_z == 0.01
     assert cfg.policy.goal_noise_joint_pos == 0.05
     assert "future/history 5/5; goal 155; policy 465" in result.stdout
-    # Optimization values are owned by TrainConfig, rather than copied into Bash.
+    # Numeric hyperparameters remain owned by TrainConfig; Bash selects the algorithm.
     command_line = next(line for line in result.stdout.splitlines() if line.startswith("[COMMAND]"))
     flags = shlex.split(command_line.removeprefix("[COMMAND]"))[4:]
     assert not any(flag.startswith(("--world-model.", "--wm-trainer.", "--policy.",
                                     "--policy-trainer.", "--critic.", "--schedule."))
                    and flag not in {"--policy.history", "--policy.action-mode",
-                                     "--policy.goal-noise-z", "--policy.goal-noise-joint-pos"}
+                                     "--policy.goal-noise-z", "--policy.goal-noise-joint-pos",
+                                     "--wm-trainer.optimizer", "--policy-trainer.optimizer",
+                                     "--policy-trainer.critic-optimizer"}
                    for flag in flags)
     assert not (root / "logs").exists()
 
@@ -162,6 +164,8 @@ def test_resume_and_short_execution_keep_original_lr_horizon(project):
     (["--resume", "missing.pt"], "checkpoint does not exist"),
     (["--policy-trainer.batch-size", "128"], "Unknown option"),
     (["--run-name", "--dry-run"], "requires a value"),
+    (["--optimizer", "sgd"], "muon or adam"),
+    (["--optimizer", "--dry-run"], "requires a value"),
 ])
 def test_invalid_inputs_rejected_without_execution(project, args, expected):
     result = run_launcher(project, "--dry-run", *args)
@@ -196,6 +200,33 @@ def test_missing_robot_asset_rejected_before_execution(project):
     (root / "assets/robots/khan_mini/robot.xml").unlink()
     result = run_launcher(project, "--dry-run")
     assert result.returncode != 0 and "Missing Khan asset" in result.stderr
+
+
+@pytest.mark.parametrize("flags,expected", [
+    ([], "muon"),
+    (["--optimizer", "muon"], "muon"),
+    (["--optimizer", "adam"], "adam"),
+    (["--optimizer", "muon", "--optimizer", "adam"], "adam"),
+    (["--optimizer", "adam", "--optimizer", "muon"], "muon"),
+])
+def test_optimizer_switch_reaches_all_three_networks_without_changing_budget(project, flags, expected):
+    root, _ = project
+    result = run_launcher(project, "--dry-run", *flags)
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    assert cfg.wm_trainer.optimizer == cfg.policy_trainer.optimizer == expected
+    assert cfg.policy_trainer.critic_optimizer == expected
+    assert cfg.wm_trainer.muon_weight_decay == cfg.policy_trainer.muon_weight_decay == .1
+    assert cfg.policy_trainer.critic_muon_weight_decay == .1
+    assert cfg.wm_trainer.batch_size == 2048 and cfg.wm_trainer.batches_per_update == 10
+    assert cfg.policy_trainer.batch_size == 4096 and cfg.policy_trainer.horizon == 32
+    assert cfg.policy_trainer.critic_epochs == 5 and cfg.policy_trainer.critic_minibatches == 4
+    assert cfg.schedule.total_iterations == 320000 and cfg.schedule.updates_per_env_step == .4
+    assert cfg.policy_trainer.cuda_graph and cfg.wm_trainer.cuda_graph
+    assert cfg.env.actuator_delay is False and cfg.policy.action_mode == "reference_residual"
+    label = "optimizer: hybrid Muon" if expected == "muon" else "optimizer: Adam"
+    assert label in result.stdout
+    assert not (root / "logs").exists()
 
 
 @pytest.mark.parametrize("flags,enabled", [

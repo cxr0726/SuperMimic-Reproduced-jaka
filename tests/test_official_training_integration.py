@@ -30,6 +30,9 @@ def _trainer(tmp_path, *, actor_noise=True):
     )
     critic_cfg = CriticCfg(hidden=(8,), hidden_layer_norm=True, hidden_activation="gelu")
     trainer.cfg = TrainConfig(robot="khan_mini", device="cpu", policy=policy_cfg, critic=critic_cfg)
+    # These handcrafted optimizer fixtures exercise the historical Adam path.
+    trainer.cfg.wm_trainer.optimizer = "adam"
+    trainer.cfg.policy_trainer.optimizer = trainer.cfg.policy_trainer.critic_optimizer = "adam"
     trainer.cfg.env.obs_noise = actor_noise
     trainer.cfg.env.num_envs = 3
     trainer.cfg.world_model.hidden = (8,)
@@ -376,6 +379,9 @@ def _assert_tree_equal(actual, expected):
     ("critic_ln", "critic architecture differs"),
     ("critic_activation", "critic architecture differs"),
     ("sampler_successor", "bootstrap_next_frame differs"),
+    ("wm_optimizer", "WM optimizer differs"),
+    ("actor_optimizer", "Actor optimizer differs"),
+    ("critic_optimizer", "Critic optimizer differs"),
 ])
 def test_resume_semantic_rejections_precede_all_model_optimizer_and_sampler_mutations(tmp_path, change, error):
     original = _trainer(tmp_path)
@@ -410,6 +416,12 @@ def test_resume_semantic_rejections_precede_all_model_optimizer_and_sampler_muta
         saved["config"]["critic"].pop("hidden_activation")
     elif change == "sampler_successor":
         saved["window_sampler"]["bootstrap_next_frame"] = "global_clamped"
+    elif change == "wm_optimizer":
+        saved["config"]["wm_trainer"]["optimizer"] = "muon"
+    elif change == "actor_optimizer":
+        saved["config"]["policy_trainer"]["optimizer"] = "muon"
+    elif change == "critic_optimizer":
+        saved["config"]["policy_trainer"]["critic_optimizer"] = "muon"
     # If load starts copying weights too early, these incompatible values expose it.
     parameter_name = next(iter(dict(original.wm.named_parameters())))
     saved["wm"][parameter_name].fill_(7.)

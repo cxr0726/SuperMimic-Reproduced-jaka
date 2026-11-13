@@ -15,6 +15,7 @@ UPDATE_CAPTURE=1
 BATCH_REFERENCE_ENCODER=1
 LEARNER_FUSION=1
 REPLAY_SAMPLING=''
+OPTIMIZER=muon
 ACTUATOR_DELAY=False
 ACTION_MODE=reference_residual
 GOAL_NOISE_Z=0.01
@@ -29,6 +30,10 @@ Uses the same training entry point and current network/optimization defaults
 as train_khan_server.sh: encoder 1024/512/256, decoder 2048/1024/512/256,
 actor EMA 0.995, H=32, batch=2048/4096, UTD=0.4, 320k LR schedule,
 Isaac observation layout with future/history 5/5, goal 155, policy 465.
+WM, Actor and Critic use hybrid Muon: hidden matrices use Muon with decay 0.1;
+input/output Linear weights, biases and LayerNorm use fused capturable Adam with
+zero decay. --optimizer adam selects the previous Adam path for all three.
+Network/state tensors stay FP32; Muon's Newton-Schulz calculation internally uses BF16.
 The encoder goal has uniform z +/-0.01 m and q +/-0.05 rad noise; critic/reward
 stay clean. Residual actions use raw clean q_ref(t+1) + 0.5 * decoder_output
 (beta 1). Only the encoder goal is noise-augmented and running-normalized;
@@ -65,6 +70,7 @@ Options:
   --learner-fusion          Compile full WM window and Actor/Critic blocks (default)
   --no-learner-fusion       Use the d98f4df single-step compilation boundary
   --replay-sampling MODE    cdf (default) or multinomial; same legal-pair distribution
+  --optimizer MODE          muon (default) or adam; selects WM, Actor and Critic together
   --resume PATH              Restore a Khan checkpoint with matching data/configuration/assets
   --stop-after-iterations N  Optional execution limit; retains the 320k LR schedule
   --dry-run                 Check paths and print command without executing Python or training
@@ -73,6 +79,8 @@ Options:
 Use a new run-name for a fresh run; existing checkpoints are never silently
 overwritten. Dry-run checks file paths, not the tensors or metadata inside .pt.
 Training validates library/robot metadata and checkpoint compatibility.
+Start a fresh run when changing optimizer algorithms. To resume an Adam run,
+pass --optimizer adam; training rejects optimizer/checkpoint algorithm mismatch.
 Use train_khan_server.sh --data-dir PATH for a directory of full NPZ motions.
 HELP
 }
@@ -105,6 +113,7 @@ while (($#)); do
         --learner-fusion) LEARNER_FUSION=1; shift ;;
         --no-learner-fusion) LEARNER_FUSION=0; shift ;;
         --replay-sampling) need_value "$@"; REPLAY_SAMPLING="$2"; shift 2 ;;
+        --optimizer) need_value "$@"; OPTIMIZER="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown option: $1 (use --help)" ;;
@@ -113,6 +122,7 @@ done
 
 positive_integer "$NUM_ENVS" || die '--num-envs must be a positive integer'
 [[ -z "$REPLAY_SAMPLING" || "$REPLAY_SAMPLING" == cdf || "$REPLAY_SAMPLING" == multinomial ]] || die '--replay-sampling must be cdf or multinomial'
+[[ "$OPTIMIZER" == muon || "$OPTIMIZER" == adam ]] || die '--optimizer must be muon or adam'
 [[ -z "$STOP_AFTER" ]] || positive_integer "$STOP_AFTER" || \
     die '--stop-after-iterations must be a positive integer'
 [[ -n "$RUN_NAME" && "$RUN_NAME" != . && "$RUN_NAME" != .. && "$RUN_NAME" != */* \
@@ -167,6 +177,8 @@ command=(
     --env.actuator-delay "$ACTUATOR_DELAY" --env.delay-reset-first-step-no-delay True
     --env.merge-short-tail-bins True --env.tail-bin-merge-fraction 1.0
     --env.reset-min-remaining-steps 32
+    --wm-trainer.optimizer "$OPTIMIZER"
+    --policy-trainer.optimizer "$OPTIMIZER" --policy-trainer.critic-optimizer "$OPTIMIZER"
 )
 REFERENCE_FK_MODE=eager
 if ((REFERENCE_FK_COMPILE)); then
@@ -200,7 +212,13 @@ printf '[INFO] Khan compact library: %s\n' "$LIBRARY"
 printf '[INFO] Reference FK: %s; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "$REFERENCE_FK_MODE" "$NUM_ENVS"
 printf '[INFO] Learner execution: full-update capture=%s; batched reference encoder=%s; collection/reset unchanged\n' "$UPDATE_CAPTURE" "$BATCH_REFERENCE_ENCODER"
-printf '[INFO] Learner fusion=%s; replay sampling=%s; FP32 and original learning budget retained\n' "$LEARNER_FUSION" "${REPLAY_SAMPLING:-cdf}"
+printf '[INFO] Learner fusion=%s; replay sampling=%s; FP32 model/state tensors and original learning budget retained\n' "$LEARNER_FUSION" "${REPLAY_SAMPLING:-cdf}"
+if [[ "$OPTIMIZER" == muon ]]; then
+    printf '[INFO] WM/Actor/Critic optimizer: hybrid Muon; hidden matrices Muon (decay 0.1); input/output weights and vectors fused capturable Adam (decay 0); live LR follows cosine schedule\n'
+    printf '[INFO] Muon Newton-Schulz internally uses BF16; network autocast remains OFF\n'
+else
+    printf '[INFO] WM/Actor/Critic optimizer: Adam; previous optimizer path; use this to resume matching Adam checkpoints\n'
+fi
 printf '[INFO] Khan observations: future/history 5/5; goal 155; policy 465; activation recomputation: OFF\n'
 printf '[INFO] Actor hidden defaults: encoder 1024/512/256; decoder 2048/1024/512/256; EMA decay 0.995; training uses live, inference auto-selects EMA\n'
 printf '[INFO] Actor/Critic hidden blocks: Linear -> LayerNorm -> GELU; bootstrap successor: source-clip clamped\n'
