@@ -13,6 +13,7 @@ from supermimic.imagination.objective import gae_targets, policy_objective
 from supermimic.imagination.rollout import ImagRollout, imagine
 from supermimic.policy.ema import ActorEMA
 from supermimic.policy.nets import Critic, Policy
+from supermimic.training.cuda_graph import CapturedUpdate, graph_state, prepare_adam_for_capture
 from supermimic.training.distributed import allreduce_grads
 from supermimic.world_model.heads import ReferenceFrame
 from supermimic.world_model.world_model import WorldModel
@@ -42,6 +43,9 @@ class PolicyTrainerCfg:
     observation_layout: str = "supermimic"
     ema_decay: float = 0.995  # Post-actor-update deployment average; zero disables it.
     critic_value_bound: bool = False  # Historical configs had no bootstrap/target upper bound.
+    batch_reference_encoder: bool = True
+    cuda_graph: bool = False  # Execution-only: full H32 actor + critic update.
+    cuda_graph_warmup: int = 3  # Counted training updates, not extra optimizer steps.
 
 
 def critic_value_ceiling(max_step_reward: float, gamma: float) -> float:
@@ -54,7 +58,8 @@ def critic_value_ceiling(max_step_reward: float, gamma: float) -> float:
 
 
 @torch.no_grad()
-def critic_bound_diagnostics(ceiling: float, **raw_values: torch.Tensor) -> dict[str, float]:
+def critic_bound_diagnostics(ceiling: float, *, tensor_metrics: bool = False,
+                             **raw_values: torch.Tensor) -> dict:
     """Summarize unclipped predictions/targets with a single device-to-host copy.
 
     P99 uses the empirical nearest-rank percentile and ``kthvalue`` rather than
@@ -72,7 +77,8 @@ def critic_bound_diagnostics(ceiling: float, **raw_values: torch.Tensor) -> dict
                       f"critic_{name}_raw_p99"))
     if not statistics:
         return {}
-    return dict(zip(names, torch.stack(statistics).cpu().tolist(), strict=True))
+    values = torch.stack(statistics)
+    return dict(zip(names, values.unbind() if tensor_metrics else values.cpu().tolist(), strict=True))
 
 
 class PolicyTrainer:
@@ -94,15 +100,68 @@ class PolicyTrainer:
         self.critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
         from supermimic.imagination.compiled import ImagStep
 
-        self.step_fn = ImagStep(wm, lib.default_joint_pos, compile_mode=cfg.compile,
-                               observation_layout=cfg.observation_layout,
-                               return_body_poses=cfg.use_critic and cfg.observation_layout == "isaac_khan")
+        self._active_buffer: ReplayBuffer | None = None
+        self._prepared_starts = None
+        device = next(policy.parameters()).device
+        self._capture_enabled = bool(cfg.cuda_graph and device.type == "cuda" and not (
+            torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
+        ))
+        self.step_fn = ImagStep(
+            wm, lib.default_joint_pos, compile_mode=None if self._capture_enabled else cfg.compile,
+            observation_layout=cfg.observation_layout,
+            return_body_poses=cfg.use_critic and cfg.observation_layout == "isaac_khan",
+        )
+        if self._capture_enabled and cfg.compile:
+            # The outer recording owns graph replay. Keep step fusion without
+            # a second, nested cudagraph that could overwrite BPTT activations.
+            self.step_fn._fn = torch.compile(
+                self.step_fn._step, dynamic=False, options={"triton.cudagraphs": False},
+            )
+        if self._capture_enabled:
+            prepare_adam_for_capture(self.opt, device)
+            prepare_adam_for_capture(self.critic_opt, device)
+            if self.ema is not None:
+                self.ema.enable_cuda_graph()
+        elif cfg.cuda_graph:
+            print("[INFO] Actor/Critic CUDA Graph: eager fallback (CPU or distributed gradient reduction)")
+        self._captured_update = CapturedUpdate(
+            self._update_tensors, self._graph_state, enabled=self._capture_enabled,
+            warmup=cfg.cuda_graph_warmup, label="Actor/Critic",
+        )
 
     def set_lr(self, lr: float) -> None:
         for g in self.opt.param_groups:
-            g["lr"] = lr
+            if isinstance(g["lr"], torch.Tensor):
+                g["lr"].fill_(lr)
+            else:
+                g["lr"] = lr
         for g in self.critic_opt.param_groups:
-            g["lr"] = lr
+            if isinstance(g["lr"], torch.Tensor):
+                g["lr"].fill_(lr)
+            else:
+                g["lr"] = lr
+
+    def _graph_state(self):
+        modules = [self.wm, self.policy, self.critic]
+        extra = []
+        if self.ema is not None:
+            modules.append(self.ema.module)
+            if self.ema._device_updates is not None:
+                extra.append(self.ema._device_updates)
+        if self._active_buffer is not None:
+            extra.extend(v for v in vars(self._active_buffer).values() if isinstance(v, torch.Tensor))
+        extra.extend(v for v in vars(self.lib).values() if isinstance(v, torch.Tensor))
+        if self._prepared_starts is not None:
+            extra.append(self._prepared_starts.weights)
+        return graph_state(modules, (self.opt, self.critic_opt), extra)
+
+    def reset_capture(self) -> None:
+        """Optimizer restore may replace step/LR storage; record a fresh graph."""
+        self._captured_update.invalidate()
+        if self._capture_enabled:
+            device = next(self.policy.parameters()).device
+            prepare_adam_for_capture(self.opt, device)
+            prepare_adam_for_capture(self.critic_opt, device)
 
     def _critic_inputs(self, ro: ImagRollout):
         H1, n, _ = ro.states.shape
@@ -144,17 +203,41 @@ class PolicyTrainer:
         return feat, goals, ro.e_root, errors
 
     def update(self, buffer: ReplayBuffer, xi_norm_fn=None) -> dict[str, float]:
+        self._active_buffer = buffer
+        self._prepared_starts = (buffer.prepare_starts(
+            self.cfg.history, horizon=self.cfg.horizon, clip_last=self.lib.clip_last,
+        ) if hasattr(buffer, "prepare_starts") else None)
+        if self._capture_enabled and self._prepared_starts is None:
+            raise TypeError("Captured policy updates require prepared GPU replay sampling")
+        metrics = self._captured_update()
+        # Exactly one device-to-host metric copy outside the update graph.
+        names = list(metrics)
+        values = torch.stack([torch.as_tensor(metrics[k], device=next(self.policy.parameters()).device)
+                              for k in names]).detach().cpu().tolist()
+        return dict(zip(names, values, strict=True))
+
+    def _update_tensors(self) -> dict[str, torch.Tensor]:
         cfg = self.cfg
+        buffer = self._active_buffer
+        sampling = {"prepared": self._prepared_starts} if self._prepared_starts is not None else {}
         start = buffer.sample_starts(
             cfg.batch_size, cfg.history, horizon=cfg.horizon,
             clip_last=self.lib.clip_last,
+            **sampling,
         )
         xi_norm = self.wm.spec.normalize_xi(start.xi)
 
         # ---- actor: BPTT through the frozen world model ------------------------------------
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
-        ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs, activation_checkpoint=cfg.activation_checkpoint)
+        ro = imagine(
+            self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames,
+            obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs,
+            activation_checkpoint=cfg.activation_checkpoint,
+            batch_reference_encoder=cfg.batch_reference_encoder, tensor_metrics=True,
+            validate_horizon=self._prepared_starts is None,
+            checkpoint_preserve_rng_state=not self._capture_enabled,
+        )
         feat, goals, e_root, errors = self._critic_inputs(ro)
         raw_bootstrap = None
         if cfg.use_critic:
@@ -166,7 +249,7 @@ class PolicyTrainer:
             v_H = None
         J = policy_objective(ro, v_H, cfg.gamma)
         loss = -J / cfg.horizon
-        self.opt.zero_grad(set_to_none=True)
+        self.opt.zero_grad(set_to_none=not self._capture_enabled)
         loss.backward()
         allreduce_grads(self.policy)
         gn = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.grad_clip_norm)
@@ -178,13 +261,13 @@ class PolicyTrainer:
         self.critic.requires_grad_(True)
 
         metrics = {
-            "imag_objective": float(J.detach()),
-            "imag_return_undisc": float((ro.survival[:-1] * ro.rewards).sum(0).mean().detach()),
-            "imag_reward_mean": float(ro.rewards.mean().detach()),
-            "imag_survival_H": float(ro.survival[-1].mean().detach()),
-            "imag_dhat_mean": float(ro.dhat[1:].mean().detach()),
-            "policy_grad_norm": float(gn),
-            "action_abs_mean": float(ro.actions.abs().mean().detach()),
+            "imag_objective": J.detach(),
+            "imag_return_undisc": (ro.survival[:-1] * ro.rewards).sum(0).mean().detach(),
+            "imag_reward_mean": ro.rewards.mean().detach(),
+            "imag_survival_H": ro.survival[-1].mean().detach(),
+            "imag_dhat_mean": ro.dhat[1:].mean().detach(),
+            "policy_grad_norm": gn.detach(),
+            "action_abs_mean": ro.actions.abs().mean().detach(),
         }
         for k, v in ro.reward_terms.items():
             metrics[f"imag_r/{k}"] = v
@@ -218,19 +301,20 @@ class PolicyTrainer:
                     pred = self.critic(X_feat[idx], X_goal[idx], X_xi[idx], X_er[idx],
                                        X_errors[idx] if X_errors is not None else None)
                     closs = torch.nn.functional.mse_loss(pred, Y[idx])
-                    self.critic_opt.zero_grad(set_to_none=True)
+                    self.critic_opt.zero_grad(set_to_none=not self._capture_enabled)
                     closs.backward()
                     allreduce_grads(self.critic)
                     torch.nn.utils.clip_grad_norm_(self.critic.parameters(), cfg.critic_grad_clip)
                     self.critic_opt.step()
                     last = closs.detach()
-            metrics["critic_loss"] = float(last)
-            metrics["critic_value_mean"] = float(values.mean())
-            metrics["critic_target_mean"] = float(targets.mean())
+            metrics["critic_loss"] = last
+            metrics["critic_value_mean"] = values.mean()
+            metrics["critic_target_mean"] = targets.mean()
             if self.value_ceiling is not None:
-                metrics["critic_value_ceiling"] = self.value_ceiling
-                metrics["critic_value_bound_enabled"] = float(cfg.critic_value_bound)
+                metrics["critic_value_ceiling"] = values.new_full((), self.value_ceiling)
+                metrics["critic_value_bound_enabled"] = values.new_full((), float(cfg.critic_value_bound))
                 metrics.update(critic_bound_diagnostics(
-                    self.value_ceiling, bootstrap=raw_bootstrap, value=values, target=raw_targets,
+                    self.value_ceiling, tensor_metrics=True,
+                    bootstrap=raw_bootstrap, value=values, target=raw_targets,
                 ))
         return metrics

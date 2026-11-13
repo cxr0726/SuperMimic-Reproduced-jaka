@@ -274,22 +274,44 @@ class Policy(nn.Module):
         self.decoder.observation_normalizer.update(obs_hist)
         self.encoders["motion"].normalizer.update(goal if encoder_goal is None else encoder_goal)
 
-    def forward(self, obs_hist: torch.Tensor, goal: torch.Tensor, interface: str = "motion",
-                *, encoder_goal: torch.Tensor | None = None) -> torch.Tensor:
-        # Compose the reference branch in physical radians before the encoder
-        # sees goal noise or running normalization. Keep an independent action
-        # tensor rather than forwarding standardized reference joint values.
-        reference_action = None
+    def reference_action(self, goal: torch.Tensor) -> torch.Tensor | None:
+        """Default-relative reference skip from clean, physical-unit goals only."""
         if self.cfg.action_mode == "reference_residual":
             q_ref = reference_joint_positions(
                 goal, layout=self.cfg.observation_layout, num_joints=self.cfg.num_joints,
                 future_frames=self.cfg.future_frames, frame_offset=self.cfg.reference_frame_offset,
             )
-            reference_action = self.cfg.reference_residual_beta * (
+            return self.cfg.reference_residual_beta * (
                 q_ref - self.reference_q_default
             ) / self.reference_action_scale
-        action = self.decoder(self.encoders[interface](goal if encoder_goal is None else encoder_goal), obs_hist)
+        return None
+
+    def encode_goal(self, goal: torch.Tensor, interface: str = "motion", *,
+                    encoder_goal: torch.Tensor | None = None) -> torch.Tensor:
+        """Encode without changing statistics or detaching the encoder graph.
+
+        Reference-only goals can be flattened across time and batch for one
+        call. The physical residual skip remains a separate clean-goal path.
+        """
+        return self.encoders[interface](goal if encoder_goal is None else encoder_goal)
+
+    def _decode(self, obs_hist: torch.Tensor, latent: torch.Tensor,
+                reference_action: torch.Tensor | None) -> torch.Tensor:
+        action = self.decoder(latent, obs_hist)
         return action if reference_action is None else action + reference_action
+
+    def decode_from_latent(self, obs_hist: torch.Tensor, goal: torch.Tensor,
+                           latent: torch.Tensor) -> torch.Tensor:
+        """Decode a precomputed latent while preserving the raw reference skip."""
+        return self._decode(obs_hist, latent, self.reference_action(goal))
+
+    def forward(self, obs_hist: torch.Tensor, goal: torch.Tensor, interface: str = "motion",
+                *, encoder_goal: torch.Tensor | None = None) -> torch.Tensor:
+        # Compose the reference branch before the encoder consumes its noisy
+        # copy. Both forward and pre-encoded decoding use the same affine map.
+        reference_action = self.reference_action(goal)
+        latent = self.encode_goal(goal, interface, encoder_goal=encoder_goal)
+        return self._decode(obs_hist, latent, reference_action)
 
 
 class Critic(nn.Module):

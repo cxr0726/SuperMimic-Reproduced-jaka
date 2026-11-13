@@ -65,6 +65,16 @@ def parse_config(output):
     return tyro.cli(TrainConfig, args=printed_command(output)[4:], console_outputs=False)
 
 
+def test_learning_execution_flags_can_disable_capture_without_changing_batches(project):
+    result = run_launcher(project, "--dry-run", "--no-update-capture", "--no-batch-reference-encoder")
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    assert not cfg.wm_trainer.cuda_graph and not cfg.policy_trainer.cuda_graph
+    assert not cfg.policy_trainer.batch_reference_encoder
+    assert cfg.wm_trainer.batch_size == 2048 and cfg.policy_trainer.batch_size == 4096
+    assert cfg.policy_trainer.horizon == 32 and cfg.schedule.updates_per_env_step == .4
+
+
 @pytest.mark.parametrize("num_envs", [4096, 1024])
 def test_default_compact_run_preserves_original_training_configuration(project, num_envs):
     root, _ = project

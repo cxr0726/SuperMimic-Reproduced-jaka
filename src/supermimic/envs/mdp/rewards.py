@@ -31,6 +31,16 @@ NECK_JOINT_NAMES = ("Neck_yaw_joint", "Neck_pitch_joint")
 KHAN_FOOT_BODY_NAMES = KHAN_FOOT_BODIES
 
 
+def _selected_joints(values: torch.Tensor, ids: Sequence[int]) -> torch.Tensor:
+    # Static selects avoid implicit pageable CPU->CUDA copies of list indices
+    # when an entire (uncompiled as well as compiled) update is captured.
+    return torch.stack([values[..., index] for index in ids], dim=-1)
+
+
+def _selected_bodies(values: torch.Tensor, ids: Sequence[int]) -> torch.Tensor:
+    return torch.stack([values[..., index, :] for index in ids], dim=-2)
+
+
 @dataclass
 class TrackingRewardCfg:
     std_body_pos: float = 0.3
@@ -149,7 +159,7 @@ def motion_foot_position_error_exp(
     command = env.command_manager.get_term(command_name)
     ids = foot_body_indices(command.cfg.body_names, body_names)
     return foot_position_tracking_exp(
-        command.robot_body_pos_w[..., ids, :], command.body_pos_relative_w[..., ids, :], std,
+        _selected_bodies(command.robot_body_pos_w, ids), _selected_bodies(command.body_pos_relative_w, ids), std,
     )
 
 
@@ -161,7 +171,7 @@ def motion_foot_orientation_error_exp(
     command = env.command_manager.get_term(command_name)
     ids = foot_body_indices(command.cfg.body_names, body_names)
     return foot_orientation_tracking_exp(
-        command.robot_body_quat_w[..., ids, :], command.body_quat_relative_w[..., ids, :], std,
+        _selected_bodies(command.robot_body_quat_w, ids), _selected_bodies(command.body_quat_relative_w, ids), std,
     )
 
 
@@ -251,24 +261,24 @@ def tracking_reward_terms(
         if not neck_joint_ids or ref_joint_pos is None:
             raise ValueError("Neck position reward requires neck joint IDs and reference positions")
         terms["motion_neck_pos"] = dt * cfg.w_neck_pos * joint_tracking_error_exp(
-            joint_pos[..., neck_joint_ids], ref_joint_pos[..., neck_joint_ids], cfg.std_neck_pos,
+            _selected_joints(joint_pos, neck_joint_ids), _selected_joints(ref_joint_pos, neck_joint_ids), cfg.std_neck_pos,
         )
     if cfg.w_neck_vel:
         if not neck_joint_ids or joint_vel is None or ref_joint_vel is None:
             raise ValueError("Neck velocity reward requires joint velocities and reference velocities")
         terms["motion_neck_vel"] = dt * cfg.w_neck_vel * joint_tracking_error_exp(
-            joint_vel[..., neck_joint_ids], ref_joint_vel[..., neck_joint_ids], cfg.std_neck_vel,
+            _selected_joints(joint_vel, neck_joint_ids), _selected_joints(ref_joint_vel, neck_joint_ids), cfg.std_neck_vel,
         )
     if cfg.w_foot_pos or cfg.w_foot_ori:
         if len(foot_body_ids) != 2 or len(set(foot_body_ids)) != 2:
             raise ValueError("Foot tracking rewards require the two tracked foot body IDs")
         if cfg.w_foot_pos:
             terms["motion_foot_pos"] = dt * cfg.w_foot_pos * foot_position_tracking_exp(
-                robot_body_pos_w[..., foot_body_ids, :], rel_pos[..., foot_body_ids, :], cfg.std_foot_pos,
+                _selected_bodies(robot_body_pos_w, foot_body_ids), _selected_bodies(rel_pos, foot_body_ids), cfg.std_foot_pos,
             )
         if cfg.w_foot_ori:
             terms["motion_foot_ori"] = dt * cfg.w_foot_ori * foot_orientation_tracking_exp(
-                robot_body_quat_w[..., foot_body_ids, :], rel_quat[..., foot_body_ids, :], cfg.std_foot_ori,
+                _selected_bodies(robot_body_quat_w, foot_body_ids), _selected_bodies(rel_quat, foot_body_ids), cfg.std_foot_ori,
             )
     total = terms["motion_global_root_pos"]
     for k, v in terms.items():

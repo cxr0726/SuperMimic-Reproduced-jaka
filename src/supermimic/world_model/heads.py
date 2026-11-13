@@ -185,7 +185,8 @@ class AnalyticHeads:
     @staticmethod
     def termination_features(root_pos: torch.Tensor, root_quat: torch.Tensor, ref: ReferenceFrame) -> torch.Tensor:
         """[height error, tilt error] (N, 2) — the quantities the paper thresholds (0.25 m, 0.8)."""
-        g = torch.tensor([0.0, 0.0, -1.0], dtype=root_quat.dtype, device=root_quat.device).expand(root_quat.shape[:-1] + (3,))
+        g = torch.zeros_like(root_quat[..., :3])
+        g[..., 2] = -1.0
         tilt = quat_apply_inverse(ref.root_quat_w, g)[..., 2] - quat_apply_inverse(root_quat, g)[..., 2]
         height = ref.root_pos_w[..., 2] - root_pos[..., 2]
         return torch.stack([height, tilt], dim=-1)

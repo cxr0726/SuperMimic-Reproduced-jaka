@@ -101,6 +101,7 @@ def wrap_to_pi(a: torch.Tensor) -> torch.Tensor:
 
 def projected_gravity(q_body_w: torch.Tensor) -> torch.Tensor:
     """Gravity direction (0,0,-1) expressed in the body frame."""
-    g = torch.tensor([0.0, 0.0, -1.0], dtype=q_body_w.dtype, device=q_body_w.device)
-    g = g.expand(*q_body_w.shape[:-1], 3)
+    # Device-native construction also works inside a complete learner graph.
+    g = q_body_w.new_zeros((*q_body_w.shape[:-1], 3))
+    g[..., 2] = -1.0
     return quat_apply_inverse(q_body_w, g)

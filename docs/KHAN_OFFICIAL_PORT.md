@@ -161,6 +161,101 @@ v3验证（2026-11-12，足部权重各0.25）：纯CPU756项通过；实际CUDA
 网络和batch采用当前正式值；仅本机显存短测开启activation checkpoint，服务器仍关闭。
 旧v1/v2真实checkpoint契约和策略加载仍通过。此处验证实现一致性，效果需重新训练评估。
 
+## 学习侧执行加速（2026-11-13）
+
+当前新训练默认启用 `wm_trainer.cuda_graph`、`policy_trainer.cuda_graph` 和
+`policy_trainer.batch_reference_encoder`。这是执行优化，保持网络、batch、H32、
+更新比例、奖励、DR和原始参考残差动作不变，也不引入BF16或Muon。
+
+Khan的reference-only goal在H32上合并运行一次encoder；实际相对参考朝向仍逐步
+由想象state计算。encoder保留梯度，goal噪声只进入encoder副本，残差直通继续
+使用clean raw关节角。G1含state-dependent anchor的goal保留逐步编码。
+
+Replay在学习块前根据完整episode/terminal/环形覆盖/H32条件，在GPU刷新固定地址
+的合法权重表。每个新replay版本只在边界检查一次空集；图内multinomial和gather
+无Tensor转Python。仍是合法环境×时间位置等权，不采用Party的候选拒绝采样或
+不完整窗口cut-mask。同一WM学习块的10个batch复用这张表。
+
+WM图覆盖整轮10个minibatch：每批的采样、8步损失、反向、裁剪、Adam更新，以及
+轮末指标汇总都在同一张图中，每次重放准确执行10次Adam更新。
+Actor/Critic图覆盖H32、Actor反向/Adam/EMA，以及原5×4次Critic优化。
+前三轮调用是计入训练的真实warmup，第四轮记录并重放一次，不多做优化步。
+EMA首次复制与计数在设备端处理；cosine LR通过设备标量原地更新，重放可见。
+CPU和多卡梯度归约使用明确的普通更新回退，不捕获collectives。
+
+采集/reset保持原实现：`env.step → Recorder → fresh normalization → prepare →
+WM update → Actor/Critic update`。startup惯量/质量及per-reset PD、摩擦、bias
+不变，不引入Party的masked-reset限制或Torch/Warp捕获补丁。官方代码本身也采用
+普通采集、独立捕获learners的边界，因此无需先改整个物理采集/reset。
+
+checkpoint仍保存普通Adam与EMA状态；恢复后转换旧float LR/CPU step张量并重建图。
+不保存CUDA Graph对象。同v3模型可继续resume；旧v1/v2到v3的语义限制仍适用。
+
+两种服务器脚本提供对照开关：
+
+```bash
+# 默认：batched encoder + full learner update capture
+bash scripts/training/train_khan_compact_server.sh \
+  --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
+  --run-name khan_8452_v3_learning_capture_4096 --num-envs 4096
+
+# 普通更新对照，网络和学习预算保持相同
+# 在上述命令后追加：--no-update-capture
+# 若也要逐步encoder对照，再追加：--no-batch-reference-encoder
+```
+
+固定同一真实采集replay的速度对照工具：
+
+```bash
+.venv/bin/python scripts/benchmarks/benchmark_learner_updates.py \
+  --config logs/YOUR_RUN/config.json \
+  --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
+  --num-envs 8 --warmup 4 --samples 5 --output logs/learner_update_benchmark.json
+```
+
+三组均保留新合法采样器，分别比较逐步encoder普通更新、批量encoder普通更新、
+批量encoder捕获更新；它们不代表与旧b024710所有实现的完整差异。
+报告warmup/编译成本和稳态耗时；小网络结果不能外推为正式4096batch的加速倍率。
+
+本机实测（当前未提交工作树，RTX 4070 SUPER，8452紧凑PT，固定同一份真实采集
+replay）：正式网络、WM batch=2048/window=8/每轮10次、Actor batch=4096/H32、
+Critic每轮5×4次更新均保持；物理采集只用8个环境准备replay。三组都启用已有的
+activation checkpoint以适应本机12GB显存，服务器脚本默认仍关闭。每组先运行4个
+真实学习块，再测5个块，以下为中位数，不含物理采集和首次编译/捕获：
+
+| 执行模式 | WM每轮 | Actor/Critic每轮 | 合计 |
+|---|---:|---:|---:|
+| 逐步encoder，普通更新 | 391.75 ms | 809.10 ms | 1200.29 ms |
+| 批量encoder，普通更新 | 389.96 ms | 811.31 ms | 1202.16 ms |
+| 批量encoder，完整更新捕获 | 390.29 ms | 743.31 ms | 1128.78 ms |
+
+各列中位数独立计算，故不一定相加恰等于合计。正式尺寸下合计耗时约下降6.0%，
+批量encoder本身未显示提速；WM未测出明确收益，主要收益在Actor/Critic。较小网络与
+batch=64的同协议对照为396.81→365.65→63.25 ms，说明launch/调度占比影响很大。
+这些结果不能直接推导4090、4096物理环境、关闭activation checkpoint时的it/s。
+批量encoder需要保存H×batch的激活，图还会保留私有内存池，不能假设一定省显存。
+原始结果为`logs/benchmark_learner_updates_formal_full_20261113.json`和
+`logs/benchmark_learner_updates_full_20261113.json`，包含逐次计时、首次编译/捕获
+成本、工作树源码及参数指纹和优化步数；三组使用相同初始模型、归一化统计与replay。
+
+验证：CPU非slow回归781项通过；GPU验证合法采样、完整WM/Actor/Critic更新的参数、
+梯度和指标一致性，以及变化的LR、图内新噪声、EMA计数与checkpoint恢复。GPU批量
+矩阵乘法/Adam执行路径允许FP32舍入误差，不声称逐位相同。完整真实mjlab短训练
+正式尺寸运行60步，准确执行WM80/Actor8/Critic160次；小尺寸运行80步后恢复并再
+运行50步，累计WM200/Actor20/Critic400次，EMA20，两图均重建并成功重放，参数和
+优化器状态均有限。短测验证实现与执行预算，不代替长期收敛或实机评估。
+正式尺寸及恢复后的检查结果分别保存在
+`logs/smoke_learning_capture_formal_full_20261113/verification.json`和
+`logs/smoke_learning_capture_full_resume_20261113/verification.json`。
+
+物理图的取舍依据：官方`runners/supermimic_runner.py::_step_and_store`仍普通调用
+`env.step`并写replay，在`_flush_normalization`后独立运行captured learners。
+Party的`train.py::_collect_core`则连同采集/reset一起捕获，但其
+`env.py::reset_masked`明确限制无stateful sensing、push、per-episode mjlab
+randomization和actuator delay；还补丁TorchArray写入、禁用嵌套Warp step图并对齐
+Torch/Warp stream。当前Khan每次reset的PD/摩擦/bias、Recorder的terminal额外行和
+动态env IDs需另行适配，不能直接套用这部分，也不是本次学习图捕获的前置条件。
+
 ## 自举后继边界
 
 采样器每20次物理step更新一次；单个环境reset不重启统计窗口。普通窗口末使用

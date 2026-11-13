@@ -428,6 +428,9 @@ class Trainer:
             ema.restore(self.policy, ck)
             print(f"[INFO] actor EMA: restored={ck.get('policy_ema') is not None}, "
                   f"updates={ema.num_updates}, decay={ema.decay:g}")
+        for trainer in (self.wm_trainer, self.policy_trainer):
+            if hasattr(trainer, "reset_capture"):
+                trainer.reset_capture()
         load_sampler_state(self.command, ck)
         self.iteration = ck["iteration"]
         self.start_iteration = self.iteration

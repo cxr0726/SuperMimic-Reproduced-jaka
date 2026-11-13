@@ -37,6 +37,25 @@ class StartBatch:
     history_valid: torch.Tensor | None = None  # (hist,n); False denotes reset backfill
 
 
+@dataclass
+class PreparedReplaySelection:
+    """Fixed-storage legal-row weights for one kind of replay sampling.
+
+    Preparation belongs outside a captured update. Repeating preparation while
+    replay is unchanged is free of device-to-host reads. After collection the
+    caller refreshes the *same* storage before replaying its CUDA graph. Sampling
+    itself contains only fixed-shape GPU operations and fresh multinomial RNG.
+    """
+
+    owner: int
+    kind: str
+    key: tuple
+    weights: torch.Tensor  # flattened (E*T,), 1 for each legal start
+    count: torch.Tensor  # scalar long, kept on the replay device
+    dependency: torch.Tensor | None = None
+    revision: tuple | None = None
+
+
 class ReplayBuffer:
     def __init__(self, num_envs: int, capacity: int, state_dim: int, act_dim: int, xi_dim: int, device):
         self.E, self.T = num_envs, capacity
@@ -59,6 +78,8 @@ class ReplayBuffer:
         self.ep_counter = torch.zeros(E, dtype=torch.long, device=self.device)
         self.total_rows = 0
         self._env_ar = torch.arange(E, device=self.device)
+        self._write_revision = 0
+        self._prepared: dict[tuple, PreparedReplaySelection] = {}
 
     # ------------------------------------------------------------------ writes
 
@@ -79,10 +100,12 @@ class ReplayBuffer:
         self.valid[env_ids, p] = True
         self.ptr[env_ids] = (p + 1) % self.T
         self.total_rows += int(env_ids.numel())
+        self._write_revision += 1
 
     @torch.no_grad()
     def end_episode(self, env_ids) -> None:
         self.ep_counter[env_ids] += 1
+        self._write_revision += 1
 
     @property
     def size(self) -> int:
@@ -93,6 +116,101 @@ class ReplayBuffer:
     def _rolled(self, x: torch.Tensor, j: int) -> torch.Tensor:
         """x[:, (t + j) % T] for every t."""
         return torch.roll(x, shifts=-j, dims=1) if j else x
+
+    def _selection_revision(self, *, starts: bool, dependency=None) -> tuple:
+        # Tensor versions also catch explicit bookkeeping edits by diagnostics
+        # and tests; reading these CPU metadata counters never synchronizes CUDA.
+        tensors = (self.valid, self.terminal, self.ptr)
+        tensors += (self.frame, self.clip) if starts else (self.ep_id,)
+        return (self._write_revision, *(x._version for x in tensors),
+                None if dependency is None else dependency._version)
+
+    def _prepared_storage(self, kind: str, key: tuple, dependency=None) -> PreparedReplaySelection:
+        cache_key = (kind, *key)
+        if cache_key not in self._prepared:
+            self._prepared[cache_key] = PreparedReplaySelection(
+                owner=id(self), kind=kind, key=key,
+                weights=torch.zeros(self.E * self.T, device=self.device),
+                count=torch.zeros((), dtype=torch.long, device=self.device), dependency=dependency,
+            )
+        return self._prepared[cache_key]
+
+    @staticmethod
+    def _preflight_selection(selection: PreparedReplaySelection, message: str) -> None:
+        # One explicit block-boundary check, never inside a captured update.
+        # Failing here avoids multinomial's device assertion poisoning CUDA.
+        if int(selection.count.item()) == 0:
+            raise RuntimeError(message)
+
+    @torch.no_grad()
+    def prepare_windows(self, k: int) -> PreparedReplaySelection:
+        """Refresh cached legal k-transition starts before a WM update block.
+
+        All legality computation stays on the replay device. Only a changed
+        replay revision performs the empty-set preflight; the ten WM batches
+        can share the resulting fixed-storage selection without rescanning it.
+        """
+        if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+            raise ValueError("window length must be a positive integer")
+        selection = self._prepared_storage("windows", (k,))
+        revision = self._selection_revision(starts=False)
+        if selection.revision != revision:
+            mask = self.window_mask(k)
+            selection.weights.copy_(mask.reshape(-1))
+            selection.count.copy_(mask.sum())
+            self._preflight_selection(selection, "replay buffer has no sampleable rows yet")
+            selection.revision = revision
+        return selection
+
+    @staticmethod
+    def _validate_start_arguments(hist: int, horizon, clip_last, device) -> None:
+        if isinstance(hist, bool) or not isinstance(hist, int) or hist < 1:
+            raise ValueError("history length must be a positive integer")
+        if (horizon is None) != (clip_last is None):
+            raise ValueError("horizon and clip_last must be provided together")
+        if horizon is not None and (isinstance(horizon, bool) or not isinstance(horizon, int) or horizon < 1):
+            raise ValueError("imagination horizon must be positive")
+        if clip_last is not None and (
+            clip_last.ndim != 1 or clip_last.numel() == 0 or clip_last.device != device
+        ):
+            raise ValueError("clip_last must be a nonempty vector on the replay device")
+
+    @torch.no_grad()
+    def start_mask(self, hist: int, *, horizon=None, clip_last=None) -> torch.Tensor:
+        """Legal policy starts; future reference availability is not replay length."""
+        self._validate_start_arguments(hist, horizon, clip_last, self.frame.device)
+        mask = self.valid & ~self.terminal
+        t_idx = torch.arange(self.T, device=self.device)[None, :]
+        dist_to_ptr = (self.ptr[:, None] - t_idx - 1) % self.T
+        mask &= dist_to_ptr < self.T - hist - 1
+        if horizon is not None:
+            mask &= self.frame + horizon <= clip_last[self.clip]
+        return mask
+
+    @torch.no_grad()
+    def prepare_starts(self, hist: int, *, horizon=None, clip_last=None) -> PreparedReplaySelection:
+        """Refresh H-valid policy starts before an Actor/Critic update block.
+
+        Call this again after physical collection, before replaying a graph
+        that closes over this selection. Its weights keep the same address.
+        """
+        self._validate_start_arguments(hist, horizon, clip_last, self.frame.device)
+        key = (hist, horizon, None if clip_last is None else id(clip_last))
+        selection = self._prepared_storage("starts", key, clip_last)
+        revision = self._selection_revision(starts=True, dependency=clip_last)
+        if selection.revision != revision:
+            mask = self.start_mask(hist, horizon=horizon, clip_last=clip_last)
+            selection.weights.copy_(mask.reshape(-1))
+            selection.count.copy_(mask.sum())
+            message = ("replay buffer has no sampleable starts with a full reference horizon and valid history"
+                       if horizon is not None else "replay buffer has no sampleable rows yet")
+            self._preflight_selection(selection, message)
+            selection.revision = revision
+        return selection
+
+    def _check_prepared(self, selection: PreparedReplaySelection, kind: str, key: tuple) -> None:
+        if selection.owner != id(self) or selection.kind != kind or selection.key != key:
+            raise ValueError("prepared replay selection belongs to a different buffer or sampling configuration")
 
     @torch.no_grad()
     def window_mask(self, k: int) -> torch.Tensor:
@@ -114,16 +232,19 @@ class ReplayBuffer:
 
     @torch.no_grad()
     def _sample_from_mask(self, mask: torch.Tensor, n: int) -> tuple[torch.Tensor, torch.Tensor]:
-        flat = mask.reshape(-1)
-        total = int(flat.sum().item())
-        if total == 0:
-            raise RuntimeError("replay buffer has no sampleable rows yet")
-        idx = torch.multinomial(flat.float(), n, replacement=True)
+        # Empty selections have already failed at the preparation boundary.
+        # In particular, no Tensor -> Python conversion is allowed here.
+        idx = torch.multinomial(mask.reshape(-1).float(), n, replacement=True)
         return idx // self.T, idx % self.T
 
     @torch.no_grad()
-    def sample_windows(self, n: int, k: int) -> WindowBatch:
-        e, t = self._sample_from_mask(self.window_mask(k), n)
+    def sample_windows(
+        self, n: int, k: int, *, prepared: PreparedReplaySelection | None = None,
+    ) -> WindowBatch:
+        if prepared is None:
+            prepared = self.prepare_windows(k)
+        self._check_prepared(prepared, "windows", (k,))
+        e, t = self._sample_from_mask(prepared.weights, n)
         offs = torch.arange(k + 1, device=self.device)
         tt = (t[None, :] + offs[:, None]) % self.T  # (k+1, n)
         ee = e[None, :].expand(k + 1, n)
@@ -141,6 +262,7 @@ class ReplayBuffer:
     def sample_starts(
         self, n: int, hist: int, *, horizon: int | None = None,
         clip_last: torch.Tensor | None = None,
+        prepared: PreparedReplaySelection | None = None,
     ) -> StartBatch:
         """Sample logged states, optionally requiring a full reference horizon.
 
@@ -150,24 +272,10 @@ class ReplayBuffer:
         availability, not future replay rows: imagination may continue beyond
         a real collection timeout while the reference still has enough frames.
         """
-        if (horizon is None) != (clip_last is None):
-            raise ValueError("horizon and clip_last must be provided together")
-        if horizon is not None and horizon < 1:
-            raise ValueError("imagination horizon must be positive")
-        if clip_last is not None and (
-            clip_last.ndim != 1 or clip_last.numel() == 0
-            or clip_last.device != self.frame.device
-        ):
-            raise ValueError("clip_last must be a nonempty vector on the replay device")
-        mask = self.valid & ~self.terminal
-        t_idx = torch.arange(self.T, device=self.device)[None, :]
-        dist_to_ptr = (self.ptr[:, None] - t_idx - 1) % self.T
-        mask &= dist_to_ptr < self.T - hist - 1  # keep history rows from being overwritten underneath
-        if horizon is not None:
-            mask &= self.frame + horizon <= clip_last[self.clip]
-            if not bool(mask.any()):
-                raise RuntimeError("replay buffer has no sampleable starts with a full reference horizon and valid history")
-        e, t = self._sample_from_mask(mask, n)
+        if prepared is None:
+            prepared = self.prepare_starts(hist, horizon=horizon, clip_last=clip_last)
+        self._check_prepared(prepared, "starts", (hist, horizon, None if clip_last is None else id(clip_last)))
+        e, t = self._sample_from_mask(prepared.weights, n)
         offs = torch.arange(hist, device=self.device) - (hist - 1)  # -(hist-1) .. 0
         tt = (t[None, :] + offs[:, None]) % self.T  # (hist, n)
         ee = e[None, :].expand(hist, n)

@@ -28,8 +28,6 @@ from dataclasses import dataclass, field
 
 import torch
 
-from supermimic.sim_context import ContextKind, SimContextLayout
-
 from supermimic.kinematics.rotations import (
     heading_quat,
     quat_apply,
@@ -41,6 +39,7 @@ from supermimic.kinematics.rotations import (
     rot6d_from_quat,
     rotvec_from_quat,
 )
+from supermimic.sim_context import ContextKind, SimContextLayout
 
 STATE_DIM = 71
 FEAT_DIM = 71
@@ -164,4 +163,5 @@ class StateSpec:
 
 def quat_apply_inverse_quat(q: torch.Tensor) -> torch.Tensor:
     """Conjugate of a unit quaternion (inverse)."""
-    return q * torch.tensor([1.0, -1.0, -1.0, -1.0], dtype=q.dtype, device=q.device)
+    # A fresh CPU literal copied to CUDA is not legal inside graph capture.
+    return torch.cat((q[..., :1], -q[..., 1:]), dim=-1)

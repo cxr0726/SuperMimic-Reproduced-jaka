@@ -211,7 +211,8 @@ def main():
         ro = imagine(wm, policy, lib, start, horizon, cfg.policy_trainer.future_frames,
                      obs_noise=cfg.policy_trainer.obs_noise, step_fn=trainer.step_fn,
                      anchor_obs=cfg.policy_trainer.anchor_obs,
-                     activation_checkpoint=cfg.policy_trainer.activation_checkpoint)
+                     activation_checkpoint=cfg.policy_trainer.activation_checkpoint,
+                     batch_reference_encoder=cfg.policy_trainer.batch_reference_encoder)
         events[1].record()
         feature, goals, root_error, errors = trainer._critic_inputs(ro)
         events[2].record()

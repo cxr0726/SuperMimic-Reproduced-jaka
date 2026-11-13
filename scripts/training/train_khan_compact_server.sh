@@ -11,6 +11,8 @@ REFERENCE_FK_COMPILE=0
 RESUME=''
 STOP_AFTER=''
 DRY_RUN=0
+UPDATE_CAPTURE=1
+BATCH_REFERENCE_ENCODER=1
 ACTUATOR_DELAY=False
 ACTION_MODE=reference_residual
 GOAL_NOISE_Z=0.01
@@ -54,6 +56,10 @@ Options:
   --goal-noise               Enable Isaac encoder goal noise (default)
   --no-actuator-delay        Disable actuator delay (default for this server experiment)
   --actuator-delay           Enable held 0–20 ms delay; first control step is immediate
+  --update-capture          Capture full WM and Actor/Critic updates (default; single GPU)
+  --no-update-capture       Use ordinary learner updates for comparison
+  --batch-reference-encoder Batch reference-only goals across H32 (default)
+  --no-batch-reference-encoder  Encode each imagined step separately
   --resume PATH              Restore a Khan checkpoint with matching data/configuration/assets
   --stop-after-iterations N  Optional execution limit; retains the 320k LR schedule
   --dry-run                 Check paths and print command without executing Python or training
@@ -87,6 +93,10 @@ while (($#)); do
         --goal-noise) GOAL_NOISE_Z=0.01; GOAL_NOISE_JOINT_POS=0.05; shift ;;
         --no-actuator-delay) ACTUATOR_DELAY=False; shift ;;
         --actuator-delay) ACTUATOR_DELAY=True; shift ;;
+        --update-capture) UPDATE_CAPTURE=1; shift ;;
+        --no-update-capture) UPDATE_CAPTURE=0; shift ;;
+        --batch-reference-encoder) BATCH_REFERENCE_ENCODER=1; shift ;;
+        --no-batch-reference-encoder) BATCH_REFERENCE_ENCODER=0; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown option: $1 (use --help)" ;;
@@ -156,6 +166,13 @@ if ((REFERENCE_FK_COMPILE)); then
 else
     command+=(--env.no-reference-fk-compile)
 fi
+# TrainConfig owns the enabled defaults; only append explicit opt-outs.
+if ((!UPDATE_CAPTURE)); then
+    command+=(--wm-trainer.no-cuda-graph --policy-trainer.no-cuda-graph)
+fi
+if ((!BATCH_REFERENCE_ENCODER)); then
+    command+=(--policy-trainer.no-batch-reference-encoder)
+fi
 if [[ -n "$STOP_AFTER" ]]; then
     command+=(--schedule.stop-after-iterations "$STOP_AFTER")
 fi
@@ -167,6 +184,7 @@ fi
 printf '[INFO] Khan compact library: %s\n' "$LIBRARY"
 printf '[INFO] Reference FK: %s; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "$REFERENCE_FK_MODE" "$NUM_ENVS"
+printf '[INFO] Learner execution: full-update capture=%s; batched reference encoder=%s; collection/reset unchanged\n' "$UPDATE_CAPTURE" "$BATCH_REFERENCE_ENCODER"
 printf '[INFO] Khan observations: future/history 5/5; goal 155; policy 465; activation recomputation: OFF\n'
 printf '[INFO] Actor hidden defaults: encoder 1024/512/256; decoder 2048/1024/512/256; EMA decay 0.995; training uses live, inference auto-selects EMA\n'
 printf '[INFO] Actor/Critic hidden blocks: Linear -> LayerNorm -> GELU; bootstrap successor: source-clip clamped\n'

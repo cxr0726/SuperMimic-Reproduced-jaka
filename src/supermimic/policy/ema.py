@@ -21,18 +21,45 @@ class ActorEMA:
         if not math.isfinite(decay) or not 0 < decay < 1:
             raise ValueError("Actor EMA decay must be finite and strictly between 0 and 1")
         self.decay = float(decay)
-        self.num_updates = 0
+        self._num_updates = 0
+        self._device_updates: torch.Tensor | None = None
         self.module = copy.deepcopy(policy).eval().requires_grad_(False)
+
+    @property
+    def num_updates(self) -> int:
+        # Read only at log/checkpoint boundaries, never inside a captured step.
+        return self._num_updates if self._device_updates is None else int(self._device_updates.item())
+
+    @num_updates.setter
+    def num_updates(self, value: int) -> None:
+        self._num_updates = value
+        if self._device_updates is not None:
+            self._device_updates.fill_(value)
+
+    def enable_cuda_graph(self) -> None:
+        """Track the first-copy/EMA boundary on device during graph replay."""
+        device = next(self.module.parameters()).device
+        if device.type != "cuda":
+            raise ValueError("CUDA Graph EMA requires a CUDA policy")
+        if self._device_updates is None:
+            self._device_updates = torch.tensor(self._num_updates, dtype=torch.long, device=device)
 
     @torch.no_grad()
     def update(self, policy: nn.Module) -> None:
+        if self._device_updates is not None:
+            first = self._device_updates == 0
+            for average, live in zip(self.module.parameters(), policy.parameters(), strict=True):
+                average.copy_(torch.where(first, live, average.lerp(live, 1.0 - self.decay)))
+            self.sync_buffers(policy)
+            self._device_updates.add_(1)
+            return
         for average, live in zip(self.module.parameters(), policy.parameters(), strict=True):
-            if self.num_updates == 0:
+            if self._num_updates == 0:
                 average.copy_(live)
             else:
                 average.lerp_(live, 1.0 - self.decay)
         self.sync_buffers(policy)
-        self.num_updates += 1
+        self._num_updates += 1
 
     @torch.no_grad()
     def sync_buffers(self, policy: nn.Module) -> None:
