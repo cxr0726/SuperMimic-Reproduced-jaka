@@ -206,6 +206,7 @@ class Trainer:
                 history_length=cfg.policy.history,
                 observation_layout=cfg.env.observation_layout,
                 context_layout=cfg.env.context_layout,
+                foot_tracking=cfg.env.foot_tracking,
                 episode_length_s=cfg.env.episode_length_s,
                 action_noise_std=cfg.env.action_noise_std,
                 obs_noise=cfg.env.obs_noise,
@@ -244,7 +245,7 @@ class Trainer:
             fk, robot_spec.tracked_bodies, robot_spec.anchor_body, robot_spec.root_body,
             robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone(),
             reward_cfg=TrackingRewardCfg.for_joint_names(
-                robot_spec.joint_names, foot_tracking=cfg.env.context_layout == "khan_dr_v3",
+                robot_spec.joint_names, foot_tracking=cfg.env.foot_tracking,
             ),
         )
         action_term = env.action_manager.get_term("joint_pos")
@@ -395,7 +396,7 @@ class Trainer:
         if self.cfg.robot == "khan_mini" and ck["robot_contract"] != robot_contract(
             self.cfg.robot, self.cfg.env.observation_layout, env_config=asdict(self.cfg.env),
         ):
-            raise ValueError("Checkpoint environment semantics differ (delay/reset/DR); start a new run or use matching settings")
+            raise ValueError("Checkpoint environment semantics differ (delay/reset/DR/reward); start a new run or use matching settings")
         if self.cfg.policy.action_mode == "reference_residual":
             for key in ("reference_q_default", "reference_action_scale"):
                 actual = ck["policy"].get(key)

@@ -113,7 +113,8 @@ class SuperMimicEnvCfgArgs:
     debug_vis: bool = False  # draw the reference ghost in the viewer (scripts/play.py)
     robot: RobotName = "g1"
     observation_layout: ObservationLayoutOption = "auto"
-    context_layout: ContextKind | None = None  # Fresh Khan v2; checkpoints pass their saved layout.
+    context_layout: ContextKind | None = None  # Checkpoints pass their saved layout.
+    foot_tracking: bool = False
     extra_command_kwargs: dict = field(default_factory=dict)
 
 
@@ -141,8 +142,10 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     a.future_frames, a.history_length = resolve_observation_sizes(
         a.observation_layout, a.future_frames, a.history_length, a.anchor_obs,
     )
+    if a.foot_tracking and a.context_layout != "khan_dr_v3":
+        raise ValueError("Extra foot rewards require the Khan DR v3 layout")
     tracking_rewards = TrackingRewardCfg.for_joint_names(
-        robot_spec.joint_names, foot_tracking=a.context_layout == "khan_dr_v3",
+        robot_spec.joint_names, foot_tracking=a.foot_tracking,
     )
     # ---------------------------------------------------------------- observations
     noise = (lambda lo, hi: Unoise(n_min=lo, n_max=hi)) if a.obs_noise else (lambda lo, hi: None)

@@ -30,7 +30,7 @@ from supermimic.imagination.policy_trainer import PolicyTrainer, PolicyTrainerCf
 from supermimic.imagination.rollout import imagine
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.policy.nets import Critic, CriticCfg, PolicyCfg
-from supermimic.robots.contracts import checkpoint_context_layout
+from supermimic.robots.contracts import checkpoint_context_layout, checkpoint_foot_tracking
 from supermimic.robots.registry import get_robot_spec
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
@@ -68,6 +68,7 @@ def restore_config(obj, saved):
             setattr(obj, field.name, tuple(value) if isinstance(current, tuple) else value)
     if isinstance(obj, TrainConfig):
         obj.env.context_layout = checkpoint_context_layout(saved)
+        obj.env.foot_tracking = checkpoint_foot_tracking(saved)
 
 
 def load_benchmark_checkpoint(path, device):
@@ -152,7 +153,7 @@ def main():
     heads = AnalyticHeads(G1Kinematics(model, device), spec.tracked_bodies,
                           spec.anchor_body, spec.root_body, limits, q0,
                           reward_cfg=TrackingRewardCfg.for_joint_names(
-                              spec.joint_names, foot_tracking=cfg.env.context_layout == "khan_dr_v3",
+                              spec.joint_names, foot_tracking=cfg.env.foot_tracking,
                           ))
     mapping = ({name: checkpoint["wm"][name] for name in ("action_scale", "action_offset")}
                if cfg.world_model.input_normalization else {})

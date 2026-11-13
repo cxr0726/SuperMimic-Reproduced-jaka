@@ -23,7 +23,7 @@ from supermimic.eval.benchmark import (
     save_results,
     summarize,
 )
-from supermimic.robots.contracts import checkpoint_context_layout, robot_contract
+from supermimic.robots.contracts import checkpoint_context_layout, checkpoint_foot_tracking, robot_contract
 from supermimic.robots.registry import get_robot_spec
 
 
@@ -52,6 +52,7 @@ def main(ckpt: Path, npz_dir: Path | None = None, clips: list[str] | None = None
         robot=robot.name, history_length=policy.cfg.history,
         observation_layout=policy.cfg.observation_layout,
         context_layout=checkpoint_context_layout(cfg),
+        foot_tracking=checkpoint_foot_tracking(cfg),
         reset_root_z_offset=cfg["env"].get("reset_root_z_offset"),
         reference_fk_compile=reference_fk_compile,
     )

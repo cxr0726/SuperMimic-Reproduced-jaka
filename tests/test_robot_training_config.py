@@ -50,9 +50,8 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
         "motion_body_lin_vel": 1.0, "motion_body_ang_vel": 1.0,
         "action_rate_l2": -0.1, "joint_limit": -2.0,
         "motion_neck_pos": 0.5, "motion_neck_vel": 0.1,
-        "motion_foot_pos": 0.25, "motion_foot_ori": 0.25,
     }
-    assert sum(max(0.0, term.weight) for term in khan.rewards.values()) * .02 == pytest.approx(.122)
+    assert sum(max(0.0, term.weight) for term in khan.rewards.values()) * .02 == pytest.approx(.112)
     assert khan.terminations == g1.terminations
     assert khan.terminations["root_height"].params["threshold"] == 0.25
     assert khan.terminations["root_tilt"].params["threshold"] == 0.8
@@ -121,7 +120,7 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
     assert action_a == action_b
     assert action_a["noise_std"] == 0.1
     command_a, command_b = asdict(khan.commands["motion"]), asdict(g1.commands["motion"])
-    assert command_a.pop("g_max") == pytest.approx(12.2)
+    assert command_a.pop("g_max") == pytest.approx(11.2)
     assert command_b.pop("g_max") == pytest.approx(10.0)
     assert command_a.pop("reset_root_z_offset") == 0.05
     assert command_b.pop("reset_root_z_offset") == 0.0

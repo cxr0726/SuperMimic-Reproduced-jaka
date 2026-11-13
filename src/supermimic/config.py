@@ -48,6 +48,7 @@ class EnvCfg:
     future_frames: int | None = None  # robot/layout default: G1=10, Khan Isaac=5
     observation_layout: Literal["auto", "supermimic", "isaac_khan"] = "auto"
     context_layout: ContextKind | None = None  # None resolves fresh robot defaults.
+    foot_tracking: bool = False  # Extra foot rewards, independent of the DR layout.
     compact_library: bool = False
     reference_fk_compile: bool = False  # Opt-in: benchmark CUDA compact FK on the target GPU
     merge_short_tail_bins: bool | None = None  # Training default: Khan on, original G1 off
@@ -144,11 +145,7 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
     cfg.policy.num_tracked_bodies = len(robot.tracked_bodies)
     cfg.policy.goal_dim = goal_dimension(layout, robot.num_joints, future, cfg.env.anchor_obs)
     if cfg.policy.action_mode == "auto":
-        # Fresh Khan runs restore the clean-reference PD prior. Standalone
-        # PolicyCfg and checkpoint loaders retain their saved/legacy mode.
-        cfg.policy.action_mode = ("reference_residual"
-                                  if cfg.robot == "khan_mini" and layout == "isaac_khan"
-                                  else "default")
+        cfg.policy.action_mode = "default"
     if cfg.policy.goal_noise_z is None:
         cfg.policy.goal_noise_z = 0.01 if layout == "isaac_khan" else 0.0
     if cfg.policy.goal_noise_joint_pos is None:

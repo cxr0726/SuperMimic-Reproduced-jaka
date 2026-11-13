@@ -24,7 +24,7 @@ from supermimic.observation_layout import (
     resolve_observation_sizes,
 )
 from supermimic.policy.nets import Policy, PolicyCfg
-from supermimic.robots.contracts import checkpoint_context_layout, validate_robot_contract
+from supermimic.robots.contracts import checkpoint_context_layout, checkpoint_foot_tracking, validate_robot_contract
 from supermimic.robots.registry import RobotName, get_robot_spec
 from supermimic.sim_context import ContextKind
 
@@ -157,12 +157,13 @@ def load_policy_from_checkpoint(path: str | Path, device: str, *,
     policy.checkpoint_policy_ema_updates = ck.get("policy_ema_updates") if use_ema else None
     policy.checkpoint_policy_ema_decay = ck.get("policy_ema_decay") if use_ema else None
     policy.checkpoint_context_layout = cfg["env"]["context_layout"]
+    policy.checkpoint_foot_tracking = checkpoint_foot_tracking(cfg)
     policy.eval()
     return policy, cfg
 
 
 @torch.no_grad()
-def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int | None = None, verbose: bool = True, anchor_obs: bool = False, robot: RobotName = "g1", history_length: int | None = None, observation_layout: str | None = None, reset_root_z_offset: float | None = None, reference_fk_compile: bool = False, context_layout: ContextKind | None = None) -> list[ClipResult]:
+def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int | None = None, verbose: bool = True, anchor_obs: bool = False, robot: RobotName = "g1", history_length: int | None = None, observation_layout: str | None = None, reset_root_z_offset: float | None = None, reference_fk_compile: bool = False, context_layout: ContextKind | None = None, foot_tracking: bool | None = None) -> list[ClipResult]:
     robot_spec = get_robot_spec(robot)
     if policy.cfg.num_joints != robot_spec.num_joints:
         raise ValueError(f"Policy joint count differs from benchmark robot {robot}")
@@ -182,6 +183,7 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
         history_length=policy.cfg.history if history_length is None else history_length,
         observation_layout=layout,
         context_layout=context_layout or getattr(policy, "checkpoint_context_layout", None),
+        foot_tracking=getattr(policy, "checkpoint_foot_tracking", False) if foot_tracking is None else foot_tracking,
         episode_length_s=1.0e5,  # clip end decides
         action_noise_std=0.0,
         obs_noise=False,

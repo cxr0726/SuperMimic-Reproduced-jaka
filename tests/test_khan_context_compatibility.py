@@ -11,6 +11,7 @@ import pytest
 from supermimic.config import TrainConfig, resolve_training_observations
 from supermimic.robots.contracts import (
     checkpoint_context_layout,
+    checkpoint_foot_tracking,
     robot_contract,
     validate_robot_contract,
 )
@@ -33,12 +34,15 @@ def test_v1_robot_contract_matches_previous_revision_exactly(fresh_queue):
     }) == expected
 
 
-@pytest.mark.parametrize("kind,version,xi,wm,critic", [
-    ("khan_dr_v2", 8, 99, 193, 613), ("khan_dr_v3", 9, 101, 195, 615),
+@pytest.mark.parametrize("kind,feet,version,xi,wm,critic", [
+    ("khan_dr_v2", False, 8, 99, 193, 613),
+    ("khan_dr_v3", True, 9, 101, 195, 615),
+    ("khan_dr_v3", False, 10, 101, 195, 615),
 ])
-def test_new_context_is_explicit_in_checkpoint_contract(kind, version, xi, wm, critic):
+def test_new_context_is_explicit_in_checkpoint_contract(kind, feet, version, xi, wm, critic):
     cfg = TrainConfig(robot="khan_mini")
     cfg.env.context_layout = kind
+    cfg.env.foot_tracking = feet
     resolve_training_observations(cfg)
     saved = asdict(cfg)
     contract = robot_contract("khan_mini", "isaac_khan", env_config=saved["env"])
@@ -49,14 +53,19 @@ def test_new_context_is_explicit_in_checkpoint_contract(kind, version, xi, wm, c
     assert schema["xi_fields"]["lower_body_armature_factor"] == 12
     assert "ankle_armature_factor" not in schema["xi_fields"]
     assert schema["dynamics_randomization"]["lower_body_armature_factor"]["mode"] == "startup"
+    assert checkpoint_foot_tracking(saved) is feet
     if kind == "khan_dr_v3":
-        assert contract["reward_config"]["w_foot_pos"] == contract["reward_config"]["w_foot_ori"] == .25
         assert schema["xi_fields"]["foot_mass_delta"] == 2
+        assert schema["dynamics_randomization"]["foot_mass_delta_kg"]["range"] == [0, .2]
+    if feet:
+        historical_env = {key: value for key, value in saved["env"].items() if key != "foot_tracking"}
+        assert robot_contract("khan_mini", "isaac_khan", env_config=historical_env) == contract
+        assert contract["reward_config"]["w_foot_pos"] == contract["reward_config"]["w_foot_ori"] == .25
         assert contract["foot_tracking_schema"]["max_step_reward"] == pytest.approx(.122)
     else:
         assert "w_foot_pos" not in contract["reward_config"]
     validate_robot_contract({"config": saved, "robot_contract": contract}, "khan_mini", "isaac_khan")
-    saved["env"]["context_layout"] = "khan_dr_v1"
+    saved["env"].update(context_layout="khan_dr_v1", foot_tracking=False)
     with pytest.raises(ValueError, match="robot_contract differs"):
         validate_robot_contract({"config": saved, "robot_contract": contract}, "khan_mini", "isaac_khan")
 
@@ -76,6 +85,7 @@ def test_restore_context_does_not_apply_fresh_defaults(saved_layout):
     expected = saved_layout or "khan_dr_v1"
     assert checkpoint_context_layout(saved) == cfg.env.context_layout == expected
     assert cfg.world_model.state_spec.context_layout == expected
+    assert cfg.env.foot_tracking is checkpoint_foot_tracking(saved) is (expected == "khan_dr_v3")
     runtime_spec = StateSpec(cfg.world_model.state_spec, device="cpu", num_joints=27)
     assert runtime_spec.xi_dim == {"khan_dr_v1": 91, "khan_dr_v2": 99, "khan_dr_v3": 101}[expected]
     assert len(runtime_spec.xi_scale) == runtime_spec.xi_dim

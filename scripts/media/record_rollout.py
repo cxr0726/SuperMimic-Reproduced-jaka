@@ -20,7 +20,7 @@ from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
 from supermimic.envs.state_io import StateIO
 from supermimic.eval.benchmark import PolicyWeights, load_policy_from_checkpoint
-from supermimic.robots.contracts import checkpoint_context_layout
+from supermimic.robots.contracts import checkpoint_context_layout, checkpoint_foot_tracking
 from supermimic.robots.registry import get_robot_spec
 
 
@@ -40,6 +40,7 @@ def main(ckpt: Path, clips: list[str], npz_dir: Path | None = None, out: Path = 
         robot=robot_spec.name, history_length=policy.cfg.history,
         observation_layout=policy.cfg.observation_layout,
         context_layout=checkpoint_context_layout(cfg),
+        foot_tracking=checkpoint_foot_tracking(cfg),
         action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False, sampling_mode="start",
         actuator_delay=False, reset_root_z_offset=cfg["env"].get("reset_root_z_offset"),
         record_transitions=False, seed=0, anchor_obs=cfg["env"].get("anchor_obs", False),

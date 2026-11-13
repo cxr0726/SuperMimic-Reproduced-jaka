@@ -33,6 +33,12 @@ def checkpoint_context_layout(config: dict) -> ContextKind:
     return resolve_context_layout(robot, requested)
 
 
+def checkpoint_foot_tracking(config: dict) -> bool:
+    """Historical v3 checkpoints coupled foot rewards to the DR layout."""
+    saved = config.get("env", {}).get("foot_tracking")
+    return checkpoint_context_layout(config) == "khan_dr_v3" if saved is None else saved
+
+
 def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_config: dict | None = None) -> dict:
     spec = get_robot_spec(robot)
     reward_config = asdict(TrackingRewardCfg.for_joint_names(spec.joint_names))
@@ -119,14 +125,18 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
                 "range": [[-0.035, 0.035], [-0.07, 0.07], [-0.07, 0.07]],
                 "mode": "startup", "body": spec.com_body, "frame": "body_local",
             }
+        foot_tracking = checkpoint_foot_tracking({"robot": robot, "env": env_config})
+        if foot_tracking and kind != "khan_dr_v3":
+            raise ValueError("Extra foot rewards require the Khan DR v3 layout")
         if kind == "khan_dr_v3":
-            contract["version"] = 9
+            contract["version"] = 9 if foot_tracking else 10
             contract["simulation_schema"]["foot_mass_body_order"] = list(KHAN_FOOT_BODIES)
             contract["simulation_schema"]["dynamics_randomization"]["foot_mass_delta_kg"] = {
                 "range": [0.0, 0.2], "mode": "startup", "independent_per_body": True,
                 "bodies": list(KHAN_FOOT_BODIES), "operation": "add_to_nominal",
                 "inertia": "unchanged_COM_point_mass", "com": "unchanged",
             }
+        if foot_tracking:
             foot_reward = TrackingRewardCfg.for_joint_names(spec.joint_names, foot_tracking=True)
             contract["reward_config"] = asdict(foot_reward)
             contract["foot_tracking_schema"] = {
