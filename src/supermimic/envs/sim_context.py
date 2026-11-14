@@ -7,7 +7,9 @@ import torch
 
 from supermimic.sim_context import (
     KHAN_ANKLE_JOINTS,
+    KHAN_CONTEXT_LAYOUTS,
     KHAN_FOOT_BODIES,
+    KHAN_FOOT_MASS_LAYOUTS,
     KHAN_LOWER_BODY_JOINTS,
     ContextKind,
     SimContextLayout,
@@ -32,7 +34,7 @@ class SimContext:
         self.com_nominal = torch.as_tensor(
             np.array(env.sim.mj_model.body_ipos[self.com_body_global]), dtype=torch.float32, device=env.device
         )
-        if context_layout in ("khan_dr_v1", "khan_dr_v2", "khan_dr_v3"):
+        if context_layout in KHAN_CONTEXT_LAYOUTS:
             self._init_khan()
 
     def _init_khan(self) -> None:
@@ -67,9 +69,12 @@ class SimContext:
         self.armature_dof_ids = self.robot.indexing.joint_v_adr.reshape(-1)[armature_ids]
         if self.layout.kind == "khan_dr_v1":
             self.ankle_dof_ids = self.armature_dof_ids  # Historical diagnostics.
+        elif self.layout.kind == "khan_dr_v4":
+            ankle_ids = [self.robot.joint_names.index(name) for name in KHAN_ANKLE_JOINTS]
+            self.ankle_dof_ids = self.robot.indexing.joint_v_adr.reshape(-1)[ankle_ids]
         self.armature_nominal = self.env.sim.get_default_field("dof_armature")[self.armature_dof_ids]
         self.mass_nominal = self.env.sim.get_default_field("body_mass")[self.com_body_global]
-        if self.layout.kind == "khan_dr_v3":
+        if self.layout.kind in KHAN_FOOT_MASS_LAYOUTS:
             foot_ids = [self.robot.body_names.index(name) for name in KHAN_FOOT_BODIES]
             self.foot_body_global_ids = self.robot.indexing.body_ids.reshape(-1)[foot_ids]
             self.foot_mass_nominal = self.env.sim.get_default_field("body_mass")[self.foot_body_global_ids]
@@ -98,7 +103,7 @@ class SimContext:
             com = (ipos[self.com_body_global] - self.com_nominal).expand(n, 3)
         bias = self.robot.data.encoder_bias
         values = [friction.reshape(n, 1), bias, com]
-        if self.layout.kind in ("khan_dr_v1", "khan_dr_v2", "khan_dr_v3"):
+        if self.layout.kind in KHAN_CONTEXT_LAYOUTS:
             kp = self._field("actuator_gainprm", self.ctrl_ids, 2)[..., 0] / self.kp_nominal
             kd = -self._field("actuator_biasprm", self.ctrl_ids, 2)[..., 2] / self.kd_nominal
             armature = self._field("dof_armature", self.armature_dof_ids, 1) / self.armature_nominal
@@ -108,9 +113,11 @@ class SimContext:
             lag = (self.delay_buffer.current_lags.reshape(n, 1).float()
                    if self.delay_buffer is not None else torch.zeros(n, 1, device=self.env.device))
             values.extend((kp, kd, armature, mass, lag))
-        if self.layout.kind == "khan_dr_v3":
+        if self.layout.kind in KHAN_FOOT_MASS_LAYOUTS:
             # Added point payload at the authored COM: read kg, not a mass factor.
             values.append(self._field("body_mass", self.foot_body_global_ids, 1) - self.foot_mass_nominal)
+        if self.layout.kind == "khan_dr_v4":
+            values.append(self._field("dof_frictionloss", self.ankle_dof_ids, 1))
         xi = torch.cat(values, dim=-1)
         assert xi.shape == (n, self.xi_dim)
         return xi.clone()

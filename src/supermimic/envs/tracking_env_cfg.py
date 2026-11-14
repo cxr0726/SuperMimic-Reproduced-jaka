@@ -53,9 +53,12 @@ from supermimic.robots.registry import (
     resolve_robot_environment,
 )
 from supermimic.sim_context import (
+    KHAN_ANKLE_FRICTIONLOSS_RANGE,
     KHAN_ANKLE_JOINTS,
     KHAN_FOOT_BODIES,
+    KHAN_FOOT_MASS_LAYOUTS,
     KHAN_LOWER_BODY_JOINTS,
+    KHAN_STARTUP_ARMATURE_LAYOUTS,
     ContextKind,
     resolve_context_layout,
 )
@@ -113,7 +116,8 @@ class SuperMimicEnvCfgArgs:
     debug_vis: bool = False  # draw the reference ghost in the viewer (scripts/play.py)
     robot: RobotName = "g1"
     observation_layout: ObservationLayoutOption = "auto"
-    context_layout: ContextKind | None = None  # Fresh Khan v2; checkpoints pass their saved layout.
+    context_layout: ContextKind | None = None  # Checkpoints pass their saved layout.
+    foot_tracking: bool = False
     extra_command_kwargs: dict = field(default_factory=dict)
 
 
@@ -141,8 +145,10 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     a.future_frames, a.history_length = resolve_observation_sizes(
         a.observation_layout, a.future_frames, a.history_length, a.anchor_obs,
     )
+    if a.foot_tracking and a.context_layout not in KHAN_FOOT_MASS_LAYOUTS:
+        raise ValueError("Extra foot rewards require a Khan DR v3 or v4 layout")
     tracking_rewards = TrackingRewardCfg.for_joint_names(
-        robot_spec.joint_names, foot_tracking=a.context_layout == "khan_dr_v3",
+        robot_spec.joint_names, foot_tracking=a.foot_tracking,
     )
     # ---------------------------------------------------------------- observations
     noise = (lambda lo, hi: Unoise(n_min=lo, n_max=hi)) if a.obs_noise else (lambda lo, hi: None)
@@ -272,7 +278,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                 "asset_cfg": SceneEntityCfg("robot", body_names=(robot_spec.com_body,)),
                 "operation": "add",
                 "ranges": ({0: (-0.035, 0.035), 1: (-0.07, 0.07), 2: (-0.07, 0.07)}
-                           if a.context_layout in ("khan_dr_v2", "khan_dr_v3") else
+                           if a.context_layout in KHAN_STARTUP_ARMATURE_LAYOUTS else
                            {0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05)}),
             },
         )
@@ -327,7 +333,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                     "operation": "add", "ranges": (-2.0, 3.0),
                 },
             )
-            if a.context_layout == "khan_dr_v3":
+            if a.context_layout in KHAN_FOOT_MASS_LAYOUTS:
                 # Independent point payloads at each foot body's authored COM.
                 # No assumed payload shape: COM and rotational inertia stay
                 # authored; the stock startup event refreshes model constants.
@@ -338,6 +344,19 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                             "robot", body_names=KHAN_FOOT_BODIES, preserve_order=True,
                         ),
                         "operation": "add", "ranges": (0.0, 0.2), "shared_random": False,
+                    },
+                )
+            if a.context_layout == "khan_dr_v4":
+                # Each simulated robot keeps its own four joint friction forces.
+                # The nominal model has zero frictionloss, so sample absolute values.
+                events["ankle_frictionloss"] = EventTermCfg(
+                    mode="startup", func=dr.joint_friction,
+                    params={
+                        "asset_cfg": SceneEntityCfg(
+                            "robot", joint_names=KHAN_ANKLE_JOINTS, preserve_order=True,
+                        ),
+                        "operation": "abs", "ranges": KHAN_ANKLE_FRICTIONLOSS_RANGE,
+                        "shared_random": False,
                     },
                 )
     else:

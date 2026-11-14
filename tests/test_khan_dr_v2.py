@@ -76,7 +76,7 @@ def test_v2_layout_joint_order_and_normalization_are_explicit():
 
 def test_v2_uses_stock_startup_armature_but_gains_stay_per_reset():
     cfg = _cfg()
-    assert resolve_context_layout("khan_mini") == "khan_dr_v3"
+    assert resolve_context_layout("khan_mini") == "khan_dr_v4"
     assert cfg.recorders["replay"].params["context_layout"] == "khan_dr_v2"
     term = cfg.events["lower_body_armature"]
     assert "ankle_armature" not in cfg.events

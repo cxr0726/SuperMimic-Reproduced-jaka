@@ -32,7 +32,7 @@ def _policy(cfg):
 
 
 @pytest.mark.parametrize("robot,mode,z_half,q_half,goal_dim", [
-    ("khan_mini", "reference_residual", 0.01, 0.05, 155),
+    ("khan_mini", "default", 0.01, 0.05, 155),
     ("g1", "default", 0.0, 0.0, 680),
 ])
 def test_fresh_defaults_resolve_by_layout_without_changing_optimization(

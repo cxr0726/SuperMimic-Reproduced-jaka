@@ -1,10 +1,9 @@
 # Khan 服务器训练：Isaac观测布局、SuperMimic尺度与原优化参数
 
-> **版本说明（2026-11-12）**：下文的ξ91、四踝reset随机化和旧奖励上界属于历史配置。
-> 当前 `feat/official-window-value-normalization` 分支的两个服务器脚本使用
-> `khan_dr_v3`：ξ101、下肢12轴startup armature、左右脚独立startup附重、
-> 足部位置/姿态各0.25奖励，单步上界0.122。请以
-> [当前分支配置及训练命令](KHAN_OFFICIAL_PORT.md#双脚附加质量与独立跟踪khan_dr_v3) 为准。
+> **版本说明（2026-11-14）**：当前 `codex/khan-muon-only` 的服务器脚本默认
+> 采用混合 Muon、默认姿态动作、单步奖励上界 0.112 和 `khan_dr_v4`。
+> DR v4 在 DR v3 上加四个踝轴的 startup 干摩擦随机化，ξ 为 105 维。
+> 下文记录历史训练配置。现行配置及命令见 [当前分支说明](KHAN_OFFICIAL_PORT.md#服务器训练)。
 
 2026-11-09参考残差更新：新Khan训练默认执行 `q_ref(t+1)+0.5*decoder_residual`，
 并仅给actor编码器goal加入高度±0.01 m／参考关节±0.05 rad的均匀噪声。

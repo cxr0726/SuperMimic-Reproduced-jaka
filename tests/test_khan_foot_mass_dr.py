@@ -76,12 +76,12 @@ def test_foot_payload_is_independent_startup_only_and_opt_in_by_context_version(
     assert set(nominal.events) == {"foot_friction"}
 
 
-def _make_env(*, randomized):
+def _make_env(*, randomized, foot_tracking=False):
     if not torch.cuda.is_available() or not NPZ.is_file():
         pytest.skip("needs CUDA and converted Khan LAFAN1")
     return make_env(SuperMimicEnvCfgArgs(
         npz_files=[str(NPZ)], robot="khan_mini", context_layout="khan_dr_v3",
-        num_envs=4, replay_capacity=64, action_noise_std=0., obs_noise=False,
+        foot_tracking=foot_tracking, num_envs=4, replay_capacity=64, action_noise_std=0., obs_noise=False,
         reset_noise=False, domain_randomization=randomized, actuator_delay=False,
         sampling_mode="start", seed=317,
     ), device="cuda:0")
@@ -171,13 +171,14 @@ def _assert_constants(env):
         ), rtol=1e-5, atol=1e-6, msg=name)
 
 
-def _assert_reward_parity(env):
+def _assert_reward_parity(env, *, foot_tracking):
     """Compare all physical terms on identical, nontrivial instantaneous states."""
     robot, spec = env.scene["robot"], get_robot_spec("khan_mini")
     command = env.command_manager.get_term("motion")
-    cfg = TrackingRewardCfg.for_joint_names(spec.joint_names, foot_tracking=True)
-    assert cfg.max_step_reward == pytest.approx(0.122)
-    assert env.step_dt * sum(max(0., t.weight) for t in env.cfg.rewards.values()) == pytest.approx(0.122)
+    cfg = TrackingRewardCfg.for_joint_names(spec.joint_names, foot_tracking=foot_tracking)
+    cap = 0.122 if foot_tracking else 0.112
+    assert cfg.max_step_reward == pytest.approx(cap)
+    assert env.step_dt * sum(max(0., t.weight) for t in env.cfg.rewards.values()) == pytest.approx(cap)
     heads = AnalyticHeads(
         G1Kinematics(spec.load_model(), device=env.device), spec.tracked_bodies,
         spec.anchor_body, spec.root_body, robot.data.soft_joint_pos_limits[0].clone(),
@@ -260,14 +261,15 @@ def test_startup_foot_payload_survives_partial_and_automatic_resets_with_matchin
 
 
 @pytest.mark.slow
-def test_nominal_v3_evaluation_has_no_foot_payload_and_matches_all_analytic_rewards():
-    env = _make_env(randomized=False)
+@pytest.mark.parametrize("foot_tracking", [False, True])
+def test_nominal_v3_evaluation_has_no_foot_payload_and_matches_all_analytic_rewards(foot_tracking):
+    env = _make_env(randomized=False, foot_tracking=foot_tracking)
     try:
         env.reset(seed=317)
         xi = _readback(env, randomized=False)
         _assert_constants(env)
         env.reset(env_ids=torch.tensor([1, 3], device=env.device))
         torch.testing.assert_close(_readback(env, randomized=False), xi, rtol=0, atol=0)
-        _assert_reward_parity(env)
+        _assert_reward_parity(env, foot_tracking=foot_tracking)
     finally:
         env.close()

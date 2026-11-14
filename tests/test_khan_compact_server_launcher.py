@@ -96,13 +96,18 @@ def test_default_compact_run_preserves_current_training_configuration(project, n
     assert cfg.robot == "khan_mini" and cfg.env.num_envs == num_envs
     assert cfg.data.library == root / "data/pt/khan_combined_8452_compact.pt"
     assert cfg.data.npz_dir is None
-    assert cfg.run_name == "khan_8452_official_residual_norm" and cfg.log_root == root / "logs"
+    assert cfg.run_name == "khan_8452_muon_ankle_frictionloss_4096" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is None
     assert cfg.env.compact_library and not cfg.env.reference_fk_compile
     assert cfg.env.actuator_delay is False and cfg.env.merge_short_tail_bins is True
     assert cfg.env.delay_reset_first_step_no_delay is True
     assert cfg.env.tail_bin_merge_fraction == 1.0 and cfg.env.reset_min_remaining_steps == 32
     assert "actuator delay False" in result.stdout
+    assert cfg.env.foot_tracking is False
+    assert cfg.env.context_layout == "khan_dr_v4"
+    assert "--env.no-foot-tracking" in result.stdout
+    assert "raw reward cap 0.112" in result.stdout
+    assert "critic upper bound 11.2" in result.stdout
     baseline = TrainConfig(robot="khan_mini")
     baseline.env.actuator_delay = False
     resolve_training_observations(cfg)
@@ -117,7 +122,7 @@ def test_default_compact_run_preserves_current_training_configuration(project, n
     assert cfg.env.observation_layout == "isaac_khan"
     assert cfg.env.future_frames == cfg.policy.history == 5
     assert cfg.policy.goal_dim == 155
-    assert cfg.policy.action_mode == "reference_residual"
+    assert cfg.policy.action_mode == "default"
     assert cfg.env.reset_sampler == "window_value"
     assert cfg.env.return_horizon == 20 and cfg.env.return_memory == 256
     assert cfg.world_model.input_normalization and cfg.world_model.hidden_layer_norm
@@ -174,7 +179,7 @@ def test_custom_relative_library_and_run_name_with_spaces(project):
 
 def test_existing_checkpoint_requires_explicit_resume_and_keeps_full_lr_schedule(project):
     root, _ = project
-    run = root / "logs/khan_8452_official_residual_norm"
+    run = root / "logs/khan_8452_muon_ankle_frictionloss_4096"
     run.mkdir(parents=True)
     checkpoint = run / "ckpt_latest.pt"
     checkpoint.write_bytes(b"checkpoint fixture")
@@ -266,7 +271,7 @@ def test_optimizer_switch_reaches_all_three_networks_without_changing_budget(pro
     assert cfg.schedule.total_iterations == 320000 and cfg.schedule.updates_per_env_step == .4
     assert cfg.policy_trainer.cuda_graph and cfg.wm_trainer.cuda_graph
     assert cfg.env.compact_library and not cfg.env.reference_fk_compile
-    assert cfg.env.actuator_delay is False and cfg.policy.action_mode == "reference_residual"
+    assert cfg.env.actuator_delay is False and cfg.policy.action_mode == "default"
     label = "optimizer: hybrid Muon" if expected == "muon" else "optimizer: Adam"
     assert label in result.stdout
     assert not (root / "logs").exists()
@@ -318,11 +323,11 @@ def test_delay_switch_keeps_h32_and_full_tail_merge(project, flags, enabled):
 
 
 @pytest.mark.parametrize("flags,action_mode,z_noise,q_noise", [
-    ([], "reference_residual", 0.01, 0.05),
+    ([], "default", 0.01, 0.05),
     (["--reference-residual"], "reference_residual", 0.01, 0.05),
     (["--no-reference-residual"], "default", 0.01, 0.05),
     (["--reference-residual", "--no-reference-residual"], "default", 0.01, 0.05),
-    (["--no-goal-noise"], "reference_residual", 0.0, 0.0),
+    (["--no-goal-noise"], "default", 0.0, 0.0),
     (["--no-reference-residual", "--no-goal-noise"], "default", 0.0, 0.0),
     (["--no-reference-residual", "--reference-residual", "--no-goal-noise", "--goal-noise"],
      "reference_residual", 0.01, 0.05),
@@ -338,8 +343,61 @@ def test_action_space_and_encoder_noise_switches_are_independent(project, flags,
     assert cfg.policy_trainer.horizon == 32
     assert cfg.env.actuator_delay is False
     assert "critic/reward stay clean" in result.stdout
-    assert "reference skip uses raw clean radians" in result.stdout
     if action_mode == "reference_residual":
         assert "PD target=raw clean q_ref(t+1) + 0.5*decoder_output; beta 1" in result.stdout
     else:
         assert "PD target=q_default + 0.5*actor_output; reference skip OFF" in result.stdout
+
+
+@pytest.mark.parametrize("flags,enabled", [
+    ([], False),
+    (["--foot-tracking"], True),
+    (["--no-foot-tracking"], False),
+    (["--foot-tracking", "--no-foot-tracking"], False),
+    (["--no-foot-tracking", "--foot-tracking"], True),
+])
+def test_foot_rewards_switch_keeps_dynamics_randomization(project, flags, enabled):
+    result = run_launcher(project, "--dry-run", *flags)
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    resolve_training_observations(cfg)
+    assert cfg.env.foot_tracking is enabled
+    assert cfg.env.context_layout == "khan_dr_v4"
+    assert cfg.policy.action_mode == "default"
+    assert cfg.policy.goal_noise_z == 0.01 and cfg.policy.goal_noise_joint_pos == 0.05
+    assert cfg.env.actuator_delay is False
+    assert "xi 105; critic 619" in result.stdout
+    assert "Foot payload: independent left/right U(0,0.2) kg at startup" in result.stdout
+    assert f"raw reward cap {0.122 if enabled else 0.112}" in result.stdout
+    assert f"critic upper bound {12.2 if enabled else 11.2}" in result.stdout
+    assert ("--env.foot-tracking" if enabled else "--env.no-foot-tracking") in result.stdout
+
+
+@pytest.mark.parametrize("flags,layout,dimensions", [
+    (["--ankle-frictionloss"], "khan_dr_v4", "xi 105; critic 619"),
+    (["--no-ankle-frictionloss"], "khan_dr_v3", "xi 101; critic 615"),
+    (["--ankle-frictionloss", "--no-ankle-frictionloss"], "khan_dr_v3", "xi 101; critic 615"),
+])
+def test_ankle_frictionloss_can_be_switched_without_changing_action_or_rewards(
+    project, flags, layout, dimensions,
+):
+    result = run_launcher(project, "--dry-run", *flags)
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    resolve_training_observations(cfg)
+    assert cfg.env.context_layout == cfg.world_model.state_spec.context_layout == layout
+    assert cfg.policy.action_mode == "default" and not cfg.env.foot_tracking
+    assert cfg.wm_trainer.optimizer == cfg.policy_trainer.optimizer == cfg.policy_trainer.critic_optimizer == "muon"
+    assert dimensions in result.stdout
+
+
+def test_previous_residual_and_foot_reward_modes_can_be_selected_together(project):
+    result = run_launcher(project, "--dry-run", "--reference-residual", "--foot-tracking", "--no-ankle-frictionloss")
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    resolve_training_observations(cfg)
+    assert cfg.policy.action_mode == "reference_residual"
+    assert cfg.env.foot_tracking is True
+    assert cfg.env.context_layout == "khan_dr_v3"
+    assert cfg.policy.goal_noise_z == 0.01 and cfg.policy.goal_noise_joint_pos == 0.05
+    assert "raw reward cap 0.122" in result.stdout

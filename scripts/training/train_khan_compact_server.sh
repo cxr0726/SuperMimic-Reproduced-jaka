@@ -5,7 +5,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 NUM_ENVS=4096
-RUN_NAME=khan_8452_official_residual_norm
+RUN_NAME=khan_8452_muon_ankle_frictionloss_4096
 LIBRARY="$PROJECT_DIR/data/pt/khan_combined_8452_compact.pt"
 REFERENCE_FK_COMPILE=0
 RESUME=''
@@ -17,7 +17,9 @@ LEARNER_FUSION=1
 REPLAY_SAMPLING=''
 OPTIMIZER=muon
 ACTUATOR_DELAY=False
-ACTION_MODE=reference_residual
+ACTION_MODE=default
+FOOT_TRACKING=0
+CONTEXT_LAYOUT=khan_dr_v4
 GOAL_NOISE_Z=0.01
 GOAL_NOISE_JOINT_POS=0.05
 
@@ -35,9 +37,14 @@ input/output Linear weights, biases and LayerNorm use fused capturable Adam with
 zero decay. --optimizer adam selects the previous Adam path for all three.
 Network/state tensors stay FP32; Muon's Newton-Schulz calculation internally uses BF16.
 The encoder goal has uniform z +/-0.01 m and q +/-0.05 rad noise; critic/reward
-stay clean. Residual actions use raw clean q_ref(t+1) + 0.5 * decoder_output
-(beta 1). Only the encoder goal is noise-augmented and running-normalized;
-the reference skip uses raw joint positions in radians.
+stay clean. The default run uses q_default + 0.5 * actor_output actions and disables
+the extra foot pos/ori rewards (raw reward cap 0.112). --reference-residual
+opts in to raw clean q_ref(t+1) + 0.5 * decoder_output (beta 1). Only the encoder
+goal is noise-augmented and running-normalized; the optional reference skip
+uses raw joint positions in radians. --foot-tracking restores extra foot rewards.
+DR v4 adds independent left/right pitch/roll joint frictionloss sampled once
+per environment at startup, U(0.05, 0.25) N m per ankle axis, to DR v3.
+This gives xi 105 and critic 619 (DR v3: 101 and 615).
 Actuator delay is disabled by default for this server experiment; --actuator-delay
 enables held 0–20 ms delay with an immediate first control step.
 Reset clearance remains 0.05 m and first-step action-rate is unchanged. Every
@@ -45,7 +52,7 @@ incomplete final bin is merged into the previous bin. Physical reset requires
 at least 32 remaining reference steps. Activation recomputation remains disabled.
 This branch uses window-value sampling every 20 physical steps (memory 256),
 WM input running normalization + LayerNorm/GELU, analytic soft termination,
-actor obs/goal running normalization, Actor/Critic LayerNorm/GELU and critic upper bounds (12.2).
+actor obs/goal running normalization, Actor/Critic LayerNorm/GELU and critic upper bounds (11.2 by default).
 Bootstrap successors are clamped to the source clip; physical reset timing is unchanged. Use a fresh
 run; pre-port checkpoints are incompatible.
 Reference FK compilation is opt-in;
@@ -54,12 +61,16 @@ its effect on total training throughput depends on the target GPU.
 Options:
   --library PATH             Packed compact .pt file (default: project data/pt/khan_combined_8452_compact.pt)
   --num-envs N               Parallel robot environments (default: 4096)
-  --run-name NAME            Directory under project logs/ (default: khan_8452_official_residual_norm)
+  --run-name NAME            Directory under project logs/ (default: khan_8452_muon_ankle_frictionloss_4096)
   --reference-fk-compile     Compile current/imagination reference FK on CUDA
   --no-reference-fk-compile  Use eager reference FK (default)
-  --no-reference-residual   Opt out to default-pose actions for comparison
-  --reference-residual      Use clean next-reference residual actions (default)
-  --no-goal-noise           Disable encoder goal augmentation
+  --no-reference-residual    Use default-pose actions (default)
+  --reference-residual       Opt in to clean next-reference residual actions
+  --no-foot-tracking         Disable extra foot pos/ori rewards (default)
+  --foot-tracking            Enable extra foot pos/ori rewards, weights 0.25/0.25
+  --ankle-frictionloss       Randomize four ankle axes with DR v4 (default)
+  --no-ankle-frictionloss    Use DR v3 with the nominal ankle frictionloss
+  --no-goal-noise            Disable encoder goal augmentation
   --goal-noise               Enable Isaac encoder goal noise (default)
   --no-actuator-delay        Disable actuator delay (default for this server experiment)
   --actuator-delay           Enable held 0–20 ms delay; first control step is immediate
@@ -102,6 +113,10 @@ while (($#)); do
         --no-anchor-obs|--anchor-obs) die 'The Isaac layout already includes 5-frame anchor orientation in policy observations; remove the old anchor flag' ;;
         --no-reference-residual) ACTION_MODE=default; shift ;;
         --reference-residual) ACTION_MODE=reference_residual; shift ;;
+        --no-foot-tracking) FOOT_TRACKING=0; shift ;;
+        --foot-tracking) FOOT_TRACKING=1; shift ;;
+        --no-ankle-frictionloss) CONTEXT_LAYOUT=khan_dr_v3; shift ;;
+        --ankle-frictionloss) CONTEXT_LAYOUT=khan_dr_v4; shift ;;
         --no-goal-noise) GOAL_NOISE_Z=0.0; GOAL_NOISE_JOINT_POS=0.0; shift ;;
         --goal-noise) GOAL_NOISE_Z=0.01; GOAL_NOISE_JOINT_POS=0.05; shift ;;
         --no-actuator-delay) ACTUATOR_DELAY=False; shift ;;
@@ -171,7 +186,7 @@ command=(
     "$VENV_PYTHON" -u -m supermimic.scripts.train
     --robot khan_mini --run-name "$RUN_NAME" --log-root "$PROJECT_DIR/logs"
     --data.library "$LIBRARY" --env.num-envs "$NUM_ENVS" --env.compact-library
-    --env.observation-layout isaac_khan --env.context-layout khan_dr_v3 --env.future-frames 5 --policy.history 5
+    --env.observation-layout isaac_khan --env.context-layout "$CONTEXT_LAYOUT" --env.future-frames 5 --policy.history 5
     --policy.action-mode "$ACTION_MODE"
     --policy.goal-noise-z "$GOAL_NOISE_Z" --policy.goal-noise-joint-pos "$GOAL_NOISE_JOINT_POS"
     --env.actuator-delay "$ACTUATOR_DELAY" --env.delay-reset-first-step-no-delay True
@@ -180,6 +195,16 @@ command=(
     --wm-trainer.optimizer "$OPTIMIZER"
     --policy-trainer.optimizer "$OPTIMIZER" --policy-trainer.critic-optimizer "$OPTIMIZER"
 )
+# Additional foot rewards are independent of foot payload randomization.
+RAW_REWARD_CAP=0.112
+CRITIC_UPPER_BOUND=11.2
+if ((FOOT_TRACKING)); then
+    command+=(--env.foot-tracking)
+    RAW_REWARD_CAP=0.122
+    CRITIC_UPPER_BOUND=12.2
+else
+    command+=(--env.no-foot-tracking)
+fi
 REFERENCE_FK_MODE=eager
 if ((REFERENCE_FK_COMPILE)); then
     command+=(--env.reference-fk-compile)
@@ -205,7 +230,7 @@ if [[ -n "$STOP_AFTER" ]]; then
 fi
 if [[ -n "$RESUME" ]]; then
     command+=(--resume "$RESUME")
-    printf '[INFO] Resume requires matching window sampler, normalization, architecture and action semantics; pre-port checkpoints require a fresh run.\n'
+    printf '[INFO] Resume requires matching window sampler, normalization, architecture, action, reward and context layout; pre-port checkpoints require a fresh run.\n'
 fi
 
 printf '[INFO] Khan compact library: %s\n' "$LIBRARY"
@@ -222,15 +247,25 @@ fi
 printf '[INFO] Khan observations: future/history 5/5; goal 155; policy 465; activation recomputation: OFF\n'
 printf '[INFO] Actor hidden defaults: encoder 1024/512/256; decoder 2048/1024/512/256; EMA decay 0.995; training uses live, inference auto-selects EMA\n'
 printf '[INFO] Actor/Critic hidden blocks: Linear -> LayerNorm -> GELU; bootstrap successor: source-clip clamped\n'
-printf '[INFO] Official port defaults: window_value sampler; horizon 20; memory 256; WM input running norm + LayerNorm/GELU; analytic soft termination; actor obs/goal running norm; critic upper bound 12.2\n'
+printf '[INFO] Official port defaults: window_value sampler; horizon 20; memory 256; WM input running norm + LayerNorm/GELU; analytic soft termination; actor obs/goal running norm; critic upper bound %s\n' "$CRITIC_UPPER_BOUND"
 if [[ "$ACTION_MODE" == default ]]; then
     printf '[INFO] Actions: default; PD target=q_default + 0.5*actor_output; reference skip OFF\n'
 else
     printf '[INFO] Actions: reference_residual; PD target=raw clean q_ref(t+1) + 0.5*decoder_output; beta 1\n'
 fi
-printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; then running normalization; critic/reward stay clean; reference skip uses raw clean radians\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
-printf '[INFO] Khan: xi 101; critic 615; Kp/Kd x0.8-1.2 per reset; 12 leg armatures x0.8-1.2 at startup; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$ACTUATOR_DELAY"
-printf '[INFO] Foot payload: independent left/right U(0,0.2) kg at startup, authored COM/inertia retained; foot pos/ori reward weights 0.25/0.25; raw reward cap 0.122\n'
+printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; then running normalization; critic/reward stay clean\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
+if [[ "$CONTEXT_LAYOUT" == khan_dr_v4 ]]; then
+    printf '[INFO] Khan DR v4: xi 105; critic 619; ankle frictionloss: four independent U(0.05,0.25) N m samples per environment at startup\n'
+else
+    printf '[INFO] Khan DR v3: xi 101; critic 615; ankle frictionloss: nominal\n'
+fi
+printf '[INFO] Kp/Kd x0.8-1.2 per reset; 12 leg armatures x0.8-1.2 at startup; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$ACTUATOR_DELAY"
+printf '[INFO] Foot payload: independent left/right U(0,0.2) kg at startup, authored COM/inertia retained\n'
+if ((FOOT_TRACKING)); then
+    printf '[INFO] Extra foot pos/ori rewards: ON, weights 0.25/0.25; raw reward cap %s\n' "$RAW_REWARD_CAP"
+else
+    printf '[INFO] Extra foot pos/ori rewards: OFF; original 15-body/neck rewards retained; raw reward cap %s\n' "$RAW_REWARD_CAP"
+fi
 printf '[INFO] Waist local COM offset at startup: x +/-0.035 m, y/z +/-0.07 m\n'
 printf '[INFO] Reset bins: merge every incomplete final bin; require >=32 remaining reference steps; first-step action-rate unchanged\n'
 printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; full convex feet\n'

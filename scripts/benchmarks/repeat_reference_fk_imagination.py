@@ -149,7 +149,7 @@ def main():
     heads = AnalyticHeads(G1Kinematics(model, device), spec.tracked_bodies,
                           spec.anchor_body, spec.root_body, limits, q0,
                           reward_cfg=TrackingRewardCfg.for_joint_names(
-                              spec.joint_names, foot_tracking=cfg.env.context_layout == "khan_dr_v3",
+                              spec.joint_names, foot_tracking=cfg.env.foot_tracking,
                           ))
     mapping = ({name: checkpoint["wm"][name] for name in ("action_scale", "action_offset")}
                if cfg.world_model.input_normalization else {})

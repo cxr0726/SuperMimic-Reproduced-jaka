@@ -20,6 +20,7 @@ from torch import nn
 
 from supermimic.config import TrainConfig, resolve_training_observations
 from supermimic.policy.nets import Critic, Policy
+from supermimic.sim_context import SimContextLayout
 from supermimic.training.cuda_graph import CapturedUpdate, graph_state
 from supermimic.training.optimizers import build_training_optimizer
 from supermimic.world_model.world_model import WorldModel
@@ -31,7 +32,8 @@ def model_for(role, cfg, device):
         return WorldModel(cfg.world_model, heads, device, action_scale=torch.full((27,), .5, device=device))
     if role == "actor":
         return Policy(cfg.policy, default_joint_pos=torch.zeros(27), action_scale=torch.full((27,), .5)).to(device)
-    return Critic(cfg.critic, pcfg=cfg.policy, xi_dim=101).to(device)
+    context = SimContextLayout(cfg.policy.num_joints, cfg.world_model.state_spec.context_layout)
+    return Critic(cfg.critic, pcfg=cfg.policy, xi_dim=context.dim).to(device)
 
 
 def official_optimizers(model, betas, device):
