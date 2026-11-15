@@ -55,6 +55,7 @@ class EnvCfg:
     tail_bin_merge_fraction: float | None = None  # Khan: merge every incomplete final bin (1.0)
     reset_min_remaining_steps: int | None = None  # Khan: policy horizon; G1: one reference step
     anchor_obs: bool = False
+    disable_neck_action_noise: bool = False  # Khan only: use the clean Actor actions for both neck axes.
 
 
 @dataclass

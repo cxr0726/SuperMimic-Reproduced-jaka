@@ -87,6 +87,21 @@ def test_fusion_and_cdf_controls_keep_original_budget(project):
     assert invalid.returncode != 0 and "cdf or multinomial" in invalid.stderr
 
 
+def test_neck_execution_noise_opt_out_changes_only_the_training_switch(project):
+    baseline = run_launcher(project, "--dry-run")
+    masked = run_launcher(project, "--dry-run", "--no-neck-action-noise")
+    assert baseline.returncode == 0, baseline.stderr
+    assert masked.returncode == 0, masked.stderr
+    assert "--env.disable-neck-action-noise" not in printed_command(baseline.stdout)
+    assert "--env.disable-neck-action-noise" in printed_command(masked.stdout)
+    assert "0 on Neck_yaw_joint and Neck_pitch_joint; 0.1 on the other 25 joints" in masked.stdout
+    baseline_cfg = asdict(parse_config(baseline.stdout))
+    masked_cfg = asdict(parse_config(masked.stdout))
+    assert not baseline_cfg["env"].pop("disable_neck_action_noise")
+    assert masked_cfg["env"].pop("disable_neck_action_noise")
+    assert baseline_cfg == masked_cfg
+
+
 @pytest.mark.parametrize("num_envs", [4096, 1024])
 def test_default_compact_run_preserves_current_training_configuration(project, num_envs):
     root, _ = project

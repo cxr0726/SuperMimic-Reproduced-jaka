@@ -22,6 +22,7 @@ FOOT_TRACKING=0
 CONTEXT_LAYOUT=khan_dr_v4
 GOAL_NOISE_Z=0.01
 GOAL_NOISE_JOINT_POS=0.05
+DISABLE_NECK_ACTION_NOISE=0
 
 usage() {
     cat <<'HELP'
@@ -72,6 +73,7 @@ Options:
   --no-ankle-frictionloss    Use DR v3 with the nominal ankle frictionloss
   --no-goal-noise            Disable encoder goal augmentation
   --goal-noise               Enable Isaac encoder goal noise (default)
+  --no-neck-action-noise     Set execution noise to zero on both neck axes; keep std 0.1 on the other 25
   --no-actuator-delay        Disable actuator delay (default for this server experiment)
   --actuator-delay           Enable held 0–20 ms delay; first control step is immediate
   --update-capture          Capture full WM and Actor/Critic updates (default; single GPU)
@@ -119,6 +121,7 @@ while (($#)); do
         --ankle-frictionloss) CONTEXT_LAYOUT=khan_dr_v4; shift ;;
         --no-goal-noise) GOAL_NOISE_Z=0.0; GOAL_NOISE_JOINT_POS=0.0; shift ;;
         --goal-noise) GOAL_NOISE_Z=0.01; GOAL_NOISE_JOINT_POS=0.05; shift ;;
+        --no-neck-action-noise) DISABLE_NECK_ACTION_NOISE=1; shift ;;
         --no-actuator-delay) ACTUATOR_DELAY=False; shift ;;
         --actuator-delay) ACTUATOR_DELAY=True; shift ;;
         --update-capture) UPDATE_CAPTURE=1; shift ;;
@@ -195,6 +198,9 @@ command=(
     --wm-trainer.optimizer "$OPTIMIZER"
     --policy-trainer.optimizer "$OPTIMIZER" --policy-trainer.critic-optimizer "$OPTIMIZER"
 )
+if ((DISABLE_NECK_ACTION_NOISE)); then
+    command+=(--env.disable-neck-action-noise)
+fi
 # Additional foot rewards are independent of foot payload randomization.
 RAW_REWARD_CAP=0.112
 CRITIC_UPPER_BOUND=11.2
@@ -254,6 +260,9 @@ else
     printf '[INFO] Actions: reference_residual; PD target=raw clean q_ref(t+1) + 0.5*decoder_output; beta 1\n'
 fi
 printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; then running normalization; critic/reward stay clean\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
+if ((DISABLE_NECK_ACTION_NOISE)); then
+    printf '[INFO] Execution action noise std: 0 on Neck_yaw_joint and Neck_pitch_joint; 0.1 on the other 25 joints\n'
+fi
 if [[ "$CONTEXT_LAYOUT" == khan_dr_v4 ]]; then
     printf '[INFO] Khan DR v4: xi 105; critic 619; ankle frictionloss: four independent U(0.05,0.25) N m samples per environment at startup\n'
 else
