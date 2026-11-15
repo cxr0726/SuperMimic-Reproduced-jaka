@@ -135,6 +135,12 @@ coordinates, term order, noise/scales and remaining differences from Isaac PPO;
 [`docs/KHAN_TRAINING.md`](docs/KHAN_TRAINING.md) covers rewards and optimization.
 Khan's `train_ret` divides by `0.112 * executed_steps`, so its theoretical maximum
 remains 1.0. G1 retains its original observations and 0.1 reward upper bound.
+TensorBoard records each weighted physical reward under `train/reward_terms/episode`,
+`train/reward_terms/first_step`, and `train/reward_terms/post_first_step`. Each phase
+averages completed episodes equally and divides each episode's per-step mean by the
+robot's reward upper bound. Single-step episodes contribute to the first two groups.
+`train/reward_terms/episode_sum_error` tracks roundoff between the sum of the full
+episode terms and `train/episode_norm_return`.
 The historical version-4 clean-goal configuration passed 168 tests and an 8-environment, 50-step
 production-network smoke run, including model/optimizer/sampler restoration.
 The run confirmed dynamics input125, goal155, prop465, decoder497 and critic467.

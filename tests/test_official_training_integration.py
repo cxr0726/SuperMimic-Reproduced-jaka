@@ -79,7 +79,6 @@ def _trainer(tmp_path, *, actor_noise=True):
     trainer.device, trainer.log_dir, trainer.writer = "cpu", tmp_path, None
     trainer.robot_spec = get_robot_spec("khan_mini")
     trainer.iteration, trainer.start_iteration, trainer.num_updates, trainer._utd_acc = 0, 0, 0, 0.
-    trainer.ep_reward_sum, trainer.ep_len = torch.zeros(3), torch.zeros(3)
     trainer.max_step_reward = .112
     return trainer
 
@@ -116,6 +115,10 @@ class _Physics:
         self.clip_ended = self.reset_buf.clone()
         self.termination_manager = SimpleNamespace(get_term=lambda name: self.clip_ended)
         self.reward_buf = torch.zeros(3)
+        self.reward_manager = SimpleNamespace(
+            active_terms=["tracking", "action_rate"],
+            term_rewards=torch.tensor([.11, -.01]).repeat(3, 1),
+        )
         self.recorder = ReplayRecorder.__new__(ReplayRecorder)
         self.recorder._env = self
         self.recorder.enabled, self.recorder.command_name, self.recorder.action_name = True, "motion", "joint_pos"

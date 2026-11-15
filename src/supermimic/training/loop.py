@@ -28,6 +28,7 @@ from supermimic.training.distributed import (
     finalize,
     init_distributed,
 )
+from supermimic.training.episode_rewards import PhysicalEpisodeRewards
 from supermimic.training.optimizers import validate_training_optimizer_state
 from supermimic.training.schedule import cosine_lr
 from supermimic.world_model.heads import AnalyticHeads
@@ -357,8 +358,6 @@ class Trainer:
                   f"{cfg.policy.running_normalization}; critic upper bound={cfg.policy_trainer.critic_value_bound}")
 
         # Episode statistics of the training env (paper's "training return").
-        self.ep_reward_sum = torch.zeros(env.num_envs, device=self.device)
-        self.ep_len = torch.zeros(env.num_envs, device=self.device)
         self.max_step_reward = heads.reward_cfg.max_step_reward
         self.iteration = 0
         self.start_iteration = 0  # warm-up (buffer refill) counts from here, also after a resume
@@ -514,12 +513,13 @@ class Trainer:
         sch = cfg.schedule
         env = self.env
         obs, _ = env.reset()
+        episode_rewards = PhysicalEpisodeRewards(
+            env.num_envs, env.reward_manager.active_terms, self.max_step_reward, self.device,
+        )
         t_start = time.time()
         timers = {"sim": 0.0, "wm": 0.0, "policy": 0.0}
         agg: dict[str, float] = {}
         agg_n = 0
-        finished_returns: list[float] = []
-        finished_lens: list[float] = []
         last_log = time.time()
         stop_iteration = sch.total_iterations
         if sch.stop_after_iterations is not None:
@@ -533,20 +533,12 @@ class Trainer:
             pre_frames = self.command.frame.clone()
             action = self.act(obs)
             obs, rew, term, tout, _extras = env.step(action)
+            # mjlab retains the just-scored term values across auto-reset,
+            # matching rew even for terminal transitions.
+            episode_rewards.record(rew, env.reward_manager.term_rewards, term | tout)
             self.command.record_window_transition(
                 pre_frames, rew, term, tout, env.termination_manager.get_term("clip_end"))
             self.update_collection_normalization()
-            self.ep_reward_sum += rew
-            self.ep_len += 1
-            done = term | tout
-            if done.any():
-                ids = done.nonzero().squeeze(-1)
-                lens = self.ep_len[ids]
-                norm_ret = self.ep_reward_sum[ids] / (self.max_step_reward * lens.clamp_min(1))
-                finished_returns.extend(norm_ret.tolist())
-                finished_lens.extend(lens.tolist())
-                self.ep_reward_sum[ids] = 0.0
-                self.ep_len[ids] = 0.0
             torch.cuda.synchronize()
             timers["sim"] += time.perf_counter() - t0
             self.iteration += 1
@@ -581,38 +573,25 @@ class Trainer:
                 it = self.iteration
                 elapsed = time.time() - t_start
                 diagnostic_totals = self.command.reset_diagnostics.consume()
+                episode_totals = episode_rewards.consume()
                 if self.world > 1:
                     # Every rank contributes sums/counts, even with no completed
                     # episodes. Only the log interval converts these to CPU.
                     torch.distributed.all_reduce(diagnostic_totals)
+                    torch.distributed.all_reduce(episode_totals)
+                tr = float("nan")
                 if self.is_main:
                     for key, value in reset_diagnostic_metrics(
                         diagnostic_totals, self.max_step_reward, sampler_kind=cfg.env.reset_sampler,
                     ).items():
                         self.writer.add_scalar(key, value, it)
-                if self.world > 1:
-                    # Every rank must issue the same collectives: reduce (sum, count) unconditionally.
-                    tot = allreduce_mean(float(sum(finished_returns))) * self.world
-                    cnt = allreduce_mean(float(len(finished_returns))) * self.world
-                    finished_returns = [tot / cnt] if cnt > 0 else []
-                    n_finished = round(cnt)
-                else:
-                    n_finished = len(finished_returns)
-                if not self.is_main:
-                    agg, agg_n = {}, 0
-                    finished_returns, finished_lens = [], []
-                    timers = {k: 0.0 for k in timers}
-                elif agg_n > 0:
-                    for k, v in agg.items():
-                        self.writer.add_scalar(k, v / (agg_n if k != "lr" else 1), it)
-                if not self.is_main:
-                    tr = float("nan")
-                elif finished_returns:
-                    tr = sum(finished_returns) / len(finished_returns)
-                    self.writer.add_scalar("train/episode_norm_return", tr, it)
-                    self.writer.add_scalar("train/episode_len", sum(finished_lens) / max(len(finished_lens), 1), it)
-                else:
-                    tr = float("nan")
+                    n_finished, training_metrics = episode_rewards.metrics(episode_totals)
+                    for key, value in training_metrics.items():
+                        self.writer.add_scalar(key, value, it)
+                    tr = training_metrics.get("train/episode_norm_return", tr)
+                    if agg_n > 0:
+                        for k, v in agg.items():
+                            self.writer.add_scalar(k, v / (agg_n if k != "lr" else 1), it)
                 with torch.no_grad():
                     if self.is_main and self.buffer.size > 2048:
                         err = self.wm_trainer.online_error(self.buffer, n=1024, k=8)
@@ -652,7 +631,6 @@ class Trainer:
                     )
                     print(msg, flush=True)
                 agg, agg_n = {}, 0
-                finished_returns, finished_lens = [], []
                 timers = {k: 0.0 for k in timers}
             if self.iteration % sch.checkpoint_interval == 0:
                 self.save("ckpt_latest.pt")
