@@ -17,6 +17,7 @@ assets/robots/khan_mini/
 ```
 
 整个目录可复制到其他位置；加载配置时传入 `asset_dir` 即可。原始 URDF、配置和网格未修改。
+本地生成资产包含下述膝限位和固定关节摩擦覆盖，不能与此前资产混用。
 
 ### 从当前训练 XML 导出更新后的 URDF
 
@@ -70,6 +71,8 @@ root 世界位置属于加载时的 spawn 设置，不写入 URDF 的 link/joint
 | 资产home根位置 | `(0, 0, 0.65)` m；运动跟踪reset另在参考root上加0.05 m |
 | 初始关节角 | 按 Khan_mini_CFG：双肩 roll=-1.57、双肘=1.57、双腕 yaw=0.3，其余 0 |
 | 软关节限位 | 硬限位区间的 90% |
+| 两膝硬范围 / 软下界 | `[-0.15099473684210526, 2.2689]` rad / `-0.03` rad |
+| 关节 frictionloss | 全部27个 hinge 固定 `0.1 N·m`，浮动根为0；训练/eval相同，无额外DR |
 | 碰撞 | 45 个视觉 geom 与 14 个碰撞 geom 分开；含双脚各1个完整mesh凸包，保留自碰撞 |
 
 带地面的 mjlab scene 多出一个 terrain body 和一个地面 geom，因此预览汇总显示
@@ -78,8 +81,10 @@ root 世界位置属于加载时的 spawn 设置，不写入 URDF 的 link/joint
 ## 转换处理
 
 - 显式关闭 URDF 导入时的 `discardvisual` 和 `fusestatic`，保留全部网格及固定 link。
-- 为根添加 freejoint，保留原始大小写、关节轴、限位和父子关系，包括
+- 为根添加 freejoint，保留原始大小写、关节轴和父子关系，包括
   `Right_wrist_yaw__Link` 的双下划线。
+- 两膝硬下界按软下界 `-0.03` rad 反算，其余关节限位保留源值；
+  全部27个 hinge 固定关节摩擦 `0.1 N·m`。这两项覆盖写入生成器，重建不会恢复旧值。
 - 视觉放在 group 2，碰撞放在 group 3；视觉不参与接触，碰撞 contype/conaffinity 均为 1。
 - 非脚部的4个cylinder碰撞按源配置转成capsule，保留半径和轴向半长，端部由半球补齐。
 - 双脚原有每脚7个sole capsule替换为每脚1个完整CAD mesh凸包，包含脚背与踝连接结构。
@@ -118,6 +123,25 @@ profile的 `parameter_overrides.waist_collision_box` 记录源尺寸、有效尺
 
 下表为 Khan_mini_CFG 加本地参数覆盖后的有效值。PD、转子惯量和力矩限制由
 `BuiltinPositionActuatorCfg` 应用，初态由 `EntityCfg.InitialStateCfg` 应用。
+
+### 膝限位与固定关节摩擦（2026-11-16）
+
+两膝上界 `u=2.2689` rad、软限位系数 `f=0.9` 保持不变。硬下界反算为
+`l=(-0.03-0.05*u)/0.95=-0.15099473684210526` rad，得到软下界 `-0.03` rad。
+因此 `q<-0.03` 才触发已有 `joint_limit` 下限惩罚，`[-0.03,0)` 仍不罚；
+没有新增膝关节奖励项，原有权重仍为 `-2`。训练将实际软界传给WM解析奖励，
+reset也使用该软界裁剪初始关节角；参考库和后续goal未修改。
+
+参考PartyMimic RP1，全部27个转动关节（包括颈部）在模型中固定
+`frictionloss=0.1 N·m`，没有额外关节摩擦随机化。它与脚底接触摩擦和PD damping不同，
+不修改其他增益、惯量或力矩限额；关闭DR的play/eval仍使用0.1。
+DR保持 `khan_dr_v3`，ξ维度仍为101。XML、profile、`new.urdf`及其导出记录保持一致；
+`source.urdf`继续作为原始输入副本保留。
+
+新的XML/profile hash意味着必须新建训练run；旧160k等检查点需原资产和匹配源码，
+不能直接恢复到本次资产。既有ONNX及实机YAML限位不会随资产修改而改变。
+
+### 标称执行器参数
 
 | 关节组 | 数量 | kp | kd | armature | 力矩限额 Nm | 速度元数据 rad/s |
 |---|---:|---:|---:|---:|---:|---:|
@@ -196,6 +220,10 @@ PhysX 的速度上限、去穿透速度及求解器设置也不能直接等同 M
 无执行噪声：q_target = q_home + 0.5 * action
 有执行噪声：q_target = q_home + 0.5 * (action + epsilon)
 ```
+
+当前两个Khan训练脚本默认令颈yaw/pitch的 `epsilon=0`，其余25轴仍为std=0.1；
+观测和encoder goal噪声不受影响。脚本的 `--neck-action-noise` 可恢复颈执行噪声，
+`--no-neck-action-noise` 显式选择默认值。该开关不改变上述固定摩擦值。
 
 action=1 对应相对 home 增加 0.5 rad（约 28.65°）。动作本身默认没有强制限制在 [-1,1]，
 因此 ±0.5 rad 不是硬位置范围；URDF 关节限位和执行器力矩限制仍由模型处理。

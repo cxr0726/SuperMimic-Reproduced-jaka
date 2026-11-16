@@ -1,10 +1,51 @@
 # Khan 服务器训练：Isaac观测布局、SuperMimic尺度与原优化参数
 
-> **版本说明（2026-11-12）**：下文的ξ91、四踝reset随机化和旧奖励上界属于历史配置。
-> 当前 `feat/official-window-value-normalization` 分支的两个服务器脚本使用
-> `khan_dr_v3`：ξ101、下肢12轴startup armature、左右脚独立startup附重、
-> 足部位置/姿态各0.25奖励，单步上界0.122。请以
-> [当前分支配置及训练命令](KHAN_OFFICIAL_PORT.md#双脚附加质量与独立跟踪khan_dr_v3) 为准。
+> **当前版本（2026-11-16）**：`feat/khan-dr-v3-only` 的两个服务器脚本保留
+> DR v3（ξ101、WM195、critic615）、Adam和原有编译路径，默认关闭额外足部奖励，
+> 单步奖励上界0.112。两膝硬下界为 `-0.15099473684210526` rad，软下界为 `-0.03` rad；
+> 全27个转动关节固定 `frictionloss=0.1 N·m`，训练/eval相同，不新增摩擦DR。
+> 颈部执行噪声默认关闭，其余25轴std=0.1，观测及encoder goal噪声保留。
+> 详细配置以 [当前分支说明](KHAN_OFFICIAL_PORT.md) 为准。
+
+## 当前配置的训练命令
+
+服务器同步本分支的代码及整个 `assets/robots/khan_mini/`，使用新的run名从头训练。
+新的资产hash与旧DR v3 160k等检查点不兼容，不能用 `--resume` 接着训练旧run。
+以下库路径按服务器实际位置调整；脚本不下载数据。
+
+```bash
+cd /home/jaka/Workspace/SuperMimic-Reproduced-jaka
+git fetch origin
+git switch feat/khan-dr-v3-only
+git pull --ff-only origin feat/khan-dr-v3-only
+
+bash scripts/training/train_khan_compact_server.sh \
+  --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
+  --run-name khan_8452_dr_v3_knee_friction01_no_neck_4096 \
+  --num-envs 4096 --no-neck-action-noise
+```
+
+加 `--dry-run` 可检查路径和实际CLI，不启动CUDA或训练。NPZ入口为：
+
+```bash
+bash scripts/training/train_khan_server.sh \
+  --data-dir data/npz/khan_mini/lafan1 \
+  --run-name khan_lafan1_dr_v3_knee_friction01_no_neck_4096 \
+  --num-envs 4096 --no-neck-action-noise
+```
+
+`--no-neck-action-noise` 是默认值；`--neck-action-noise` 可恢复颈部执行噪声，
+不改变观测噪声、关节摩擦、DR v3或奖励。`--stop-after-iterations 50` 可用于新配置短测，
+随后只从该新run的匹配检查点恢复；总320k学习率计划不变。
+
+膝限位复用原有真实/WM `joint_limit` 惩罚及reset裁剪，`[-0.03,0)` 不受下限惩罚。
+这不是新增单侧奖励或部署端target clip。已有ONNX和实机YAML不会自动更新，
+部署前仍需核对目标模型的参数及实际控制限位。
+
+## 历史配置与验证记录
+
+以下保留2026-11-12及更早的配置、命令和测试记录。ξ91、四踝reset随机化、
+reference residual和相应旧run名不代表上面的当前默认配置，不能用于恢复到本次新资产。
 
 2026-11-09参考残差更新：新Khan训练默认执行 `q_ref(t+1)+0.5*decoder_residual`，
 并仅给actor编码器goal加入高度±0.01 m／参考关节±0.05 rad的均匀噪声。

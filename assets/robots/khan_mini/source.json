@@ -52,6 +52,68 @@
     "meshes/Camera_Link.STL": "152bbfaad07c32dd8a7a3fe414986c9c2b4a43353b912a8d410f190312cda1ab"
   },
   "parameter_overrides": {
+    "knee_lower_limit": {
+      "joint_names": [
+        "Left_knee_joint",
+        "Right_knee_joint"
+      ],
+      "source_limits": {
+        "Left_knee_joint": {
+          "lower": -0.349,
+          "upper": 2.2689,
+          "effort": 120.0,
+          "velocity": 11.519
+        },
+        "Right_knee_joint": {
+          "lower": -0.349,
+          "upper": 2.2689,
+          "effort": 120.0,
+          "velocity": 11.519
+        }
+      },
+      "effective_lower_limits": {
+        "Left_knee_joint": -0.15099473684210526,
+        "Right_knee_joint": -0.15099473684210526
+      },
+      "soft_lower_limit": -0.03,
+      "soft_joint_pos_limit_factor": 0.9,
+      "source": "user-requested hard lower limits yielding a -0.03 rad soft lower limit; upper limits unchanged"
+    },
+    "joint_frictionloss": {
+      "joint_names": [
+        "Left_hip_pitch_joint",
+        "Left_hip_roll_joint",
+        "Left_hip_yaw_joint",
+        "Left_knee_joint",
+        "Left_ankle_pitch_joint",
+        "Left_ankle_roll_joint",
+        "Right_hip_pitch_joint",
+        "Right_hip_roll_joint",
+        "Right_hip_yaw_joint",
+        "Right_knee_joint",
+        "Right_ankle_pitch_joint",
+        "Right_ankle_roll_joint",
+        "waist_yaw_joint",
+        "Left_shoulder_pitch_joint",
+        "Left_shoulder_roll_joint",
+        "Left_shoulder_yaw_joint",
+        "Left_elbow_joint",
+        "Left_wrist_roll_joint",
+        "Left_wrist_yaw_joint",
+        "Right_shoulder_pitch_joint",
+        "Right_shoulder_roll_joint",
+        "Right_shoulder_yaw_joint",
+        "Right_elbow_joint",
+        "Right_wrist_roll_joint",
+        "Right_wrist_yaw_joint",
+        "Neck_yaw_joint",
+        "Neck_pitch_joint"
+      ],
+      "value": 0.1,
+      "units": "N*m",
+      "randomized": false,
+      "source": "user-requested fixed all-hinge frictionloss, following PartyMimic RP1"
+    },
     "waist_velocity_limit": {
       "source_config_value": 120.0,
       "effective_value": 11.519,
@@ -83,6 +145,44 @@
         "Right_ankle_roll_joint": 0.016
       },
       "effective_value": 0.01,
+      "source": "user-requested alignment with audited jaka.py ankle settings"
+    },
+    "ankle_pitch_pd": {
+      "joint_names": [
+        "Left_ankle_pitch_joint",
+        "Right_ankle_pitch_joint"
+      ],
+      "source_config_values": {
+        "Left_ankle_pitch_joint": {
+          "stiffness": 100.0,
+          "damping": 2.0
+        },
+        "Right_ankle_pitch_joint": {
+          "stiffness": 100.0,
+          "damping": 2.0
+        }
+      },
+      "effective_stiffness": 80.0,
+      "effective_damping": 2.0,
+      "source": "user-requested alignment with audited jaka.py ankle settings"
+    },
+    "ankle_roll_pd": {
+      "joint_names": [
+        "Left_ankle_roll_joint",
+        "Right_ankle_roll_joint"
+      ],
+      "source_config_values": {
+        "Left_ankle_roll_joint": {
+          "stiffness": 50.0,
+          "damping": 0.5
+        },
+        "Right_ankle_roll_joint": {
+          "stiffness": 50.0,
+          "damping": 0.5
+        }
+      },
+      "effective_stiffness": 20.0,
+      "effective_damping": 1.0,
       "source": "user-requested alignment with audited jaka.py ankle settings"
     },
     "nonfoot_sliding_friction": {
@@ -137,44 +237,6 @@
       ],
       "source": "user-requested narrower torso collision box",
       "rationale": "Fit the 126--140 mm central visual shell; wider upper flanges are outside this simplified collision core. Preserve X/Z size, pose and explicit inertial properties"
-    },
-    "ankle_pitch_pd": {
-      "joint_names": [
-        "Left_ankle_pitch_joint",
-        "Right_ankle_pitch_joint"
-      ],
-      "source_config_values": {
-        "Left_ankle_pitch_joint": {
-          "stiffness": 100.0,
-          "damping": 2.0
-        },
-        "Right_ankle_pitch_joint": {
-          "stiffness": 100.0,
-          "damping": 2.0
-        }
-      },
-      "effective_stiffness": 80.0,
-      "effective_damping": 2.0,
-      "source": "user-requested alignment with audited jaka.py ankle settings"
-    },
-    "ankle_roll_pd": {
-      "joint_names": [
-        "Left_ankle_roll_joint",
-        "Right_ankle_roll_joint"
-      ],
-      "source_config_values": {
-        "Left_ankle_roll_joint": {
-          "stiffness": 50.0,
-          "damping": 0.5
-        },
-        "Right_ankle_roll_joint": {
-          "stiffness": 50.0,
-          "damping": 0.5
-        }
-      },
-      "effective_stiffness": 20.0,
-      "effective_damping": 1.0,
-      "source": "user-requested alignment with audited jaka.py ankle settings"
     }
   },
   "conversion": {
@@ -188,8 +250,8 @@
     "contacts": "self-collision masks retained; feet condim=3, other contacts condim=1"
   },
   "output_sha256": {
-    "robot.xml": "600cf20adab81c925b9a71e764e3c18ec86d8a63e79270725429c9d0273a367f",
+    "robot.xml": "ec825ef0e79e9b68782f2bbbe564aec63a686c129a6664c2109508202e77a1e8",
     "source.urdf": "927cf814485ce2e2fea77aed95dd4b858e60763b785693c2f3f4b23f9940be33",
-    "profile.json": "30e720fc57194b63535816cbf83293239532678052ba206a7956b54ac8fe9996"
+    "profile.json": "527ab085ab8194b68fe2915391dcd8b9a941e26863fbe9683191a858257be7d6"
   }
 }

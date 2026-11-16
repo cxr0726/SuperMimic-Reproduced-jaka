@@ -4,7 +4,8 @@
 的足部奖励版本分出。官方组件基于 SuperMimic
 `5efbf114e11f725c31d83e217be987c13c0e4ce2`，在现有 Khan 框架内适配。
 `main` 上已有训练方案保持在原提交。请为当前新配置新建训练 run；
-历史策略仍按其 checkpoint 保存的动作和网络配置 play/export。
+历史策略需配套原资产及其 checkpoint 保存的动作和网络配置 play/export；
+本次膝限位和固定关节摩擦更新改变了资产 hash，不能直接恢复旧 DR v3 160k 等检查点。
 
 ## 默认组件
 
@@ -23,6 +24,9 @@
 | actor 网络 | encoder1024/512/256，decoder2048/1024/512/256，隐藏层均为LayerNorm/GELU，latent32 |
 | critic 网络 | 256/128，隐藏层为LayerNorm/GELU，最终输出仍为普通Linear |
 | Actor EMA | 0.995，采集/优化使用 live；eval/export 默认自动选择 EMA |
+| 膝关节限位 | 硬范围 `[-0.15099473684210526, 2.2689]` rad，factor=0.9，计算后的软下界为 `-0.03` rad |
+| 关节 frictionloss | 全部27个 hinge 固定 `0.1 N·m`，训练/eval相同，不做额外摩擦 DR |
+| 执行噪声 | 两个服务器脚本默认颈 yaw/pitch 为0，其余25轴std=0.1；观测和goal噪声保留 |
 | 额外足部跟踪 | 默认关闭；保留原15 body及颈关节奖励，不改变足部质量随机化 |
 | DR | 保留 `khan_dr_v3`，ξ101维、WM输入195维、critic615维 |
 
@@ -34,6 +38,8 @@ decoder动作输出和critic价值输出仍为普通Linear，不添加输出归�
 WM 仍使用现有 heading 表示（Khan67维状态特征）、66维速度/pose residual 输出、
 8次真实transition监督及原误差尺度；没有同时改成官方33维纯速度预测模型或切换Muon。
 运行输入归一化取代WM原固定输入除数，输出scale和loss scale保持现有实现。
+本次继续使用 Adam 和本分支原有的 WM/想象单步编译，没有迁入 Muon、CDF、
+完整学习步骤 CUDA Graph 或新版融合优化。
 
 本分支用新run隔离上一轮的参考残差和额外足部奖励：默认关闭这两项，保留
 扩展后的DR v3、官方采样器/归一化/LayerNorm/GELU、网络、优化器及学习率调度。
@@ -48,6 +54,35 @@ WM 仍使用现有 heading 表示（Khan67维状态特征）、66维速度/pose 
 benchmark的满分仍为1。这没有改变原15 body和颈部奖励的相对权重。当前默认
 与上一轮足部权重各0.25的训练目标不同，须新建run，不能直接比较两种定义的
 原始`train_ret`或直接续训；效果比较须使用一致奖励定义和条件。
+
+## 膝限位、固定关节摩擦与颈部执行噪声（2026-11-16）
+
+两膝保留硬上界 `u=2.2689` rad 和软限位比例 `f=0.9`，按
+`soft_lower = l + (1-f)*(u-l)/2` 反算硬下界：
+
+```text
+l = (-0.03 - 0.05 * 2.2689) / 0.95 = -0.15099473684210526 rad
+soft_lower = -0.03 rad
+```
+
+继续复用原有 `joint_limit` 奖励，权重仍为 `-2`，没有新增膝关节奖励项。
+只有实际关节角低于 `-0.03` 才产生下限惩罚，`[-0.03, 0)` 仍不触发；
+惩罚不是对 PD target 的裁剪。真实环境和 WM 解析奖励共用实际模型生成的软限位。
+reset 也沿用这套软限位裁剪初始关节角，参考动作库和后续 goal 没有重写。
+
+参考 PartyMimic RP1，将全部27个 hinge 的 `frictionloss` 固定为 `0.1 N·m`，
+包含双膝、四踝和颈部；浮动根不加摩擦。该值写入 XML/profile 并由资产生成器保留，
+训练、play和eval加载相同值，关闭DR也不会清零。它不是脚底 `geom_friction` 或
+PD damping，不增加域随机化项或ξ维度：仍为 `khan_dr_v3`、ξ101、WM195、critic615。
+`new.urdf` 和导出元数据同步记录这套限位及关节摩擦，原始输入 `source.urdf` 保留。
+
+两个训练脚本默认传 `--env.disable-neck-action-noise`，仅把颈 yaw/pitch 的执行
+噪声置零；传感器观测、encoder goal噪声及原颈部跟踪奖励保持原配置。
+`--no-neck-action-noise` 显式选择默认值，`--neck-action-noise` 可恢复27轴执行噪声。
+replay/WM仍使用实际执行噪声后的动作，历史动作和action-rate仍使用clean actor动作。
+
+必须为这套资产新建run，不能用 `--resume` 接着训练旧160k或新版Muon检查点。
+已导出的旧ONNX文件不会被本次改动重写；实机YAML的目标角限位和控制参数也不会自动同步。
 
 ## 可选参考残差与运行归一化
 
@@ -210,7 +245,8 @@ G30 = r30 + 0.99*r31 + ... + 0.99^19*r49 + 0.99^20*V[bin(50)]
 
 先同步并切换到本分支，再在服务器项目目录运行。切换前应保存服务器自己的
 代码改动；以下命令不覆盖本地修改。默认eager参考FK、delay关闭、default动作、
-额外足部奖励关闭，保留DR v3和encoder goal噪声：
+额外足部奖励关闭，保留DR v3和encoder goal噪声，颈部执行噪声关闭；
+使用本次固定全关节摩擦和膝限位资产，从头新建run：
 
 ```bash
 cd /home/jaka/Workspace/SuperMimic-Reproduced-jaka
@@ -220,8 +256,8 @@ git pull --ff-only origin feat/khan-dr-v3-only
 
 bash scripts/training/train_khan_compact_server.sh \
   --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
-  --run-name khan_8452_dr_v3_only_4096 \
-  --num-envs 4096
+  --run-name khan_8452_dr_v3_knee_friction01_no_neck_4096 \
+  --num-envs 4096 --no-neck-action-noise
 ```
 
 开启参考 FK 编译时增加 `--reference-fk-compile`，并使用不同 run-name。
@@ -233,15 +269,16 @@ NPZ 混合库沿用原入口：
 ```bash
 bash scripts/training/train_khan_server.sh \
   --data-dir data/npz/khan_mini/mixed \
-  --run-name khan_mixed_dr_v3_only_4096 \
-  --num-envs 4096
+  --run-name khan_mixed_dr_v3_knee_friction01_no_neck_4096 \
+  --num-envs 4096 --no-neck-action-noise
 ```
 
 两个 wrapper 都保留环境变量清理、路径/资产检查、已有 checkpoint 防覆盖和
-`--resume`、`--stop-after-iterations` 功能。只允许从相同本分支配置恢复；
+`--resume`、`--stop-after-iterations` 功能。只允许从相同配置和新资产训练的检查点恢复；
 `--stop-after-iterations` 不缩短正式 320k 学习率调度。
-旧残差＋足部奖励run的续训还需显式指定`--reference-residual --foot-tracking`；
-脚本不会从文件名猜测这些设置，训练入口会检查checkpoint兼容性。
+使用可选残差、足部奖励或颈部噪声的run，续训时还需显式匹配相应开关；
+脚本不会从文件名猜测设置，训练入口会检查checkpoint兼容性。原资产的旧run不能
+通过增加这些开关变成兼容；应在原版本和原资产下恢复。
 
 ## 观察指标
 

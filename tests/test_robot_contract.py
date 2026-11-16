@@ -75,6 +75,7 @@ def test_saved_nondefault_delay_and_reset_semantics_are_validated():
 @pytest.mark.parametrize("field,value", [
     ("actuator_delay", False), ("actuator_delay_max_ms", 10.0),
     ("reset_root_z_offset", 0.0), ("domain_randomization", False),
+    ("disable_neck_action_noise", True),
 ])
 def test_resume_rejects_changed_delay_or_reset_before_loading_weights(tmp_path, field, value):
     from dataclasses import asdict
@@ -99,3 +100,30 @@ def test_resume_rejects_changed_delay_or_reset_before_loading_weights(tmp_path, 
     # No networks are constructed: reject incompatible semantics before loading.
     with pytest.raises(ValueError, match="Checkpoint environment semantics differ"):
         trainer.load(path)
+
+
+def test_fixed_joint_physics_and_neck_noise_are_saved_without_expanding_dr_v3():
+    settings = {"context_layout": "khan_dr_v3", "foot_tracking": False,
+                "disable_neck_action_noise": True, "action_noise_std": 0.1}
+    contract = robot_contract("khan_mini", env_config=settings)
+    assert contract["version"] == 12
+    physics = contract["nominal_joint_physics"]
+    assert physics["training_semantics_version"] == 3
+    assert physics["joint_frictionloss_nm"] == dict.fromkeys(contract["joint_names"], 0.1)
+    assert physics["joint_frictionloss_randomized"] is False
+    assert physics["knee_soft_lower_limit_rad"] == -0.03
+    for name in ("Left_knee_joint", "Right_knee_joint"):
+        lo, hi = physics["joint_position_limits_rad"][name]
+        assert hi == 2.2689
+        assert lo + 0.05 * (hi - lo) == pytest.approx(-0.03, abs=1e-12)
+    assert contract["simulation_schema"]["xi_dim"] == 101
+    assert contract["simulation_schema"]["world_model_input_dim"] == 195
+    assert contract["observation_schema"]["critic_input_dim"] == 615
+    noise = contract["execution_noise_schema"]
+    assert noise["disabled_joint_names"] == ["Neck_yaw_joint", "Neck_pitch_joint"]
+    assert noise["other_joint_std_normalized"] == 0.1
+    checkpoint = {"config": {"env": settings}, "robot_contract": contract}
+    validate_robot_contract(checkpoint, "khan_mini")
+    checkpoint["config"]["env"] = {**settings, "disable_neck_action_noise": False}
+    with pytest.raises(ValueError, match="execution_noise_schema"):
+        validate_robot_contract(checkpoint, "khan_mini")

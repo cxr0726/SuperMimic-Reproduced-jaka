@@ -158,6 +158,8 @@ def _metadata(ckpt: Path, cfg: dict, input_layout: InputLayout) -> dict[str, str
         "default_joint_pos": array("default_joint_pos"), "action_scale": array("action_scale"),
         "effort_limit": array("effort_limit"), "velocity_limit": array("velocity_limit"),
         "armature": array("armature"),
+        "joint_frictionloss": array("joint_frictionloss"),
+        "joint_frictionloss_randomized_in_training": "false",
         "joint_pos_lower": ",".join(str(profile["urdf_limits"][n]["lower"]) for n in names),
         "joint_pos_upper": ",".join(str(profile["urdf_limits"][n]["upper"]) for n in names),
         "soft_joint_pos_limit_factor": str(profile["soft_joint_pos_limit_factor"]),

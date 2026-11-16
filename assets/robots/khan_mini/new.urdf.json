@@ -1,9 +1,9 @@
 {
   "urdf": "/home/cxr0726/workspace/jaka_supermimic/SuperMimic-Reproduced-jaka/assets/robots/khan_mini/new.urdf",
   "source_sha256": {
-    "/home/cxr0726/workspace/jaka_supermimic/SuperMimic-Reproduced-jaka/assets/robots/khan_mini/robot.xml": "0ffc8cad5dce6f95224828b5128c171fcd8ea3773dd94f4e5cb404dabd24d077",
+    "/home/cxr0726/workspace/jaka_supermimic/SuperMimic-Reproduced-jaka/assets/robots/khan_mini/robot.xml": "ec825ef0e79e9b68782f2bbbe564aec63a686c129a6664c2109508202e77a1e8",
     "/home/cxr0726/workspace/jaka_supermimic/SuperMimic-Reproduced-jaka/assets/robots/khan_mini/source.urdf": "927cf814485ce2e2fea77aed95dd4b858e60763b785693c2f3f4b23f9940be33",
-    "/home/cxr0726/workspace/jaka_supermimic/SuperMimic-Reproduced-jaka/assets/robots/khan_mini/profile.json": "caf3a8fda4f45a852a2787d65cbfe5be8e2c49c4cd0fb67f459d8f3012a1590f"
+    "/home/cxr0726/workspace/jaka_supermimic/SuperMimic-Reproduced-jaka/assets/robots/khan_mini/profile.json": "527ab085ab8194b68fe2915391dcd8b9a941e26863fbe9683191a858257be7d6"
   },
   "mujoco_version": "3.16.0",
   "collisions": [
@@ -352,14 +352,14 @@
       "Left_hip_roll_joint": 0.03,
       "Left_hip_yaw_joint": 0.03,
       "Left_knee_joint": 0.03,
-      "Left_ankle_pitch_joint": 0.069,
-      "Left_ankle_roll_joint": 0.0066,
+      "Left_ankle_pitch_joint": 0.02,
+      "Left_ankle_roll_joint": 0.01,
       "Right_hip_pitch_joint": 0.03,
       "Right_hip_roll_joint": 0.03,
       "Right_hip_yaw_joint": 0.03,
       "Right_knee_joint": 0.03,
-      "Right_ankle_pitch_joint": 0.069,
-      "Right_ankle_roll_joint": 0.0066,
+      "Right_ankle_pitch_joint": 0.02,
+      "Right_ankle_roll_joint": 0.01,
       "waist_yaw_joint": 0.03,
       "Left_shoulder_pitch_joint": 0.016,
       "Left_shoulder_roll_joint": 0.016,
@@ -381,14 +381,14 @@
       "Left_hip_roll_joint": 187.0,
       "Left_hip_yaw_joint": 187.0,
       "Left_knee_joint": 187.0,
-      "Left_ankle_pitch_joint": 100.0,
-      "Left_ankle_roll_joint": 50.0,
+      "Left_ankle_pitch_joint": 80.0,
+      "Left_ankle_roll_joint": 20.0,
       "Right_hip_pitch_joint": 187.0,
       "Right_hip_roll_joint": 187.0,
       "Right_hip_yaw_joint": 187.0,
       "Right_knee_joint": 187.0,
-      "Right_ankle_pitch_joint": 100.0,
-      "Right_ankle_roll_joint": 50.0,
+      "Right_ankle_pitch_joint": 80.0,
+      "Right_ankle_roll_joint": 20.0,
       "waist_yaw_joint": 187.0,
       "Left_shoulder_pitch_joint": 102.0,
       "Left_shoulder_roll_joint": 102.0,
@@ -411,13 +411,13 @@
       "Left_hip_yaw_joint": 18.7,
       "Left_knee_joint": 18.7,
       "Left_ankle_pitch_joint": 2.0,
-      "Left_ankle_roll_joint": 0.5,
+      "Left_ankle_roll_joint": 1.0,
       "Right_hip_pitch_joint": 18.7,
       "Right_hip_roll_joint": 18.7,
       "Right_hip_yaw_joint": 18.7,
       "Right_knee_joint": 18.7,
       "Right_ankle_pitch_joint": 2.0,
-      "Right_ankle_roll_joint": 0.5,
+      "Right_ankle_roll_joint": 1.0,
       "waist_yaw_joint": 18.7,
       "Left_shoulder_pitch_joint": 10.2,
       "Left_shoulder_roll_joint": 10.2,
@@ -540,7 +540,7 @@
     "collision_geometries": 14,
     "fk_test_poses": 18,
     "max_fk_position_error_m": 1.1102230246251565e-16,
-    "max_fk_rotation_matrix_error": 8.881784197001252e-16,
+    "max_fk_rotation_matrix_error": 9.992007221626409e-16,
     "max_mass_error_kg": 0.0,
     "max_com_error_m": 0.0,
     "max_inertia_matrix_error_kg_m2": 1.214306433183765e-17,
@@ -604,5 +604,5 @@
       }
     ]
   },
-  "urdf_sha256": "598aaa2eced3b03a9f21a252a1927e4df5f9fc8c13cf48cf19c2d621453d8038"
+  "urdf_sha256": "93cb52960c94f7dc6e0bdc744fe9802d78da4408c4b20758f0c287df1c07c6f2"
 }

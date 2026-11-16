@@ -5,7 +5,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 NUM_ENVS=4096
-RUN_NAME=khan_lafan1_dr_v3_only_4096
+RUN_NAME=khan_lafan1_dr_v3_knee_friction01_no_neck_4096
 DATA_DIR="$PROJECT_DIR/data/npz/khan_mini/lafan1"
 RESUME=''
 STOP_AFTER=''
@@ -13,6 +13,7 @@ DRY_RUN=0
 ACTUATOR_DELAY=False
 ACTION_MODE=default
 FOOT_TRACKING=0
+DISABLE_NECK_ACTION_NOISE=1
 GOAL_NOISE_Z=0.01
 GOAL_NOISE_JOINT_POS=0.05
 
@@ -33,6 +34,10 @@ disables the extra foot pos/ori rewards (raw reward cap 0.112).
 (beta 1); --foot-tracking restores extra foot rewards. Only the encoder goal
 is noise-augmented and running-normalized; the optional reference skip uses
 raw joint positions in radians. Activation recomputation remains disabled.
+Khan assets use a knee soft lower limit of -0.03 rad and fixed 0.1 N m
+frictionloss on all 27 hinge joints, including eval (no frictionloss DR).
+Neck execution noise is disabled by default; the other 25 axes retain std 0.1.
+Use a fresh run with these assets; old checkpoints require their original assets.
 Actuator delay is disabled by default for this server experiment; --actuator-delay
 enables held 0–20 ms delay with an immediate first step.
 Khan uses full CAD convex feet, actual root reset clearance 0.05 m and a 615-dim
@@ -48,12 +53,14 @@ stay within their source clip; physical end timing is unchanged. Use a fresh run
 
 Options:
   --num-envs N                Parallel robot environments (default: 4096)
-  --run-name NAME             Directory under project logs/ (default: khan_lafan1_dr_v3_only_4096)
+  --run-name NAME             Directory under project logs/ (default: khan_lafan1_dr_v3_knee_friction01_no_neck_4096)
   --data-dir PATH             Converted Khan NPZ directory (default: project data/npz/khan_mini/lafan1)
   --no-reference-residual    Use default-pose actions (default)
   --reference-residual       Opt in to clean next-reference residual actions
   --no-foot-tracking         Disable extra foot pos/ori rewards (default)
   --foot-tracking            Enable extra foot pos/ori rewards, weights 0.25/0.25
+  --no-neck-action-noise    Disable execution noise on both neck axes (default)
+  --neck-action-noise       Restore std 0.1 execution noise on both neck axes
   --no-goal-noise            Disable encoder goal augmentation
   --goal-noise               Enable Isaac encoder goal noise (default)
   --no-actuator-delay        Disable actuator delay (default for this server experiment)
@@ -84,6 +91,8 @@ while (($#)); do
         --reference-residual) ACTION_MODE=reference_residual; shift ;;
         --no-foot-tracking) FOOT_TRACKING=0; shift ;;
         --foot-tracking) FOOT_TRACKING=1; shift ;;
+        --no-neck-action-noise) DISABLE_NECK_ACTION_NOISE=1; shift ;;
+        --neck-action-noise) DISABLE_NECK_ACTION_NOISE=0; shift ;;
         --no-goal-noise) GOAL_NOISE_Z=0.0; GOAL_NOISE_JOINT_POS=0.0; shift ;;
         --goal-noise) GOAL_NOISE_Z=0.01; GOAL_NOISE_JOINT_POS=0.05; shift ;;
         --no-actuator-delay) ACTUATOR_DELAY=False; shift ;;
@@ -149,6 +158,11 @@ command=(
     --env.merge-short-tail-bins True --env.tail-bin-merge-fraction 1.0
     --env.reset-min-remaining-steps 32
 )
+if ((DISABLE_NECK_ACTION_NOISE)); then
+    command+=(--env.disable-neck-action-noise)
+else
+    command+=(--env.no-disable-neck-action-noise)
+fi
 # The additional foot rewards are independent of the DR v3 foot masses/context.
 RAW_REWARD_CAP=0.112
 CRITIC_UPPER_BOUND=11.2
@@ -179,6 +193,12 @@ else
 fi
 printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; then running normalization; critic/reward stay clean; reference skip uses raw clean radians\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
 printf '[INFO] Khan: xi 101; critic 615; Kp/Kd x0.8-1.2 per reset; 12 leg armatures x0.8-1.2 at startup; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$ACTUATOR_DELAY"
+printf '[INFO] Khan asset joint limits: knee soft lower -0.03 rad; fixed frictionloss 0.1 N m on all 27 hinges in train/eval; no frictionloss DR\n'
+if ((DISABLE_NECK_ACTION_NOISE)); then
+    printf '[INFO] Execution noise: neck yaw/pitch OFF; other 25 axes std 0.1; clean action history unchanged\n'
+else
+    printf '[INFO] Execution noise: all 27 axes std 0.1; clean action history unchanged\n'
+fi
 printf '[INFO] Foot payload: independent left/right U(0,0.2) kg at startup, authored COM/inertia retained; DR v3 remains enabled\n'
 if ((FOOT_TRACKING)); then
     printf '[INFO] Extra foot pos/ori rewards: ON, weights 0.25/0.25; raw reward cap %s\n' "$RAW_REWARD_CAP"

@@ -1,5 +1,7 @@
 """CPU regressions for the portable Khan_mini asset and its mjlab configuration."""
 
+import hashlib
+import json
 import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -42,6 +44,8 @@ MOTOR_GROUPS = (
     (("Neck_yaw_joint", "Neck_pitch_joint"), (6.7, 0.67, 0.01, 8.0, 8.0)),
 )
 PARAMETER_NAMES = ("stiffness", "damping", "armature", "effort_limit", "velocity_limit")
+KNEE_NAMES = ("Left_knee_joint", "Right_knee_joint")
+KNEE_HARD_LOWER = -0.15099473684210526
 
 
 def expected_parameters(name):
@@ -67,7 +71,7 @@ def bundle(tmp_path_factory):
     return output
 
 
-def test_conversion_preserves_original_tree_mass_and_joint_limits(bundle):
+def test_conversion_preserves_tree_mass_and_limits_except_requested_knee_override(bundle):
     source = ET.parse(SOURCE_URDF).getroot()
     model = mujoco.MjModel.from_xml_path(str(bundle / "robot.xml"))
     assert (model.nq, model.nv, model.njnt, model.nbody, model.ngeom, model.nmesh) == (
@@ -90,11 +94,71 @@ def test_conversion_preserves_original_tree_mass_and_joint_limits(bundle):
         if joint.attrib["type"] == "fixed":
             continue
         limit = joint.find("limit")
+        name = joint.attrib["name"]
+        lower = KNEE_HARD_LOWER if name in KNEE_NAMES else float(limit.attrib["lower"])
         np.testing.assert_allclose(
-            model.joint(joint.attrib["name"]).range,
-            [float(limit.attrib["lower"]), float(limit.attrib["upper"])],
-            atol=1e-7,
+            model.joint(name).range, [lower, float(limit.attrib["upper"])],
+            rtol=0, atol=1e-12,
         )
+
+
+@pytest.mark.parametrize("asset_source", ["rebuilt", "checked_in"])
+def test_knee_soft_lower_and_fixed_joint_friction_match_compiled_assets(bundle, asset_source):
+    asset = bundle if asset_source == "rebuilt" else ROOT / "assets/robots/khan_mini"
+    profile = load_profile(asset)
+    cfg = get_khan_mini_cfg(asset)
+    models = (
+        mujoco.MjModel.from_xml_path(str(asset / "robot.xml")),
+        cfg.build().spec.compile(),
+    )
+    source = ET.parse(asset / "source.urdf").getroot()
+    source_limits = {
+        joint.attrib["name"]: joint.find("limit").attrib
+        for joint in source.findall("joint") if joint.attrib["type"] != "fixed"
+    }
+    assert profile["joint_frictionloss"] == dict.fromkeys(profile["joint_names"], 0.1)
+    factor = cfg.articulation.soft_joint_pos_limit_factor
+    assert factor == 0.9
+    for model in models:
+        assert not (model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_FRICTIONLOSS)
+        np.testing.assert_array_equal(model.dof_frictionloss[:6], np.zeros(6))
+        assert model.njnt == 28
+        for name in profile["joint_names"]:
+            joint = model.joint(name)
+            assert model.jnt_type[joint.id] == mujoco.mjtJoint.mjJNT_HINGE
+            dof = model.jnt_dofadr[joint.id]
+            assert model.dof_frictionloss[dof] == pytest.approx(0.1, abs=1e-12)
+            lower, upper = joint.range
+            expected_lower = (KNEE_HARD_LOWER if name in KNEE_NAMES
+                              else float(source_limits[name]["lower"]))
+            np.testing.assert_allclose(
+                [lower, upper], [expected_lower, float(source_limits[name]["upper"])],
+                rtol=0, atol=1e-12,
+            )
+            assert profile["urdf_limits"][name]["lower"] == pytest.approx(lower, abs=1e-12)
+            assert profile["urdf_limits"][name]["upper"] == pytest.approx(upper, abs=1e-12)
+            if name in KNEE_NAMES:
+                assert upper == pytest.approx(2.2689, abs=1e-12)
+                soft_lower = (lower + upper) / 2 - factor * (upper - lower) / 2
+                assert soft_lower == pytest.approx(-0.03, abs=1e-12)
+
+    # The generated profile documents the source/effective distinction used
+    # by export metadata; the archived source URDF remains unchanged.
+    override = profile["parameter_overrides"]["knee_lower_limit"]
+    assert override["soft_lower_limit"] == -0.03
+    for name in KNEE_NAMES:
+        assert float(source_limits[name]["lower"]) == -0.349
+        assert override["source_limits"][name]["lower"] == -0.349
+        assert override["effective_lower_limits"][name] == pytest.approx(KNEE_HARD_LOWER, abs=1e-12)
+
+
+def test_checked_in_asset_provenance_matches_generated_physics():
+    asset = ROOT / "assets/robots/khan_mini"
+    provenance = json.loads((asset / "source.json").read_text())
+    profile = load_profile(asset)
+    assert provenance["parameter_overrides"] == profile["parameter_overrides"]
+    for name, expected in provenance["output_sha256"].items():
+        assert hashlib.sha256((asset / name).read_bytes()).hexdigest() == expected, name
 
 
 def test_bundle_contains_relative_meshes_and_loads_after_relocation(bundle, tmp_path):

@@ -60,18 +60,23 @@ def test_dry_run_selects_isaac_observations_without_overriding_original_optimiza
     cfg = parse_config(result.stdout)
     assert cfg.robot == "khan_mini" and cfg.env.num_envs == num_envs
     assert cfg.data.npz_dir == root / "data/npz/khan_mini/lafan1"
-    assert cfg.run_name == "khan_lafan1_dr_v3_only_4096" and cfg.log_root == root / "logs"
+    assert cfg.run_name == "khan_lafan1_dr_v3_knee_friction01_no_neck_4096" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is cfg.data.library is None
     assert cfg.env.actuator_delay is False and cfg.env.merge_short_tail_bins is True
     assert cfg.env.delay_reset_first_step_no_delay is True
     assert cfg.env.tail_bin_merge_fraction == 1.0 and cfg.env.reset_min_remaining_steps == 32
     assert "actuator delay False" in result.stdout
     assert cfg.env.foot_tracking is False
+    assert cfg.env.disable_neck_action_noise is True
+    assert "--env.disable-neck-action-noise" in result.stdout
+    assert "knee soft lower -0.03 rad" in result.stdout
+    assert "fixed frictionloss 0.1 N m on all 27 hinges" in result.stdout
     assert "--env.no-foot-tracking" in result.stdout
     assert "raw reward cap 0.112" in result.stdout
     assert "critic upper bound 11.2" in result.stdout
     baseline = TrainConfig(robot="khan_mini")
     baseline.env.actuator_delay = False
+    baseline.env.disable_neck_action_noise = True
     resolve_training_observations(cfg)
     resolve_training_observations(baseline)
     for name in ("world_model", "wm_trainer", "policy", "critic", "policy_trainer", "schedule"):
@@ -157,7 +162,7 @@ def test_missing_data_and_existing_checkpoint_rejected(project):
     empty.mkdir()
     result = run_launcher(project, "--dry-run", "--data-dir", str(empty))
     assert result.returncode != 0 and "No converted Khan NPZ" in result.stderr
-    run = root / "logs/khan_lafan1_dr_v3_only_4096"
+    run = root / "logs/khan_lafan1_dr_v3_knee_friction01_no_neck_4096"
     run.mkdir(parents=True)
     (run / "ckpt_latest.pt").touch()
     result = run_launcher(project, "--dry-run")
@@ -257,3 +262,25 @@ def test_previous_residual_and_foot_reward_modes_can_be_selected_together(projec
     assert cfg.env.context_layout == "khan_dr_v3"
     assert cfg.policy.goal_noise_z == 0.01 and cfg.policy.goal_noise_joint_pos == 0.05
     assert "raw reward cap 0.122" in result.stdout
+
+
+@pytest.mark.parametrize("flags,disabled", [
+    ([], True),
+    (["--no-neck-action-noise"], True),
+    (["--neck-action-noise"], False),
+    (["--neck-action-noise", "--no-neck-action-noise"], True),
+    (["--no-neck-action-noise", "--neck-action-noise"], False),
+])
+def test_neck_execution_noise_switch_keeps_dr_v3_and_other_noise(project, flags, disabled):
+    result = run_launcher(project, "--dry-run", *flags)
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    resolve_training_observations(cfg)
+    assert cfg.env.disable_neck_action_noise is disabled
+    assert cfg.env.action_noise_std == 0.1
+    assert cfg.env.context_layout == "khan_dr_v3"
+    assert cfg.env.actuator_delay is False
+    assert cfg.policy.goal_noise_z == 0.01 and cfg.policy.goal_noise_joint_pos == 0.05
+    assert "no frictionloss DR" in result.stdout
+    expected = "neck yaw/pitch OFF; other 25 axes std 0.1" if disabled else "all 27 axes std 0.1"
+    assert expected in result.stdout

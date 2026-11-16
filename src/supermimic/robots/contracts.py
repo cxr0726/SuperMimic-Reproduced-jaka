@@ -58,11 +58,23 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
         "action_scale": spec.action_scale,
     }
     if robot == "khan_mini":
-        from supermimic.robots.khan_mini import DEFAULT_ASSET_DIR
+        from supermimic.robots.khan_mini import DEFAULT_ASSET_DIR, load_profile
 
         # Neither equal tensor widths nor matching body names prove equal physics.
         contract["model_sha256"] = hashlib.sha256((DEFAULT_ASSET_DIR / "robot.xml").read_bytes()).hexdigest()
         contract["profile_sha256"] = hashlib.sha256((DEFAULT_ASSET_DIR / "profile.json").read_bytes()).hexdigest()
+        profile = load_profile()
+        contract["nominal_joint_physics"] = {
+            "training_semantics_version": profile["training_semantics_version"],
+            "joint_frictionloss_nm": profile["joint_frictionloss"],
+            "joint_frictionloss_randomized": False,
+            "joint_position_limits_rad": {
+                name: [profile["urdf_limits"][name][key] for key in ("lower", "upper")]
+                for name in spec.joint_names
+            },
+            "soft_joint_pos_limit_factor": profile["soft_joint_pos_limit_factor"],
+            "knee_soft_lower_limit_rad": profile["parameter_overrides"]["knee_lower_limit"]["soft_lower_limit"],
+        }
         layout = resolve_observation_layout(robot, observation_layout)
         contract["version"] = 6
         contract["observation_layout"] = layout
@@ -145,6 +157,15 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
                 "aggregation": "mean_of_per_foot_exponentials",
                 "physical_and_imagined": True,
                 "max_step_reward": foot_reward.max_step_reward,
+            }
+        if env_config.get("disable_neck_action_noise", False):
+            contract["version"] = 12
+            contract["execution_noise_schema"] = {
+                "disabled_joint_names": list(profile["neck_joint_names"]),
+                "other_joint_std_normalized": env_config.get("action_noise_std", 0.1),
+                "rng_sampling": "full_action_tensor_before_neck_mask",
+                "replay_action": "executed_after_noise_mask",
+                "last_action_and_action_rate": "clean_policy_action",
             }
         if layout == "isaac_khan":
             contract["observation_schema"] = {

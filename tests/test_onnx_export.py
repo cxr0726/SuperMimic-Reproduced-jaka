@@ -101,10 +101,19 @@ def test_export_metadata_preserves_current_robot_and_observation_semantics(check
         ("joint_damping", "damping"),
         ("default_joint_pos", "default_joint_pos"),
         ("action_scale", "action_scale"),
+        ("joint_frictionloss", "joint_frictionloss"),
     ):
         actual = np.fromstring(metadata[key], sep=",")
         expected = [profile[profile_key][name] for name in names]
         np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
+    assert metadata["joint_frictionloss_randomized_in_training"] == "false"
+    lower = np.fromstring(metadata["joint_pos_lower"], sep=",")
+    upper = np.fromstring(metadata["joint_pos_upper"], sep=",")
+    factor = float(metadata["soft_joint_pos_limit_factor"])
+    for name in ("Left_knee_joint", "Right_knee_joint"):
+        index = names.index(name)
+        soft_lower = lower[index] + (1 - factor) * (upper[index] - lower[index]) / 2
+        assert soft_lower == pytest.approx(-0.03, abs=1e-12)
     assert metadata["anchor_body_name"] == "base_link"
     assert metadata["body_names"].split(",") == profile["tracked_bodies"]
     assert metadata["observation_names"].split(",") == [

@@ -116,10 +116,13 @@ class SuperMimicEnvCfgArgs:
     context_layout: ContextKind | None = None  # Checkpoints pass their saved layout.
     foot_tracking: bool = False
     extra_command_kwargs: dict = field(default_factory=dict)
+    disable_neck_action_noise: bool = False
 
 
 def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     robot_spec = get_robot_spec(a.robot)
+    if a.disable_neck_action_noise and a.robot != "khan_mini":
+        raise ValueError("disable_neck_action_noise is only supported for Khan Mini")
     a.context_layout = resolve_context_layout(a.robot, a.context_layout)
     settings = resolve_robot_environment(
         a.robot, actuator_delay=a.actuator_delay,
@@ -224,6 +227,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             scale=robot_spec.action_scale,
             use_default_offset=True,
             noise_std=a.action_noise_std,
+            noise_excluded_joint_names=robot_spec.neck_joint_names if a.disable_neck_action_noise else (),
             delay_reset_first_step_no_delay=a.delay_reset_first_step_no_delay,
         )
     }

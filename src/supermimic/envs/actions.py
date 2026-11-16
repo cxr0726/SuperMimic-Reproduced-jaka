@@ -29,6 +29,15 @@ class NoisyJointPositionAction(JointPositionAction):
         super().__init__(cfg, env)
         self._executed_raw = torch.zeros_like(self._raw_actions)
         self.noise_std = float(cfg.noise_std)
+        self._noise_excluded_ids = None
+        if cfg.noise_excluded_joint_names:
+            missing = set(cfg.noise_excluded_joint_names).difference(self.target_names)
+            if missing:
+                raise ValueError(f"Execution noise exclusions must name action targets: {sorted(missing)}")
+            self._noise_excluded_ids = torch.tensor(
+                [self.target_names.index(name) for name in cfg.noise_excluded_joint_names],
+                dtype=torch.long, device=self.device,
+            )
         self._delay_reset_groups = (
             self._resolve_delay_reset_groups() if cfg.delay_reset_first_step_no_delay else []
         )
@@ -83,6 +92,10 @@ class NoisyJointPositionAction(JointPositionAction):
         self._raw_actions[:] = actions
         if self.noise_std > 0:
             self._executed_raw = self._raw_actions + self.noise_std * torch.randn_like(self._raw_actions)
+            if self._noise_excluded_ids is not None:
+                # Keep the full draw so other joints and subsequent RNG use the same stream.
+                ids = self._noise_excluded_ids
+                self._executed_raw.index_copy_(-1, ids, self._raw_actions.index_select(-1, ids))
         else:
             self._executed_raw = self._raw_actions.clone()
         self._processed_actions = self._executed_raw * self._scale + self._offset
@@ -130,6 +143,7 @@ class NoisyJointPositionAction(JointPositionAction):
 @dataclass(kw_only=True)
 class NoisyJointPositionActionCfg(JointPositionActionCfg):
     noise_std: float = 0.1
+    noise_excluded_joint_names: tuple[str, ...] = ()
     delay_reset_first_step_no_delay: bool = False
     """Prime reset rows with the first physical policy target; subsequent steps use normal delay."""
 
