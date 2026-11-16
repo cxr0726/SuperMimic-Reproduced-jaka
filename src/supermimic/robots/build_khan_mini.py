@@ -123,7 +123,10 @@ def _precise_xml(spec: mujoco.MjSpec) -> str:
 
     for joint in root.findall(".//joint"):
         if "range" in joint.attrib:
-            joint.set("range", vector(spec.joint(joint.attrib["name"]).range))
+            # Shortest round-trip decimals keep ordinary limits readable while
+            # retaining the exactly derived knee lower limit.
+            limits = spec.joint(joint.attrib["name"]).range
+            joint.set("range", " ".join(str(float(value)) for value in limits))
     for body in root.findall(".//body"):
         index = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body.attrib["name"])
         body.set("pos", vector(model.body_pos[index]))

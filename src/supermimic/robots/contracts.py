@@ -215,6 +215,21 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
     return contract
 
 
+def robot_contract_differences(saved: dict, expected: dict) -> list[str]:
+    """Compare contracts, allowing only the audited range-formatting migration."""
+    differences = {key for key in set(saved) | set(expected) if saved.get(key) != expected.get(key)}
+    # 81c5b42's .17g ranges and their shortest-round-trip spelling compile to
+    # identical physics. No other model/profile/config change is exempted.
+    equivalent_xml = {
+        "ec825ef0e79e9b68782f2bbbe564aec63a686c129a6664c2109508202e77a1e8",
+        "db6bc5d5192deeaceafb1f5c7ece4bbec7ae6a8ba3e196323077502903320294",
+    }
+    if (saved.get("robot") == expected.get("robot") == "khan_mini"
+            and {saved.get("model_sha256"), expected.get("model_sha256")} == equivalent_xml):
+        differences.discard("model_sha256")
+    return sorted(differences)
+
+
 def validate_robot_contract(checkpoint: dict, robot: RobotName, observation_layout: str = "auto") -> None:
     saved = checkpoint.get("robot_contract")
     if saved is None:
@@ -229,6 +244,6 @@ def validate_robot_contract(checkpoint: dict, robot: RobotName, observation_layo
         )
     expected = robot_contract(robot, observation_layout,
                               env_config=checkpoint.get("config", {}).get("env", {}))
-    differences = sorted(key for key in set(saved) | set(expected) if saved.get(key) != expected.get(key))
+    differences = robot_contract_differences(saved, expected)
     if differences:
         raise ValueError("Checkpoint robot_contract differs from current model: " + ", ".join(differences))

@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from supermimic.robots.contracts import robot_contract, validate_robot_contract
+from supermimic.robots.contracts import robot_contract, robot_contract_differences, validate_robot_contract
 
 
 def test_legacy_g1_stays_compatible_but_legacy_khan_is_not_silently_reinterpreted():
@@ -127,3 +127,19 @@ def test_fixed_joint_physics_and_neck_noise_are_saved_without_expanding_dr_v3():
     checkpoint["config"]["env"] = {**settings, "disable_neck_action_noise": False}
     with pytest.raises(ValueError, match="execution_noise_schema"):
         validate_robot_contract(checkpoint, "khan_mini")
+
+
+def test_range_format_migration_accepts_only_the_audited_xml_pair():
+    expected = robot_contract("khan_mini")
+    assert expected["model_sha256"] == "db6bc5d5192deeaceafb1f5c7ece4bbec7ae6a8ba3e196323077502903320294"
+    saved = deepcopy(expected)
+    saved["model_sha256"] = "ec825ef0e79e9b68782f2bbbe564aec63a686c129a6664c2109508202e77a1e8"
+    assert not robot_contract_differences(saved, expected)
+    validate_robot_contract({"robot_contract": saved}, "khan_mini")
+    saved["profile_sha256"] = "different physics"
+    with pytest.raises(ValueError, match="profile_sha256"):
+        validate_robot_contract({"robot_contract": saved}, "khan_mini")
+    saved["profile_sha256"] = expected["profile_sha256"]
+    saved["model_sha256"] = "unverified XML"
+    with pytest.raises(ValueError, match="model_sha256"):
+        validate_robot_contract({"robot_contract": saved}, "khan_mini")

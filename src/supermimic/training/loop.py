@@ -20,7 +20,7 @@ from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.observation_layout import goal_dimension
 from supermimic.policy.nets import Critic, Policy
-from supermimic.robots.contracts import robot_contract, validate_robot_contract
+from supermimic.robots.contracts import robot_contract, robot_contract_differences, validate_robot_contract
 from supermimic.robots.registry import get_robot_spec
 from supermimic.training.distributed import (
     allreduce_mean,
@@ -394,9 +394,9 @@ class Trainer:
                 "use matching settings or start a new run"
             )
         validate_robot_contract(ck, self.cfg.robot, self.cfg.env.observation_layout)
-        if self.cfg.robot == "khan_mini" and ck["robot_contract"] != robot_contract(
+        if self.cfg.robot == "khan_mini" and robot_contract_differences(ck["robot_contract"], robot_contract(
             self.cfg.robot, self.cfg.env.observation_layout, env_config=asdict(self.cfg.env),
-        ):
+        )):
             raise ValueError("Checkpoint environment semantics differ (delay/reset/DR/reward); start a new run or use matching settings")
         if self.cfg.policy.action_mode == "reference_residual":
             for key in ("reference_q_default", "reference_action_scale"):

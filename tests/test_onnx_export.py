@@ -51,6 +51,18 @@ def _metadata(path):
     return model, {item.key: item.value for item in model.metadata_props}
 
 
+def test_export_accepts_checkpoint_before_range_formatting_only(checkpoint, tmp_path):
+    from supermimic.deployment.onnx_export import export_policy
+
+    ckpt, _, saved = checkpoint
+    saved["robot_contract"]["model_sha256"] = (
+        "ec825ef0e79e9b68782f2bbbe564aec63a686c129a6664c2109508202e77a1e8"
+    )
+    torch.save(saved, ckpt)
+    report = export_policy(ckpt, tmp_path / "range_format_compatible.onnx", validation_samples=2)
+    assert report["validation"]["all_checks_passed"]
+
+
 @pytest.mark.parametrize("layout", ["packed", "split"])
 def test_exported_actor_matches_pytorch_for_dynamic_batches(checkpoint, tmp_path, layout):
     from supermimic.deployment.onnx_export import export_policy

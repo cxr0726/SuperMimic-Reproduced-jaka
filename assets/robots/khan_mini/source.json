@@ -250,7 +250,7 @@
     "contacts": "self-collision masks retained; feet condim=3, other contacts condim=1"
   },
   "output_sha256": {
-    "robot.xml": "ec825ef0e79e9b68782f2bbbe564aec63a686c129a6664c2109508202e77a1e8",
+    "robot.xml": "db6bc5d5192deeaceafb1f5c7ece4bbec7ae6a8ba3e196323077502903320294",
     "source.urdf": "927cf814485ce2e2fea77aed95dd4b858e60763b785693c2f3f4b23f9940be33",
     "profile.json": "527ab085ab8194b68fe2915391dcd8b9a941e26863fbe9683191a858257be7d6"
   }
