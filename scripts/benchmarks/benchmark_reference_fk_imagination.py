@@ -69,6 +69,7 @@ def restore_config(obj, saved):
     if isinstance(obj, TrainConfig):
         obj.env.context_layout = checkpoint_context_layout(saved)
         obj.env.foot_tracking = checkpoint_foot_tracking(saved)
+        obj.env.ankle_encoder_bias_half_range = saved.get("env", {}).get("ankle_encoder_bias_half_range", 0.01)
 
 
 def load_benchmark_checkpoint(path, device):

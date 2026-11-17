@@ -60,7 +60,7 @@ def test_dry_run_selects_isaac_observations_without_overriding_original_optimiza
     cfg = parse_config(result.stdout)
     assert cfg.robot == "khan_mini" and cfg.env.num_envs == num_envs
     assert cfg.data.npz_dir == root / "data/npz/khan_mini/lafan1"
-    assert cfg.run_name == "khan_lafan1_dr_v3_knee_friction01_no_neck_4096" and cfg.log_root == root / "logs"
+    assert cfg.run_name == "khan_lafan1_dr_v3_footb_fricdr015_bias02_4096" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is cfg.data.library is None
     assert cfg.env.actuator_delay is False and cfg.env.merge_short_tail_bins is True
     assert cfg.env.delay_reset_first_step_no_delay is True
@@ -68,9 +68,10 @@ def test_dry_run_selects_isaac_observations_without_overriding_original_optimiza
     assert "actuator delay False" in result.stdout
     assert cfg.env.foot_tracking is False
     assert cfg.env.disable_neck_action_noise is True
+    assert cfg.env.ankle_encoder_bias_half_range == .02
     assert "--env.disable-neck-action-noise" in result.stdout
     assert "knee soft lower -0.03 rad" in result.stdout
-    assert "fixed frictionloss 0.1 N m on all 27 hinges" in result.stdout
+    assert "nominal frictionloss 0.1 N m on all 27 hinges" in result.stdout
     assert "--env.no-foot-tracking" in result.stdout
     assert "raw reward cap 0.112" in result.stdout
     assert "critic upper bound 11.2" in result.stdout
@@ -162,7 +163,7 @@ def test_missing_data_and_existing_checkpoint_rejected(project):
     empty.mkdir()
     result = run_launcher(project, "--dry-run", "--data-dir", str(empty))
     assert result.returncode != 0 and "No converted Khan NPZ" in result.stderr
-    run = root / "logs/khan_lafan1_dr_v3_knee_friction01_no_neck_4096"
+    run = root / "logs/khan_lafan1_dr_v3_footb_fricdr015_bias02_4096"
     run.mkdir(parents=True)
     (run / "ckpt_latest.pt").touch()
     result = run_launcher(project, "--dry-run")
@@ -241,12 +242,12 @@ def test_foot_rewards_switch_does_not_disable_dr_v3(project, flags, enabled):
     cfg = parse_config(result.stdout)
     resolve_training_observations(cfg)
     assert cfg.env.foot_tracking is enabled
-    assert cfg.env.context_layout == "khan_dr_v3"
+    assert cfg.env.context_layout == "khan_dr_v4"
     assert cfg.policy.action_mode == "default"
     assert cfg.policy.goal_noise_z == 0.01 and cfg.policy.goal_noise_joint_pos == 0.05
     assert cfg.env.actuator_delay is False
-    assert "xi 101; critic 615" in result.stdout
-    assert "DR v3 remains enabled" in result.stdout
+    assert "xi 105; critic 619" in result.stdout
+    assert "context v4" in result.stdout
     assert f"raw reward cap {0.122 if enabled else 0.112}" in result.stdout
     assert f"critic upper bound {12.2 if enabled else 11.2}" in result.stdout
     assert ("--env.foot-tracking" if enabled else "--env.no-foot-tracking") in result.stdout
@@ -259,7 +260,7 @@ def test_previous_residual_and_foot_reward_modes_can_be_selected_together(projec
     resolve_training_observations(cfg)
     assert cfg.policy.action_mode == "reference_residual"
     assert cfg.env.foot_tracking is True
-    assert cfg.env.context_layout == "khan_dr_v3"
+    assert cfg.env.context_layout == "khan_dr_v4"
     assert cfg.policy.goal_noise_z == 0.01 and cfg.policy.goal_noise_joint_pos == 0.05
     assert "raw reward cap 0.122" in result.stdout
 
@@ -278,9 +279,9 @@ def test_neck_execution_noise_switch_keeps_dr_v3_and_other_noise(project, flags,
     resolve_training_observations(cfg)
     assert cfg.env.disable_neck_action_noise is disabled
     assert cfg.env.action_noise_std == 0.1
-    assert cfg.env.context_layout == "khan_dr_v3"
+    assert cfg.env.context_layout == "khan_dr_v4"
     assert cfg.env.actuator_delay is False
     assert cfg.policy.goal_noise_z == 0.01 and cfg.policy.goal_noise_joint_pos == 0.05
-    assert "no frictionloss DR" in result.stdout
+    assert "four ankles add startup U(0,0.15) N m" in result.stdout
     expected = "neck yaw/pitch OFF; other 25 axes std 0.1" if disabled else "all 27 axes std 0.1"
     assert expected in result.stdout

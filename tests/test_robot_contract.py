@@ -108,7 +108,7 @@ def test_fixed_joint_physics_and_neck_noise_are_saved_without_expanding_dr_v3():
     contract = robot_contract("khan_mini", env_config=settings)
     assert contract["version"] == 12
     physics = contract["nominal_joint_physics"]
-    assert physics["training_semantics_version"] == 3
+    assert physics["training_semantics_version"] == 4
     assert physics["joint_frictionloss_nm"] == dict.fromkeys(contract["joint_names"], 0.1)
     assert physics["joint_frictionloss_randomized"] is False
     assert physics["knee_soft_lower_limit_rad"] == -0.03
@@ -130,16 +130,22 @@ def test_fixed_joint_physics_and_neck_noise_are_saved_without_expanding_dr_v3():
 
 
 def test_range_format_migration_accepts_only_the_audited_xml_pair():
-    expected = robot_contract("khan_mini")
-    assert expected["model_sha256"] == "db6bc5d5192deeaceafb1f5c7ece4bbec7ae6a8ba3e196323077502903320294"
+    current = robot_contract("khan_mini")
+    expected = deepcopy(current)
+    expected["model_sha256"] = "db6bc5d5192deeaceafb1f5c7ece4bbec7ae6a8ba3e196323077502903320294"
     saved = deepcopy(expected)
     saved["model_sha256"] = "ec825ef0e79e9b68782f2bbbe564aec63a686c129a6664c2109508202e77a1e8"
     assert not robot_contract_differences(saved, expected)
-    validate_robot_contract({"robot_contract": saved}, "khan_mini")
+    # Neither historical spelling is equivalent to the heavier nominal feet.
+    for historical in (saved, expected):
+        assert "model_sha256" in robot_contract_differences(historical, current)
+        with pytest.raises(ValueError, match="model_sha256"):
+            validate_robot_contract({"robot_contract": historical}, "khan_mini")
+    saved = deepcopy(current)
     saved["profile_sha256"] = "different physics"
     with pytest.raises(ValueError, match="profile_sha256"):
         validate_robot_contract({"robot_contract": saved}, "khan_mini")
-    saved["profile_sha256"] = expected["profile_sha256"]
+    saved["profile_sha256"] = current["profile_sha256"]
     saved["model_sha256"] = "unverified XML"
     with pytest.raises(ValueError, match="model_sha256"):
         validate_robot_contract({"robot_contract": saved}, "khan_mini")

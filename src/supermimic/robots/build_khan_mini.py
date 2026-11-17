@@ -24,7 +24,8 @@ DEFAULT_CONFIG = (
 FOOT_BODIES = ("Left_ankle_roll_Link", "Right_ankle_roll_Link")
 KNEE_JOINTS = ("Left_knee_joint", "Right_knee_joint")
 KNEE_SOFT_LOWER_LIMIT = -0.03
-JOINT_FRICTIONLOSS = 0.1  # Fixed N*m on all hinge joints, in training and evaluation.
+JOINT_FRICTIONLOSS = 0.1  # Nominal N*m; the training environment owns any friction DR.
+FOOT_NOMINAL_MASS_DELTA_KG = 0.1  # Same spatial distribution as the original foot body.
 # Fit the central torso shell (126--140 mm wide), not its wider upper flanges.
 # Depth, height and placement stay unchanged; this is a collision-core approximation.
 WAIST_COLLISION_HALF_SIZE = (0.075, 0.07, 0.15)
@@ -133,7 +134,8 @@ def _precise_xml(spec: mujoco.MjSpec) -> str:
         body.set("quat", vector(model.body_quat[index]))
         inertial = body.find("inertial")
         if inertial is not None:
-            inertial.set("mass", format(float(model.body_mass[index]), ".17g"))
+            mass = float(model.body_mass[index])
+            inertial.set("mass", str(mass) if body.attrib["name"] in FOOT_BODIES else format(mass, ".17g"))
             inertial.set("pos", vector(model.body_ipos[index]))
             inertial.set("quat", vector(model.body_iquat[index]))
             inertial.set("diaginertia", vector(model.body_inertia[index]))
@@ -162,7 +164,7 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
         "body_names": links, "root_body": "base_link", "anchor_body": "base_link",
         "com_body": "waist_yaw_Link",
         "neck_joint_names": ["Neck_yaw_joint", "Neck_pitch_joint"],
-        "training_semantics_version": 3,
+        "training_semantics_version": 4,
         "tracked_bodies": list(TRACKED_BODIES), "foot_bodies": list(FOOT_BODIES),
         "foot_geom_regex": r"^(Left|Right)_ankle_roll_Link_convex_collision$",
         "initial_pos": source["initial_pos"], "standing_height": source["initial_pos"][2],
@@ -240,7 +242,7 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
             "value": JOINT_FRICTIONLOSS,
             "units": "N*m",
             "randomized": False,
-            "source": "user-requested fixed all-hinge frictionloss, following PartyMimic RP1",
+            "source": "user-requested nominal all-hinge frictionloss, following PartyMimic RP1; runtime DR belongs to the environment",
         },
         "waist_velocity_limit": {
             "source_config_value": original_waist_velocity,
@@ -359,7 +361,35 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
         "shape": "whole-foot CAD mesh convex hull, including instep",
         "source": "existing URDF visual STL; identical to SDK whole-foot collision mesh",
         "feet": foot_shapes,
-        "inertials": "preserved from URDF; collision geom density is zero",
+        "inertials": "collision geom density is zero; foot_nominal_inertia separately records the mass/inertia correction",
+    }
+    # Correct the known foot mass deficit as a uniform density change. Keep
+    # body pose, COM and principal axes; only these two bodies get heavier.
+    reference_model = spec.compile()
+    foot_inertials = {}
+    for name in FOOT_BODIES:
+        body = spec.body(name)
+        original = reference_model.body(name)
+        source_mass = float(original.mass[0])
+        target_mass = source_mass + FOOT_NOMINAL_MASS_DELTA_KG
+        scale = target_mass / source_mass
+        body.mass = target_mass
+        if np.isfinite(body.fullinertia).all():
+            body.fullinertia[:] *= scale
+        else:
+            body.inertia[:] *= scale
+        foot_inertials[name] = {
+            "source_mass_kg": source_mass,
+            "effective_mass_kg": target_mass,
+            "inertia_scale": scale,
+            "source_principal_inertia_kg_m2": original.inertia.tolist(),
+            "effective_principal_inertia_kg_m2": (original.inertia * scale).tolist(),
+        }
+    profile["parameter_overrides"]["foot_nominal_inertia"] = {
+        "mass_delta_kg_per_body": FOOT_NOMINAL_MASS_DELTA_KG,
+        "assumption": "uniform density increase on ankle_roll_Link only; fixed child bodies unchanged",
+        "com_and_principal_axes": "unchanged",
+        "bodies": foot_inertials,
     }
     waist_boxes = [
         geom for geom in spec.geoms
@@ -421,7 +451,8 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
         "conversion": {
             "fixed_links": "preserved", "visual_meshes": "preserved",
             "freejoint": "floating_base", "cylinders": "capsules with original radius/axis half-length",
-            "foot_collisions": "seven sole capsules replaced by each existing whole-foot CAD mesh convex hull; training contact parameters and explicit inertials preserved",
+            "foot_collisions": "seven sole capsules replaced by each existing whole-foot CAD mesh convex hull; training contact parameters retained",
+            "foot_inertials": "each ankle_roll_Link mass +0.1 kg, inertia scaled by the mass ratio, COM and principal axes retained",
             "actuators": "created by get_khan_mini_cfg from profile.json",
             "velocity_limits": "recorded only; not enforced by builtin position servos",
             "contacts": "self-collision masks retained; feet condim=3, other contacts condim=1",

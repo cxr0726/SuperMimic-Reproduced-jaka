@@ -1,16 +1,18 @@
 # Khan 服务器训练：Isaac观测布局、SuperMimic尺度与原优化参数
 
-> **当前版本（2026-11-16）**：`feat/khan-dr-v3-only` 的两个服务器脚本保留
-> DR v3（ξ101、WM195、critic615）、Adam和原有编译路径，默认关闭额外足部奖励，
+> **当前版本（2026-11-17）**：`feat/khan-dr-v3-only` 的两个服务器脚本采用
+> `khan_dr_v4` 物理上下文（ξ105、WM199、critic619），保留Adam和原有编译路径，默认关闭额外足部奖励，
 > 单步奖励上界0.112。两膝硬下界为 `-0.15099473684210526` rad，软下界为 `-0.03` rad；
-> 全27个转动关节固定 `frictionloss=0.1 N·m`，训练/eval相同，不新增摩擦DR。
+> 全27个转动关节标称 `frictionloss=0.1 N·m`，四踝另加startup U(0,0.15) N·m。
+> 两侧ankle_roll_Link标称质量各加0.1 kg至0.58502 kg，惯量同比乘1.2061770648633046，COM和主轴保持原值。
+> 每脚再独立加startup U(0,0.15) kg，仅质量变化；四踝encoder bias ±0.02 rad，其余±0.01 rad。
 > 颈部执行噪声默认关闭，其余25轴std=0.1，观测及encoder goal噪声保留。
 > 详细配置以 [当前分支说明](KHAN_OFFICIAL_PORT.md) 为准。
 
 ## 当前配置的训练命令
 
 服务器同步本分支的代码及整个 `assets/robots/khan_mini/`，使用新的run名从头训练。
-新的资产hash与旧DR v3 160k等检查点不兼容，不能用 `--resume` 接着训练旧run。
+新的资产hash及105维上下文与此前101维的200k/220k/280k等检查点不兼容，不能用 `--resume` 接着训练旧run。
 以下库路径按服务器实际位置调整；脚本不下载数据。
 
 ```bash
@@ -21,8 +23,8 @@ git pull --ff-only origin feat/khan-dr-v3-only
 
 bash scripts/training/train_khan_compact_server.sh \
   --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
-  --run-name khan_8452_dr_v3_knee_friction01_no_neck_4096 \
-  --num-envs 4096 --no-neck-action-noise
+  --run-name khan_8452_dr_v3_footb_fricdr015_bias02_4096 \
+  --num-envs 4096 --ankle-encoder-bias 0.02 --no-neck-action-noise --no-actuator-delay
 ```
 
 加 `--dry-run` 可检查路径和实际CLI，不启动CUDA或训练。NPZ入口为：
@@ -30,17 +32,50 @@ bash scripts/training/train_khan_compact_server.sh \
 ```bash
 bash scripts/training/train_khan_server.sh \
   --data-dir data/npz/khan_mini/lafan1 \
-  --run-name khan_lafan1_dr_v3_knee_friction01_no_neck_4096 \
-  --num-envs 4096 --no-neck-action-noise
+  --run-name khan_lafan1_dr_v3_footb_fricdr015_bias02_4096 \
+  --num-envs 4096 --ankle-encoder-bias 0.02 --no-neck-action-noise --no-actuator-delay
 ```
 
 `--no-neck-action-noise` 是默认值；`--neck-action-noise` 可恢复颈部执行噪声，
-不改变观测噪声、关节摩擦、DR v3或奖励。`--stop-after-iterations 50` 可用于新配置短测，
+该开关不改变观测噪声、关节摩擦、其他DR或奖励。`--stop-after-iterations 50` 可用于新配置短测，
 随后只从该新run的匹配检查点恢复；总320k学习率计划不变。
 
 膝限位复用原有真实/WM `joint_limit` 惩罚及reset裁剪，`[-0.03,0)` 不受下限惩罚。
 这不是新增单侧奖励或部署端target clip。已有ONNX和实机YAML不会自动更新，
 部署前仍需核对目标模型的参数及实际控制限位。
+
+## 当前随机化与质量分布
+
+startup在每个环境创建时采样，局部/自动reset后保持；reset项每回合重采样。
+
+| 项目 | 当前范围 | 时机 |
+|---|---|---|
+| 腰部附加质量 | U(-2,3) kg，仅质量变化 | startup |
+| 腰部局部COM偏移 | x ±0.035 m，y/z ±0.07 m | startup |
+| 两脚附加质量 | 每个ankle_roll_Link独立U(0,0.15) kg，保持校准后的COM/惯量 | startup |
+| 12个腿关节armature | 各自乘U(0.8,1.2) | startup |
+| 四踝frictionloss | 标称0.1 + 独立U(0,0.15) N·m；其余23轴固定0.1 | startup |
+| 全27关节Kp、Kd | 分别独立乘U(0.8,1.2) | reset |
+| encoder bias | 四踝±0.02 rad，其余±0.01 rad，独立均匀采样 | reset |
+| 足地滑动摩擦系数 | U(0.3,1.2)，同一环境左右脚共用 | reset |
+| 初始状态 | root xyz ±(0.05,0.05,0.01) m；rpy ±(0.1,0.1,0.2) rad；关节角±0.1 rad | reset |
+| 初始速度 | root线速度xyz ±(0.5,0.5,0.2) m/s；角速度xyz ±(0.52,0.52,0.78) rad/s | reset |
+| 执行噪声 | 颈部0；其余25轴归一化动作高斯std=0.1，相当于目标角std=0.05 rad | 控制步 |
+| 传感器噪声 | q±0.01 rad，qd±0.5 rad/s，角速度±0.2 rad/s，重力投影±0.07，未来姿态6D分量±0.05 | 观测采样 |
+| actor goal噪声 | z±0.01 m，参考关节角±0.05 rad；critic/reward使用干净参考 | 编码器输入采样 |
+
+执行器延迟默认关闭，未加入间隙模型或episode级参考高度偏置。qd和角速度噪声进入actor前另乘0.2、0.5。
+标称eval关闭DR和噪声：使用校准后的重脚、全关节frictionloss=0.1及固定足地摩擦系数1.0。
+
+XML整机标称质量为 **41.03253498863909 kg**。startup后的总质量为
+`M = 41.03253498863909 + W + L + R`，其中W~U(-2,3)、L/R各自独立~U(0,0.15) kg。
+支持范围 **39.0325349886–44.3325349886 kg**，均值 **41.6825349886 kg**，标准差 **1.4446741270 kg**。
+这是三个均匀变量之和，不是整个范围内均匀采样；COM、armature和摩擦随机化不改变上述body_mass总和。
+
+ξ的前101维字段位置保持，足部质量增量以新标称质量为基准，center/scale均为0.075 kg；
+末尾四维依次为左pitch、左roll、右pitch、右roll实际frictionloss总值，center=0.175、scale=0.075 N·m。
+这些参数从生效后的物理模型读回，Replay、WM及critic使用相同的ξ，想象期间固定。actor输入维度保持465/155。
+新checkpoint记录context v4和robot contract v14，资产生成器同步包含标称足部修正。
 
 ## 历史配置与验证记录
 

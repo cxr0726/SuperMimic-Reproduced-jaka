@@ -5,7 +5,8 @@
 `5efbf114e11f725c31d83e217be987c13c0e4ce2`，在现有 Khan 框架内适配。
 `main` 上已有训练方案保持在原提交。请为当前新配置新建训练 run；
 历史策略需配套原资产及其 checkpoint 保存的动作和网络配置 play/export；
-本次膝限位和固定关节摩擦更新改变了资产 hash，不能直接恢复旧 DR v3 160k 等检查点。
+本次标称脚质量/惯量修正改变了资产 hash，四踝frictionloss DR将ξ扩为105维，不能直接恢复此前101维检查点。
+当前服务器命令和完整DR范围见 [服务器训练说明](KHAN_SERVER_TRAINING.md)。
 
 ## 默认组件
 
@@ -25,10 +26,13 @@
 | critic 网络 | 256/128，隐藏层为LayerNorm/GELU，最终输出仍为普通Linear |
 | Actor EMA | 0.995，采集/优化使用 live；eval/export 默认自动选择 EMA |
 | 膝关节限位 | 硬范围 `[-0.15099473684210526, 2.2689]` rad，factor=0.9，计算后的软下界为 `-0.03` rad |
-| 关节 frictionloss | 全部27个 hinge 固定 `0.1 N·m`，训练/eval相同，不做额外摩擦 DR |
+| 关节 frictionloss | 全部27个 hinge 标称 `0.1 N·m`；四踝独立加startup U(0,0.15) N·m，nominal eval固定0.1 |
+| 标称脚质量/惯量 | 两侧ankle_roll_Link各0.58502 kg，惯量按原质量比例乘1.2061770648633046，COM与主轴不变 |
+| 足部质量DR | 两脚各自startup加U(0,0.15) kg，仅质量变化 |
+| encoder bias | 四踝±0.02 rad，其余23轴±0.01 rad，每回合独立均匀采样 |
 | 执行噪声 | 两个服务器脚本默认颈 yaw/pitch 为0，其余25轴std=0.1；观测和goal噪声保留 |
 | 额外足部跟踪 | 默认关闭；保留原15 body及颈关节奖励，不改变足部质量随机化 |
-| DR | 保留 `khan_dr_v3`，ξ101维、WM输入195维、critic615维 |
+| DR | `khan_dr_v4`物理上下文，ξ105维、WM输入199维、critic619维；分支名仍为feat/khan-dr-v3-only |
 
 保留当前 clip 内分 bin、尾 bin 合并、物理及想象 H32 合法性、15 body/颈关节奖励、
 base_link anchor、Khan DR、reset 实际 root 抬高 0.05m、5/5 observation
@@ -56,6 +60,9 @@ benchmark的满分仍为1。这没有改变原15 body和颈部奖励的相对权
 原始`train_ret`或直接续训；效果比较须使用一致奖励定义和条件。
 
 ## 膝限位、固定关节摩擦与颈部执行噪声（2026-11-16）
+
+本节记录2026-11-16的改动。2026-11-17在此基础上增加脚质量/惯量校准、
+四踝startup摩擦DR及105维context v4；当前值以上方默认组件表和服务器说明为准。
 
 两膝保留硬上界 `u=2.2689` rad 和软限位比例 `f=0.9`，按
 `soft_lower = l + (1-f)*(u-l)/2` 反算硬下界：
@@ -166,7 +173,8 @@ v2验证（2026-11-12）：纯CPU回归745通过；实际CUDA环境验证startup
 
 ## 双脚附加质量与可选独立跟踪（khan_dr_v3）
 
-当前新训练、NPZ及PT服务器脚本均选择 `khan_dr_v3`。在v2基础上增加：
+以下记录此前 `khan_dr_v3` 的101维定义；当前新训练选择 `khan_dr_v4`。
+v3在v2基础上增加：
 
 - 左右 `ankle_roll_Link` 各自独立在startup采样附加质量 `U(0,0.2) kg`，
   加到原始质量上，均值0.1kg；后续完整、局部和自动reset保持，不累加。
@@ -245,8 +253,8 @@ G30 = r30 + 0.99*r31 + ... + 0.99^19*r49 + 0.99^20*V[bin(50)]
 
 先同步并切换到本分支，再在服务器项目目录运行。切换前应保存服务器自己的
 代码改动；以下命令不覆盖本地修改。默认eager参考FK、delay关闭、default动作、
-额外足部奖励关闭，保留DR v3和encoder goal噪声，颈部执行噪声关闭；
-使用本次固定全关节摩擦和膝限位资产，从头新建run：
+额外足部奖励关闭，采用context v4并保留encoder goal噪声，颈部执行噪声关闭；
+使用本次重脚标称模型、startup脚质量/四踝摩擦DR和膝限位资产，从头新建run：
 
 ```bash
 cd /home/jaka/Workspace/SuperMimic-Reproduced-jaka
@@ -256,8 +264,8 @@ git pull --ff-only origin feat/khan-dr-v3-only
 
 bash scripts/training/train_khan_compact_server.sh \
   --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
-  --run-name khan_8452_dr_v3_knee_friction01_no_neck_4096 \
-  --num-envs 4096 --no-neck-action-noise
+  --run-name khan_8452_dr_v3_footb_fricdr015_bias02_4096 \
+  --num-envs 4096 --ankle-encoder-bias 0.02 --no-neck-action-noise --no-actuator-delay
 ```
 
 开启参考 FK 编译时增加 `--reference-fk-compile`，并使用不同 run-name。
@@ -269,8 +277,8 @@ NPZ 混合库沿用原入口：
 ```bash
 bash scripts/training/train_khan_server.sh \
   --data-dir data/npz/khan_mini/mixed \
-  --run-name khan_mixed_dr_v3_knee_friction01_no_neck_4096 \
-  --num-envs 4096 --no-neck-action-noise
+  --run-name khan_mixed_dr_v3_footb_fricdr015_bias02_4096 \
+  --num-envs 4096 --ankle-encoder-bias 0.02 --no-neck-action-noise --no-actuator-delay
 ```
 
 两个 wrapper 都保留环境变量清理、路径/资产检查、已有 checkpoint 防覆盖和

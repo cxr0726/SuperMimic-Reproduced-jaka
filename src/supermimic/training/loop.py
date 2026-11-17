@@ -210,6 +210,7 @@ class Trainer:
                 episode_length_s=cfg.env.episode_length_s,
                 action_noise_std=cfg.env.action_noise_std,
                 disable_neck_action_noise=cfg.env.disable_neck_action_noise,
+                ankle_encoder_bias_half_range=cfg.env.ankle_encoder_bias_half_range,
                 obs_noise=cfg.env.obs_noise,
                 reset_noise=cfg.env.reset_noise,
                 domain_randomization=cfg.env.domain_randomization,

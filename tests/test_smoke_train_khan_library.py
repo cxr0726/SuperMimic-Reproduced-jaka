@@ -48,7 +48,7 @@ def test_default_npz_behavior_preserved(smoke):
     assert args.num_envs == 32 and args.steps == 50 and not args.activation_checkpoint
 
 
-@pytest.mark.parametrize("context_layout", [None, "khan_dr_v1", "khan_dr_v2", "khan_dr_v3"])
+@pytest.mark.parametrize("context_layout", [None, "khan_dr_v1", "khan_dr_v2", "khan_dr_v3", "khan_dr_v4"])
 def test_library_config_preserves_production_optimization(smoke, tmp_path, context_layout):
     packed = tmp_path / "motions.pt"
     packed.write_bytes(b"CLI placeholder")
@@ -64,7 +64,7 @@ def test_library_config_preserves_production_optimization(smoke, tmp_path, conte
     assert cfg.data.library == packed.resolve() and cfg.data.npz_dir is None
     assert cfg.env.compact_library
     assert result["matches_train_config_optimization_defaults"]
-    assert result["context_layout"] == cfg.env.context_layout == (context_layout or "khan_dr_v3")
+    assert result["context_layout"] == cfg.env.context_layout == (context_layout or "khan_dr_v4")
     assert result["warmup_iterations"] == 40 and result["lr_schedule_total_iterations"] == 320000
 
 

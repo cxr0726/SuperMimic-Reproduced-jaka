@@ -112,7 +112,7 @@
       "value": 0.1,
       "units": "N*m",
       "randomized": false,
-      "source": "user-requested fixed all-hinge frictionloss, following PartyMimic RP1"
+      "source": "user-requested nominal all-hinge frictionloss, following PartyMimic RP1; runtime DR belongs to the environment"
     },
     "waist_velocity_limit": {
       "source_config_value": 120.0,
@@ -206,7 +206,44 @@
           "effective_collision_count": 1
         }
       },
-      "inertials": "preserved from URDF; collision geom density is zero"
+      "inertials": "collision geom density is zero; foot_nominal_inertia separately records the mass/inertia correction"
+    },
+    "foot_nominal_inertia": {
+      "mass_delta_kg_per_body": 0.1,
+      "assumption": "uniform density increase on ankle_roll_Link only; fixed child bodies unchanged",
+      "com_and_principal_axes": "unchanged",
+      "bodies": {
+        "Left_ankle_roll_Link": {
+          "source_mass_kg": 0.48502,
+          "effective_mass_kg": 0.58502,
+          "inertia_scale": 1.2061770648633046,
+          "source_principal_inertia_kg_m2": [
+            0.0012700137038266434,
+            0.0010371,
+            0.0002633062961733568
+          ],
+          "effective_principal_inertia_kg_m2": [
+            0.001531861401617795,
+            0.0012509262339697332,
+            0.0003175940154784075
+          ]
+        },
+        "Right_ankle_roll_Link": {
+          "source_mass_kg": 0.48502,
+          "effective_mass_kg": 0.58502,
+          "inertia_scale": 1.2061770648633046,
+          "source_principal_inertia_kg_m2": [
+            0.0012700137038266434,
+            0.0010371,
+            0.0002633062961733568
+          ],
+          "effective_principal_inertia_kg_m2": [
+            0.001531861401617795,
+            0.0012509262339697332,
+            0.0003175940154784075
+          ]
+        }
+      }
     },
     "waist_collision_box": {
       "geom": "waist_yaw_Link_45_collision",
@@ -244,14 +281,15 @@
     "visual_meshes": "preserved",
     "freejoint": "floating_base",
     "cylinders": "capsules with original radius/axis half-length",
-    "foot_collisions": "seven sole capsules replaced by each existing whole-foot CAD mesh convex hull; training contact parameters and explicit inertials preserved",
+    "foot_collisions": "seven sole capsules replaced by each existing whole-foot CAD mesh convex hull; training contact parameters retained",
+    "foot_inertials": "each ankle_roll_Link mass +0.1 kg, inertia scaled by the mass ratio, COM and principal axes retained",
     "actuators": "created by get_khan_mini_cfg from profile.json",
     "velocity_limits": "recorded only; not enforced by builtin position servos",
     "contacts": "self-collision masks retained; feet condim=3, other contacts condim=1"
   },
   "output_sha256": {
-    "robot.xml": "db6bc5d5192deeaceafb1f5c7ece4bbec7ae6a8ba3e196323077502903320294",
+    "robot.xml": "d0e6e54e3372c8716d00dcf2b86888256cf49317a23c3baaa112bd401b1ac7df",
     "source.urdf": "927cf814485ce2e2fea77aed95dd4b858e60763b785693c2f3f4b23f9940be33",
-    "profile.json": "527ab085ab8194b68fe2915391dcd8b9a941e26863fbe9683191a858257be7d6"
+    "profile.json": "97cae117511d056adad8733c6bba804007db3833d38b6ad74e308559afb2a220"
   }
 }

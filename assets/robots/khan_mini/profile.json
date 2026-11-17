@@ -86,7 +86,7 @@
     "Neck_yaw_joint",
     "Neck_pitch_joint"
   ],
-  "training_semantics_version": 3,
+  "training_semantics_version": 4,
   "tracked_bodies": [
     "base_link",
     "Left_hip_roll_Link",
@@ -583,7 +583,7 @@
       "value": 0.1,
       "units": "N*m",
       "randomized": false,
-      "source": "user-requested fixed all-hinge frictionloss, following PartyMimic RP1"
+      "source": "user-requested nominal all-hinge frictionloss, following PartyMimic RP1; runtime DR belongs to the environment"
     },
     "waist_velocity_limit": {
       "source_config_value": 120.0,
@@ -677,7 +677,44 @@
           "effective_collision_count": 1
         }
       },
-      "inertials": "preserved from URDF; collision geom density is zero"
+      "inertials": "collision geom density is zero; foot_nominal_inertia separately records the mass/inertia correction"
+    },
+    "foot_nominal_inertia": {
+      "mass_delta_kg_per_body": 0.1,
+      "assumption": "uniform density increase on ankle_roll_Link only; fixed child bodies unchanged",
+      "com_and_principal_axes": "unchanged",
+      "bodies": {
+        "Left_ankle_roll_Link": {
+          "source_mass_kg": 0.48502,
+          "effective_mass_kg": 0.58502,
+          "inertia_scale": 1.2061770648633046,
+          "source_principal_inertia_kg_m2": [
+            0.0012700137038266434,
+            0.0010371,
+            0.0002633062961733568
+          ],
+          "effective_principal_inertia_kg_m2": [
+            0.001531861401617795,
+            0.0012509262339697332,
+            0.0003175940154784075
+          ]
+        },
+        "Right_ankle_roll_Link": {
+          "source_mass_kg": 0.48502,
+          "effective_mass_kg": 0.58502,
+          "inertia_scale": 1.2061770648633046,
+          "source_principal_inertia_kg_m2": [
+            0.0012700137038266434,
+            0.0010371,
+            0.0002633062961733568
+          ],
+          "effective_principal_inertia_kg_m2": [
+            0.001531861401617795,
+            0.0012509262339697332,
+            0.0003175940154784075
+          ]
+        }
+      }
     },
     "waist_collision_box": {
       "geom": "waist_yaw_Link_45_collision",
@@ -728,7 +765,7 @@
     "nbody": 46,
     "ngeom": 59,
     "nmesh": 44,
-    "mass_kg": 40.8325349886391,
+    "mass_kg": 41.03253498863909,
     "initial_self_contacts": 0
   }
 }

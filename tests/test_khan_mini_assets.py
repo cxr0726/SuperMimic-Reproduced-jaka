@@ -71,7 +71,7 @@ def bundle(tmp_path_factory):
     return output
 
 
-def test_conversion_preserves_tree_mass_and_limits_except_requested_knee_override(bundle):
+def test_conversion_preserves_tree_except_requested_foot_mass_and_knee_overrides(bundle):
     source = ET.parse(SOURCE_URDF).getroot()
     model = mujoco.MjModel.from_xml_path(str(bundle / "robot.xml"))
     assert (model.nq, model.nv, model.njnt, model.nbody, model.ngeom, model.nmesh) == (
@@ -81,7 +81,7 @@ def test_conversion_preserves_tree_mass_and_limits_except_requested_knee_overrid
     assert model.jnt_type[0] == mujoco.mjtJoint.mjJNT_FREE
     assert (model.jnt_type[1:] == mujoco.mjtJoint.mjJNT_HINGE).all()
     np.testing.assert_allclose(model.qpos0[:7], [0, 0, 0.65, 1, 0, 0, 0])
-    assert model.body_mass.sum() == pytest.approx(40.8325349886391, abs=1e-9)
+    assert model.body_mass.sum() == pytest.approx(41.0325349886391, abs=1e-9)
 
     names = {mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i)
              for i in range(1, model.nbody)}
@@ -89,6 +89,8 @@ def test_conversion_preserves_tree_mass_and_limits_except_requested_knee_overrid
     for link in source.findall("link"):
         body = model.body(link.attrib["name"])
         mass = float(link.find("inertial/mass").attrib["value"])
+        if link.attrib["name"] in ("Left_ankle_roll_Link", "Right_ankle_roll_Link"):
+            mass += .1
         assert body.mass[0] == pytest.approx(mass, rel=1e-5, abs=1e-10)
     for joint in source.findall("joint"):
         if joint.attrib["type"] == "fixed":
@@ -376,13 +378,17 @@ def test_foot_convex_collisions_share_full_visual_mesh_and_preserve_inertials(bu
         override = profile["parameter_overrides"]["foot_collision"]["feet"][name]
         assert override["source_collision_count"] == 7
         assert override["effective_collision_count"] == 1
-    # Changing contact envelopes must not change the robot's physical inertials.
+    # Contact edits change no inertials; only the explicit uniform foot mass
+    # correction changes these two bodies' mass and inertia, not COM or axes.
     for body_id in range(1, model.nbody):
         name = model.body(body_id).name
         old_id = reference.body(name).id
         for field in ("body_mass", "body_ipos", "body_iquat", "body_inertia"):
+            expected = getattr(reference, field)[old_id]
+            if name in ("Left_ankle_roll_Link", "Right_ankle_roll_Link") and field in ("body_mass", "body_inertia"):
+                expected = expected * ((reference.body_mass[old_id] + .1) / reference.body_mass[old_id])
             np.testing.assert_allclose(
-                getattr(model, field)[body_id], getattr(reference, field)[old_id],
+                getattr(model, field)[body_id], expected,
                 rtol=1e-10, atol=1e-12,
             )
 

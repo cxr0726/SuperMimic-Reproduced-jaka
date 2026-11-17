@@ -14,7 +14,9 @@ from supermimic.observation_layout import (
 )
 from supermimic.policy.nets import CriticCfg, PolicyCfg
 from supermimic.robots.registry import RobotName
-from supermimic.sim_context import ContextKind, resolve_context_layout
+from supermimic.sim_context import (
+    ContextKind, resolve_context_layout, validate_ankle_encoder_bias_half_range,
+)
 from supermimic.world_model.wm_trainer import WMTrainerCfg
 from supermimic.world_model.world_model import WorldModelCfg
 
@@ -56,6 +58,7 @@ class EnvCfg:
     reset_min_remaining_steps: int | None = None  # Khan: policy horizon; G1: one reference step
     anchor_obs: bool = False
     disable_neck_action_noise: bool = False  # Khan launchers enable this; legacy configs keep all-joint noise.
+    ankle_encoder_bias_half_range: float | None = None  # Fresh Khan DR v3/v4: .02 rad; legacy/G1: .01.
 
 
 @dataclass
@@ -114,6 +117,11 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
     robot = get_robot_spec(cfg.robot)
     cfg.env.context_layout = resolve_context_layout(cfg.robot, cfg.env.context_layout)
     cfg.world_model.state_spec.context_layout = cfg.env.context_layout
+    if cfg.env.ankle_encoder_bias_half_range is None:
+        cfg.env.ankle_encoder_bias_half_range = 0.02 if cfg.env.context_layout in ("khan_dr_v3", "khan_dr_v4") else 0.01
+    cfg.env.ankle_encoder_bias_half_range = validate_ankle_encoder_bias_half_range(
+        cfg.robot, cfg.env.ankle_encoder_bias_half_range,
+    )
     settings = resolve_robot_environment(
         cfg.robot, actuator_delay=cfg.env.actuator_delay,
         actuator_delay_max_ms=cfg.env.actuator_delay_max_ms,

@@ -138,7 +138,8 @@ def verify_production_config(cfg: TrainConfig) -> dict:
     reference_env.pop("reference_fk_compile")
     for key in ("anchor_obs", "observation_layout", "context_layout", "future_frames", "actuator_delay",
                 "actuator_delay_max_ms", "reset_root_z_offset", "merge_short_tail_bins",
-                "delay_reset_first_step_no_delay", "tail_bin_merge_fraction", "reset_min_remaining_steps"):
+                "delay_reset_first_step_no_delay", "tail_bin_merge_fraction", "reset_min_remaining_steps",
+                "ankle_encoder_bias_half_range"):
         env.pop(key)
         reference_env.pop(key)
     assert env == reference_env, "observation/reward/randomization settings changed"

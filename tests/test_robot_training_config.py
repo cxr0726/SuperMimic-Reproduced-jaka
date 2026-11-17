@@ -57,7 +57,7 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
     assert khan.terminations["root_tilt"].params["threshold"] == 0.8
     assert khan.terminations["time_out"].time_out and khan.terminations["clip_end"].time_out
     assert set(khan.events) - set(g1.events) == (
-        {"actuator_gains", "lower_body_armature", "waist_mass", "foot_mass"} if randomized else set()
+        {"actuator_gains", "lower_body_armature", "waist_mass", "foot_mass", "ankle_frictionloss"} if randomized else set()
     )
     for name in g1.events:
         a, b = asdict(khan.events[name]), asdict(g1.events[name])
@@ -76,7 +76,7 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
         assert tuple(g1.events) == ("base_com", "encoder_bias", "foot_friction")
         assert tuple(khan.events) == (
             "base_com", "encoder_bias", "foot_friction",
-            "actuator_gains", "lower_body_armature", "waist_mass", "foot_mass",
+            "actuator_gains", "lower_body_armature", "waist_mass", "foot_mass", "ankle_frictionloss",
         )
         assert khan.events["base_com"].mode == "startup"
         assert khan.events["base_com"].params["ranges"] == {
@@ -90,7 +90,7 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
         foot_mass = khan.events["foot_mass"]
         assert foot_mass.mode == "startup"
         assert foot_mass.params["operation"] == "add"
-        assert foot_mass.params["ranges"] == (0.0, 0.2)
+        assert foot_mass.params["ranges"] == (0.0, 0.15)
         assert foot_mass.params["shared_random"] is False
         assert foot_mass.params["asset_cfg"].body_names == (
             "Left_ankle_roll_Link", "Right_ankle_roll_Link",
@@ -170,7 +170,7 @@ def test_robot_bindings_and_g1_compatibility_defaults():
     assert cfg.events["foot_friction"].params["asset_cfg"].geom_names == khan.foot_geom_regex
     assert cfg.recorders["replay"].params == {
         "capacity": 1000, "foot_geom_regex": khan.foot_geom_regex,
-        "com_body_name": khan.com_body, "context_layout": "khan_dr_v3",
+        "com_body_name": khan.com_body, "context_layout": "khan_dr_v4",
     }
     model = khan.load_model()
     assert all(name in [model.body(i).name for i in range(model.nbody)] for name in khan.tracked_bodies)
@@ -185,8 +185,8 @@ def test_robot_bindings_and_g1_compatibility_defaults():
 def test_production_compact_encoder_and_ema_preserve_optimizer_defaults():
     cfg = TrainConfig(robot="khan_mini")
     resolve_training_observations(cfg)
-    assert cfg.env.context_layout == cfg.world_model.state_spec.context_layout == "khan_dr_v3"
-    assert SimContextLayout(27, kind=cfg.env.context_layout).dim == 101
+    assert cfg.env.context_layout == cfg.world_model.state_spec.context_layout == "khan_dr_v4"
+    assert SimContextLayout(27, kind=cfg.env.context_layout).dim == 105
     assert cfg.world_model.hidden == (2048, 2048, 2048)
     assert cfg.policy.encoder_hidden == (1024, 512, 256)
     assert cfg.policy.decoder_hidden == (2048, 1024, 512, 256)

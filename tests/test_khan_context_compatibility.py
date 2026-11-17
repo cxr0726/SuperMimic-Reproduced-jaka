@@ -43,6 +43,7 @@ def test_new_context_is_explicit_in_checkpoint_contract(kind, feet, version, xi,
     cfg = TrainConfig(robot="khan_mini")
     cfg.env.context_layout = kind
     cfg.env.foot_tracking = feet
+    cfg.env.ankle_encoder_bias_half_range = 0.01  # Isolate the historical context versions.
     resolve_training_observations(cfg)
     saved = asdict(cfg)
     contract = robot_contract("khan_mini", "isaac_khan", env_config=saved["env"])
@@ -86,6 +87,7 @@ def test_restore_context_does_not_apply_fresh_defaults(saved_layout):
     assert checkpoint_context_layout(saved) == cfg.env.context_layout == expected
     assert cfg.world_model.state_spec.context_layout == expected
     assert cfg.env.foot_tracking is checkpoint_foot_tracking(saved) is (expected == "khan_dr_v3")
+    assert cfg.env.ankle_encoder_bias_half_range == 0.01
     runtime_spec = StateSpec(cfg.world_model.state_spec, device="cpu", num_joints=27)
     assert runtime_spec.xi_dim == {"khan_dr_v1": 91, "khan_dr_v2": 99, "khan_dr_v3": 101}[expected]
     assert len(runtime_spec.xi_scale) == runtime_spec.xi_dim
