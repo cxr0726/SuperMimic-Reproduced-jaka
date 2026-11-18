@@ -158,8 +158,10 @@ actuator group, held for each episode. Nominal evaluation disables delay. The wo
 model and imagination keep context31/input125 and approximate this hidden delay
 without an explicit queue. Each physical tracking reset starts the robot 5 cm above
 the unmodified reference, including evaluation resets; reference goals stay unchanged.
-Feet now use one whole-foot CAD convex mesh each, including the instep; inertias and
-non-foot contacts are preserved, and existing NPZ files need no reconversion.
+Each foot uses separate convex rear and forefoot colliders. The measured sole stays
+87 mm wide behind the flare and reaches 105 mm at the forefoot. The instep follows
+the original CAD. [3D comparison](media/khan_sole_comparison_3d.png) ·
+[Top view and widths](media/khan_sole_top_view.png)
 
 Start a **new run**: the Khan version-5 checkpoint contract records these physics
 settings and the expanded critic. Version-4 checkpoints, including the existing

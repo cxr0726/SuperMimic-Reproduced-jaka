@@ -113,7 +113,8 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
             },
             "reset_offset_scope": "actual_robot_only_all_resets_including_nominal_evaluation",
             "reference_height_offset": 0.0,
-            "foot_collision": "one_full_CAD_convex_mesh_per_foot",
+            "foot_collision": profile["parameter_overrides"]["foot_collision"].get(
+                "schema", "one_full_CAD_convex_mesh_per_foot"),
         }
         # Missing/False preserves v6 byte-for-byte for historical checkpoint
         # validation. New training records its distinct reset queue semantics.

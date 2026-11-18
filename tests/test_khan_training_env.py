@@ -234,10 +234,11 @@ def test_khan_domain_randomization_and_reset_noise(setup_khan):
         anchor_id = robot.indexing.body_ids[robot.body_names.index(spec.anchor_body)]
         assert int(expected_com_id) != int(anchor_id)
         local_ids, _ = robot.find_geoms(spec.foot_geom_regex)
-        assert len(local_ids) == 2
+        assert len(local_ids) == 4
         geom_ids = robot.indexing.geom_ids[local_ids]
         actual_friction = env.sim.model.geom_friction[:, geom_ids, 0]
-        torch.testing.assert_close(actual_friction, before[:, :1].expand(-1, 2), rtol=0, atol=1e-6)
+        torch.testing.assert_close(actual_friction, before[:, :1].expand_as(actual_friction),
+                                   rtol=0, atol=1e-6)
 
         # Reset writes the sampled/forced frame without advancing its target.
         # Remove the deterministic actual-root clearance before checking noise.

@@ -9,6 +9,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 import pytest
+from scipy.spatial import ConvexHull
 
 from supermimic.robots.build_khan_mini import build_khan_mini
 from supermimic.robots.khan_mini import (
@@ -75,7 +76,7 @@ def test_conversion_preserves_tree_except_requested_foot_mass_and_knee_overrides
     source = ET.parse(SOURCE_URDF).getroot()
     model = mujoco.MjModel.from_xml_path(str(bundle / "robot.xml"))
     assert (model.nq, model.nv, model.njnt, model.nbody, model.ngeom, model.nmesh) == (
-        34, 33, 28, 46, 59, 44
+        34, 33, 28, 46, 61, 48
     )
     assert model.nu == 0 and model.nkey == 0
     assert model.jnt_type[0] == mujoco.mjtJoint.mjJNT_FREE
@@ -172,6 +173,9 @@ def test_bundle_contains_relative_meshes_and_loads_after_relocation(bundle, tmp_
     mesh_dir = Path(compiler.attrib.get("meshdir", "")) if compiler is not None else Path()
     assert not mesh_dir.is_absolute()
     for mesh in xml.findall("./asset/mesh"):
+        if "vertex" in mesh.attrib:
+            assert mesh.attrib["name"].endswith(("_rear", "_forefoot"))
+            continue
         filename = Path(mesh.attrib["file"])
         assert not filename.is_absolute()
         assert ".." not in filename.parts and ".." not in mesh_dir.parts
@@ -181,7 +185,7 @@ def test_bundle_contains_relative_meshes_and_loads_after_relocation(bundle, tmp_
     shutil.copytree(bundle, relocated)
     model = mujoco.MjModel.from_xml_path(str(relocated / "robot.xml"))
     configured = get_khan_mini_cfg(relocated).build().spec.compile()
-    assert (model.nq, model.nmesh, configured.nu) == (34, 44, 27)
+    assert (model.nq, model.nmesh, configured.nu) == (34, 48, 27)
     assert load_profile(relocated) == load_profile(bundle)
 
 
@@ -331,7 +335,7 @@ def test_visuals_collisions_capsules_and_feet_remain_distinct(bundle):
     ):
         visual = model.geom_group == 2
         collision = model.geom_group == 3
-        assert visual.sum() == 45 and collision.sum() == 14
+        assert visual.sum() == 45 and collision.sum() == 16
         assert (visual | collision).all()
         assert (model.geom_contype[visual] == 0).all()
         assert (model.geom_conaffinity[visual] == 0).all()
@@ -348,10 +352,10 @@ def test_visuals_collisions_capsules_and_feet_remain_distinct(bundle):
             assert name.endswith("_collision") and body_name in name
             if body_name in ("Left_ankle_roll_Link", "Right_ankle_roll_Link"):
                 feet.append(geom_id)
-        assert len(feet) == 2
+        assert len(feet) == 4
         assert (model.geom_type[feet] == mujoco.mjtGeom.mjGEOM_MESH).all()
         np.testing.assert_allclose(
-            model.geom_friction[feet], np.tile([0.6, 0.005, 0.0001], (2, 1))
+            model.geom_friction[feet], np.tile([0.6, 0.005, 0.0001], (4, 1))
         )
         nonfeet = np.flatnonzero(collision & ~np.isin(np.arange(model.ngeom), feet))
         np.testing.assert_allclose(
@@ -359,7 +363,7 @@ def test_visuals_collisions_capsules_and_feet_remain_distinct(bundle):
         )
 
 
-def test_foot_convex_collisions_share_full_visual_mesh_and_preserve_inertials(bundle):
+def test_compiled_foot_hulls_follow_measured_sections_and_preserve_inertials(bundle):
     model = mujoco.MjModel.from_xml_path(str(bundle / "robot.xml"))
     reference = mujoco.MjModel.from_xml_path(str(bundle / "source.urdf"))
     profile = load_profile(bundle)
@@ -367,17 +371,39 @@ def test_foot_convex_collisions_share_full_visual_mesh_and_preserve_inertials(bu
         body = model.body(name).id
         collisions = np.flatnonzero((model.geom_bodyid == body) & (model.geom_group == 3))
         visuals = np.flatnonzero((model.geom_bodyid == body) & (model.geom_group == 2))
-        assert len(collisions) == len(visuals) == 1
-        collision, visual = int(collisions[0]), int(visuals[0])
-        assert model.geom(collision).name == f"{name}_convex_collision"
-        assert model.geom_dataid[collision] == model.geom_dataid[visual]
-        assert model.mesh(model.geom_dataid[collision]).name == name
-        np.testing.assert_allclose(model.geom_pos[collision], model.geom_pos[visual], atol=1e-12)
-        np.testing.assert_allclose(model.geom_quat[collision], model.geom_quat[visual], atol=1e-12)
-        assert model.geom_condim[collision] == 3 and model.geom_priority[collision] == 1
+        assert len(collisions) == 2 and len(visuals) == 1
+        assert model.mesh(model.geom_dataid[visuals[0]]).name == name
         override = profile["parameter_overrides"]["foot_collision"]["feet"][name]
         assert override["source_collision_count"] == 7
-        assert override["effective_collision_count"] == 1
+        assert override["effective_collision_count"] == 2
+        assert set(override["geoms"]) == {model.geom(g).name for g in collisions}
+        assert (model.geom_condim[collisions] == 3).all()
+        assert (model.geom_priority[collisions] == 1).all()
+        for part, xmin, xmax in (("rear", -75, 25), ("forefoot", 25, 127)):
+            gid = model.geom(f"{name}_{part}_collision").id
+            mesh = model.geom_dataid[gid]
+            start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
+            rotation = np.empty(9)
+            mujoco.mju_quat2Mat(rotation, model.geom_quat[gid])
+            points = 1000 * (model.mesh_vert[start:start + count] @ rotation.reshape(3, 3).T
+                             + model.geom_pos[gid])
+            np.testing.assert_allclose([points[:, 0].min(), points[:, 0].max(),
+                                        points[:, 2].min()], [xmin, xmax, -48], atol=.01)
+            # Intersect the compiled outer hull and its flat sole with vertical
+            # measurement planes. A single convex hull would fill in the waist.
+            for height, inset in ((-46, 0), (-48, 2)):
+                ring = points[points[:, 2] <= height + .001, :2]
+                poly = ring[ConvexHull(ring).vertices]
+                stations = [(-35, 87), (0, 87), (24.9, 87)] if part == "rear" else [
+                    (25.1, 87), (45, 98.3), (71, 105)]
+                for x, expected in stations:
+                    edges = np.roll(poly, -1, axis=0)
+                    hit = (poly[:, 0] < x) != (edges[:, 0] < x)
+                    a, b = poly[hit], edges[hit]
+                    y = a[:, 1] + (x - a[:, 0]) * (b[:, 1] - a[:, 1]) / (b[:, 0] - a[:, 0])
+                    assert np.ptp(y) == pytest.approx(expected - 2 * inset, abs=.08)
+            if part == "rear":
+                assert points[:, 2].max() == pytest.approx(14, abs=.01)
     # Contact edits change no inertials; only the explicit uniform foot mass
     # correction changes these two bodies' mass and inertia, not COM or axes.
     for body_id in range(1, model.nbody):

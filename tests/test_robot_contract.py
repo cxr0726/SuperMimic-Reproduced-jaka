@@ -108,7 +108,8 @@ def test_fixed_joint_physics_and_neck_noise_are_saved_without_expanding_dr_v3():
     contract = robot_contract("khan_mini", env_config=settings)
     assert contract["version"] == 12
     physics = contract["nominal_joint_physics"]
-    assert physics["training_semantics_version"] == 4
+    assert physics["training_semantics_version"] == 5
+    assert contract["simulation_schema"]["foot_collision"] == "measured_rear_and_forefoot_convex_meshes"
     assert physics["joint_frictionloss_nm"] == dict.fromkeys(contract["joint_names"], 0.1)
     assert physics["joint_frictionloss_randomized"] is False
     assert physics["knee_soft_lower_limit_rad"] == -0.03

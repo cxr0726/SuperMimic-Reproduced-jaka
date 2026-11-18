@@ -1,9 +1,9 @@
 {
   "urdf": "/home/cxr0726/workspace/jaka_supermimic/SuperMimic-Reproduced-jaka/assets/robots/khan_mini/new.urdf",
   "source_sha256": {
-    "/home/cxr0726/workspace/jaka_supermimic/SuperMimic-Reproduced-jaka/assets/robots/khan_mini/robot.xml": "db6bc5d5192deeaceafb1f5c7ece4bbec7ae6a8ba3e196323077502903320294",
+    "/home/cxr0726/workspace/jaka_supermimic/SuperMimic-Reproduced-jaka/assets/robots/khan_mini/robot.xml": "27d201be1a0264a52b5a83042dc81fb9610e0aed924394164f7fdfc8b471fdac",
     "/home/cxr0726/workspace/jaka_supermimic/SuperMimic-Reproduced-jaka/assets/robots/khan_mini/source.urdf": "927cf814485ce2e2fea77aed95dd4b858e60763b785693c2f3f4b23f9940be33",
-    "/home/cxr0726/workspace/jaka_supermimic/SuperMimic-Reproduced-jaka/assets/robots/khan_mini/profile.json": "527ab085ab8194b68fe2915391dcd8b9a941e26863fbe9683191a858257be7d6"
+    "/home/cxr0726/workspace/jaka_supermimic/SuperMimic-Reproduced-jaka/assets/robots/khan_mini/profile.json": "8f1e258d9c319b711ef5541655776cd4f5546559fce4bcc0e7bf9c5ad2146160"
   },
   "mujoco_version": "3.16.0",
   "collisions": [
@@ -43,14 +43,34 @@
       "conaffinity": 1
     },
     {
-      "name": "Left_ankle_roll_Link_convex_collision",
+      "name": "Left_ankle_roll_Link_rear_collision",
       "link": "Left_ankle_roll_Link",
       "source_type": "mesh",
-      "mesh": "meshes/collision_hulls/Left_ankle_roll_Link_convex_collision.obj",
+      "mesh": "meshes/collision_hulls/Left_ankle_roll_Link_rear_collision.obj",
       "mesh_info": {
-        "vertices": 237,
-        "triangles": 470,
-        "sha256": "8fce405fd5517e948b2d0022771c7d13e2c312fbce954618332b6f503a87f86d"
+        "vertices": 298,
+        "triangles": 592,
+        "sha256": "014be13be996ca66faef38d05dbb7ca0be6d0ad9cfb7c0063dc9ef566ddd0c46"
+      },
+      "friction": [
+        0.6,
+        0.005,
+        0.0001
+      ],
+      "condim": 3,
+      "priority": 1,
+      "contype": 1,
+      "conaffinity": 1
+    },
+    {
+      "name": "Left_ankle_roll_Link_forefoot_collision",
+      "link": "Left_ankle_roll_Link",
+      "source_type": "mesh",
+      "mesh": "meshes/collision_hulls/Left_ankle_roll_Link_forefoot_collision.obj",
+      "mesh_info": {
+        "vertices": 327,
+        "triangles": 650,
+        "sha256": "1e1d520b06ce3aa82806de04d60ad7d89ca965f0b0858f7f13557c9eb2fb9365"
       },
       "friction": [
         0.6,
@@ -84,14 +104,34 @@
       "conaffinity": 1
     },
     {
-      "name": "Right_ankle_roll_Link_convex_collision",
+      "name": "Right_ankle_roll_Link_rear_collision",
       "link": "Right_ankle_roll_Link",
       "source_type": "mesh",
-      "mesh": "meshes/collision_hulls/Right_ankle_roll_Link_convex_collision.obj",
+      "mesh": "meshes/collision_hulls/Right_ankle_roll_Link_rear_collision.obj",
       "mesh_info": {
-        "vertices": 243,
-        "triangles": 482,
-        "sha256": "23e9824a7fadf9e345b92ab49abf967c23661cf12ab57a20b2805c7cd5a83a96"
+        "vertices": 298,
+        "triangles": 592,
+        "sha256": "2400a165d2921be567abfc70c59671b15ed4214f9a7640a8ed760604f05da5fc"
+      },
+      "friction": [
+        0.6,
+        0.005,
+        0.0001
+      ],
+      "condim": 3,
+      "priority": 1,
+      "contype": 1,
+      "conaffinity": 1
+    },
+    {
+      "name": "Right_ankle_roll_Link_forefoot_collision",
+      "link": "Right_ankle_roll_Link",
+      "source_type": "mesh",
+      "mesh": "meshes/collision_hulls/Right_ankle_roll_Link_forefoot_collision.obj",
+      "mesh_info": {
+        "vertices": 327,
+        "triangles": 650,
+        "sha256": "5b0d6189c8a9c0e7751558659548023d01ebdfe85ddd156db5c5c1e1832a7ea0"
       },
       "friction": [
         0.6,
@@ -530,14 +570,14 @@
     "Servo kd is stored in training_parameters.damping, not joint dynamics damping.",
     "Velocity metadata comes from profile.json; training builtin servos do not enforce it.",
     "Four capsules become single convex meshes, with surface error below 0.1 mm.",
-    "Eight CAD collision meshes are explicit convex hulls, including the foot instep.",
+    "Mesh collisions are explicit convex hulls; each foot has rear and forefoot pieces.",
     "Render/load the URDF with its meshes directory, not as a standalone file."
   ],
   "validation": {
     "passed": true,
     "links": 45,
     "actuated_joints": 27,
-    "collision_geometries": 14,
+    "collision_geometries": 16,
     "fk_test_poses": 18,
     "max_fk_position_error_m": 1.1102230246251565e-16,
     "max_fk_rotation_matrix_error": 9.992007221626409e-16,
@@ -555,16 +595,24 @@
         "max_support_error_m": 8.073312538181554e-05
       },
       {
-        "name": "Left_ankle_roll_Link_convex_collision",
-        "max_support_error_m": 3.6197169706042587e-09
+        "name": "Left_ankle_roll_Link_rear_collision",
+        "max_support_error_m": 8.042203986091678e-10
+      },
+      {
+        "name": "Left_ankle_roll_Link_forefoot_collision",
+        "max_support_error_m": 7.02376552752515e-10
       },
       {
         "name": "Right_knee_Link_27_collision",
         "max_support_error_m": 8.073312538181554e-05
       },
       {
-        "name": "Right_ankle_roll_Link_convex_collision",
-        "max_support_error_m": 3.6944979020514523e-09
+        "name": "Right_ankle_roll_Link_rear_collision",
+        "max_support_error_m": 4.0185202387910124e-10
+      },
+      {
+        "name": "Right_ankle_roll_Link_forefoot_collision",
+        "max_support_error_m": 6.559515292048346e-10
       },
       {
         "name": "waist_yaw_Link_45_collision",
@@ -604,5 +652,5 @@
       }
     ]
   },
-  "urdf_sha256": "93cb52960c94f7dc6e0bdc744fe9802d78da4408c4b20758f0c287df1c07c6f2"
+  "urdf_sha256": "81d7ac05b85fce24508305cfd4e46fd9b31d9739cd8512054c06989653b5f8b9"
 }

@@ -299,7 +299,7 @@ def export_urdf(asset_dir: Path, output: Path) -> dict:
                   "Servo kd is stored in training_parameters.damping, not joint dynamics damping.",
                   "Velocity metadata comes from profile.json; training builtin servos do not enforce it.",
                   "Four capsules become single convex meshes, with surface error below 0.1 mm.",
-                  "Eight CAD collision meshes are explicit convex hulls, including the foot instep.",
+                  "Mesh collisions are explicit convex hulls; each foot has rear and forefoot pieces.",
                   "Render/load the URDF with its meshes directory, not as a standalone file."]}
     report["validation"] = validate(model, output, profile, records)
     if any(sha256(Path(p)) != value for p, value in sources.items()):

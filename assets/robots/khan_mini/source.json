@@ -190,20 +190,37 @@
       "source": "user-requested alignment with mjlab G1 non-foot contacts"
     },
     "foot_collision": {
-      "shape": "whole-foot CAD mesh convex hull, including instep",
-      "source": "existing URDF visual STL; identical to SDK whole-foot collision mesh",
+      "schema": "measured_rear_and_forefoot_convex_meshes",
+      "source": "foot_photo/foot3.jpg: rear width 87 mm, forefoot width 105 mm, toe to widest 56 mm, flare length 46 mm",
+      "dimensions_mm": {
+        "length": 202,
+        "heel_x": -75,
+        "rear_width": 87,
+        "forefoot_width": 105,
+        "toe_to_widest": 56,
+        "flare_length": 46,
+        "heel_cap_length": 34,
+        "edge_radius": 2,
+        "bottom_z": -48,
+        "sole_top_z": -38
+      },
+      "assumptions": "202 mm overall length; symmetric about the existing foot centerline; 34 mm heel cap and 2 mm bottom-edge fillet; upper profile from the CAD hull",
       "feet": {
         "Left_ankle_roll_Link": {
-          "geom": "Left_ankle_roll_Link_convex_collision",
-          "mesh": "Left_ankle_roll_Link",
+          "geoms": [
+            "Left_ankle_roll_Link_rear_collision",
+            "Left_ankle_roll_Link_forefoot_collision"
+          ],
           "source_collision_count": 7,
-          "effective_collision_count": 1
+          "effective_collision_count": 2
         },
         "Right_ankle_roll_Link": {
-          "geom": "Right_ankle_roll_Link_convex_collision",
-          "mesh": "Right_ankle_roll_Link",
+          "geoms": [
+            "Right_ankle_roll_Link_rear_collision",
+            "Right_ankle_roll_Link_forefoot_collision"
+          ],
           "source_collision_count": 7,
-          "effective_collision_count": 1
+          "effective_collision_count": 2
         }
       },
       "inertials": "collision geom density is zero; foot_nominal_inertia separately records the mass/inertia correction"
@@ -281,15 +298,15 @@
     "visual_meshes": "preserved",
     "freejoint": "floating_base",
     "cylinders": "capsules with original radius/axis half-length",
-    "foot_collisions": "seven sole capsules replaced by each existing whole-foot CAD mesh convex hull; training contact parameters retained",
+    "foot_collisions": "measured rear and forefoot convex pieces joined at the start of the flare, with CAD instep and rounded sole edges",
     "foot_inertials": "each ankle_roll_Link mass +0.1 kg, inertia scaled by the mass ratio, COM and principal axes retained",
     "actuators": "created by get_khan_mini_cfg from profile.json",
     "velocity_limits": "recorded only; not enforced by builtin position servos",
     "contacts": "self-collision masks retained; feet condim=3, other contacts condim=1"
   },
   "output_sha256": {
-    "robot.xml": "d0e6e54e3372c8716d00dcf2b86888256cf49317a23c3baaa112bd401b1ac7df",
+    "robot.xml": "27d201be1a0264a52b5a83042dc81fb9610e0aed924394164f7fdfc8b471fdac",
     "source.urdf": "927cf814485ce2e2fea77aed95dd4b858e60763b785693c2f3f4b23f9940be33",
-    "profile.json": "97cae117511d056adad8733c6bba804007db3833d38b6ad74e308559afb2a220"
+    "profile.json": "8f1e258d9c319b711ef5541655776cd4f5546559fce4bcc0e7bf9c5ad2146160"
   }
 }

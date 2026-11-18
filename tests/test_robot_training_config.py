@@ -175,7 +175,7 @@ def test_robot_bindings_and_g1_compatibility_defaults():
     model = khan.load_model()
     assert all(name in [model.body(i).name for i in range(model.nbody)] for name in khan.tracked_bodies)
     feet = [i for i in range(model.ngeom) if re.fullmatch(khan.foot_geom_regex, model.geom(i).name)]
-    assert len(feet) == 2
+    assert len(feet) == 4
     assert (model.geom_type[feet] == mujoco.mjtGeom.mjGEOM_MESH).all()
     assert (model.geom_priority[feet] == 1).all() and (model.geom_condim[feet] == 3).all()
     assert cfg.scene.entities["robot"].articulation.soft_joint_pos_limit_factor == 0.9

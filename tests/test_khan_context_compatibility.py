@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from supermimic.config import TrainConfig, resolve_training_observations
+from supermimic.robots import khan_mini
 from supermimic.robots.contracts import (
     checkpoint_context_layout,
     checkpoint_foot_tracking,
@@ -19,7 +20,14 @@ from supermimic.world_model.state_spec import StateSpec
 
 
 @pytest.mark.parametrize("fresh_queue", [False, True])
-def test_v1_robot_contract_matches_previous_revision_exactly(fresh_queue):
+def test_v1_robot_contract_matches_previous_revision_exactly(fresh_queue, monkeypatch):
+    # The golden hash includes the old CAD foot geometry. Recreate the profile
+    # field written by that asset and check that its historical schema still resolves.
+    profile = khan_mini.load_profile()
+    profile["parameter_overrides"]["foot_collision"] = {
+        "shape": "whole-foot CAD mesh convex hull, including instep",
+    }
+    monkeypatch.setattr(khan_mini, "load_profile", lambda: profile)
     env = {"actuator_delay": False, "delay_reset_first_step_no_delay": fresh_queue}
     expected = robot_contract("khan_mini", "isaac_khan", env_config=env)
     # Golden simulation schemas from 0c94c78, excluding model file hashes so
