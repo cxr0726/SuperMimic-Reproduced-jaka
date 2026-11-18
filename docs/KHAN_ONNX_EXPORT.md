@@ -127,9 +127,20 @@ ONNX 输出没有额外动作裁剪或输出 tanh；encoder 的 latent tanh 是�
 q_target[j] = default_joint_pos[j] + action_scale[j] * actions[j]
 ```
 
-当前 Khan 的27个 `action_scale` 都为0.5。输出是归一化关节位置偏移，不是力矩；PD 控制仍由部署控制器以 metadata 中的 stiffness/damping 参数执行。若部署端另有 target/torque clipping 或滤波，那是额外控制行为，不由本导出器加入。
+当前 Khan 的27个 `action_scale` 都为0.5。输出是归一化关节位置偏移，不是力矩；PD 控制由部署控制器执行，metadata 中的 stiffness/damping 用于核对训练参数。若部署端另有 target/torque clipping 或滤波，那是额外控制行为，不由本导出器加入；以YAML配置为准的控制器不会自动导入这些metadata。
 
 关节限位、额定速度和 effort 等机器人参数用于部署端核对控制设置；ONNX 本身不计算 PD 力矩或执行硬件限位。当前 MuJoCo 位置伺服使用 effort 限幅，但 profile 中的速度上限并不是 MuJoCo 中额外启用的速度约束。
+
+2026-11-16起，当前 `feat/khan-dr-v3-only` 资产的两膝硬下界改为
+`-0.15099473684210526` rad，上界仍为 `2.2689` rad；在factor=0.9下软下界为
+`-0.03` rad，`[-0.03,0)` 不触发已有下限惩罚。全部27个hinge固定
+`frictionloss=0.1 N·m`，训练/eval相同、无额外摩擦DR。导出记录这些物理参数，
+不会在ONNX图中加入摩擦、限位裁剪或额外奖励。
+
+服务器训练脚本默认关闭颈yaw/pitch执行噪声，其余25轴仍为std=0.1；观测和goal
+噪声保留。正常ONNX推理本来就不添加执行噪声，关闭训练颈噪声不改变620→27接口。
+新资产hash与旧160k等检查点不兼容，须训练新run后导出；旧检查点应在匹配的原资产
+和源码下导出。已生成的旧ONNX文件不变，实机YAML限位也不会自动同步，仍需单独核对。
 
 保留与旧 ONNX 兼容的 metadata 键：
 
@@ -139,7 +150,9 @@ q_target[j] = default_joint_pos[j] + action_scale[j] * actions[j]
 | `joint_stiffness` / `joint_damping` | 按上述顺序排列的 Kp / Kd |
 | `default_joint_pos` / `action_scale` | 按上述顺序排列的默认角度和动作缩放 |
 | `effort_limit` / `velocity_limit` / `armature` | 按策略顺序排列的机器人参数 |
-| `joint_pos_lower` / `joint_pos_upper` | URDF硬关节位置范围 |
+| `joint_frictionloss` | 按关节顺序排列的固定摩擦损失N·m，当前27项均为0.1 |
+| `joint_frictionloss_randomized_in_training` | 当前为字符串 `false`，不新增摩擦DR或ξ维度 |
+| `joint_pos_lower` / `joint_pos_upper` | 当前训练资产的硬关节位置范围，包含膝下界覆盖 |
 | `soft_joint_pos_limit_factor` | 训练使用的软关节位置限位比例 |
 | `control_dt` / `observation_history` / `goal_frames` | 控制周期0.02秒、历史5帧、参考5帧 |
 | `command_names` | `motion` |
@@ -156,7 +169,7 @@ q_target[j] = default_joint_pos[j] + action_scale[j] * actions[j]
 已有 `latest_m62k_pico_base.onnx` 也是 `obs (1,620) → actions (1,27)`，但接口形状相同不代表可直接复用旧观测构造：
 
 - 旧模型使用左右交错的关节顺序；当前策略使用左腿、右腿、腰、左臂、右臂、颈部的训练顺序。必须按新 metadata 重排参考关节角、历史关节角/速度/上一动作和输出，不能只重排输出。
-- 旧图包含学习到的 `normalizer._mean` 和除法统计；当前 SuperMimic actor 没有该 RMS。不要复制旧模型的均值、方差或外部归一化。
+- 旧图包含学习到的 `normalizer._mean` 和除法统计；当前SuperMimic按checkpoint配置导出自己的运行归一化统计。不要复制旧模型的均值、方差，或在部署端重复归一化。
 - 当前角速度/关节速度系数是0.5/0.2，不能继续使用旧 Isaac 观测的0.25/0.05。
 - 当前网络为 `goal155 → encoder → latent32`，再与 `policy_obs465` 拼接后输入 decoder。不是旧 ONNX 的单一620维 PPO actor。
 - 按关节名重排后，旧 ONNX 的 Kp/Kd/q0 曾与当时导出所用 profile 核对相符；当前踝参数已改变，应读取目标模型的 metadata 并核对其训练资产，不依赖旧数组位置。

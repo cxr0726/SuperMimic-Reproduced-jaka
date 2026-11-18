@@ -1,9 +1,86 @@
 # Khan 服务器训练：Isaac观测布局、SuperMimic尺度与原优化参数
 
-> **版本说明（2026-11-14）**：当前 `codex/khan-muon-only` 的服务器脚本默认
-> 采用混合 Muon、默认姿态动作、单步奖励上界 0.112 和 `khan_dr_v4`。
-> DR v4 在 DR v3 上加四个踝轴的 startup 干摩擦随机化，ξ 为 105 维。
-> 下文记录历史训练配置。现行配置及命令见 [当前分支说明](KHAN_OFFICIAL_PORT.md#服务器训练)。
+> `codex/khan-muon-only` 的两个服务器脚本采用
+> `khan_dr_v4` 物理上下文（ξ105、WM199、critic619），三个网络均用 Adam，默认关闭额外足部奖励，
+> 单步奖励上界0.112。两膝硬下界为 `-0.15099473684210526` rad，软下界为 `-0.03` rad；
+> 全27个转动关节标称 `frictionloss=0.1 N·m`，四踝另加startup U(0,0.15) N·m。
+> 两侧ankle_roll_Link标称质量各加0.1 kg至0.58502 kg，惯量同比乘1.2061770648633046，COM和主轴保持原值。
+> 每脚再独立加startup U(0,0.15) kg，仅质量变化；四踝encoder bias ±0.02 rad，其余±0.01 rad。
+> 所有 27 轴的采集执行噪声为 0。默认启用 WM 整窗与 Actor/Critic 网络编译、
+> 单 GPU 完整更新 CUDA Graph、批量参考编码和 CDF 回放采样。
+> 详细配置以 [当前分支说明](KHAN_OFFICIAL_PORT.md) 为准。
+
+## 当前配置的训练命令
+
+服务器同步本分支的代码及整个 `assets/robots/khan_mini/`，使用新的run名从头训练。
+新的资产hash及105维上下文与此前101维的200k/220k/280k等检查点不兼容，不能用 `--resume` 接着训练旧run。
+以下库路径按服务器实际位置调整；脚本不下载数据。
+
+```bash
+cd /home/jaka/Workspace/SuperMimic-Reproduced-jaka
+git fetch origin
+git switch codex/khan-muon-only
+git pull --ff-only origin codex/khan-muon-only
+
+bash scripts/training/train_khan_compact_server.sh \
+  --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
+  --run-name khan_8452_adam_clean_dr_v4_4096 \
+  --num-envs 4096
+```
+
+加 `--dry-run` 可检查路径和实际CLI，不启动CUDA或训练。NPZ入口为：
+
+```bash
+bash scripts/training/train_khan_server.sh \
+  --data-dir data/npz/khan_mini/lafan1 \
+  --run-name khan_lafan1_adam_clean_dr_v4_4096 \
+  --num-envs 4096
+```
+
+`--stop-after-iterations 50` 可用于新配置短测，
+随后只从该新run的匹配检查点恢复；总320k学习率计划不变。
+
+膝限位复用原有真实/WM `joint_limit` 惩罚及reset裁剪，`[-0.03,0)` 不受下限惩罚。
+这不是新增单侧奖励或部署端target clip。已有ONNX和实机YAML不会自动更新，
+部署前仍需核对目标模型的参数及实际控制限位。
+
+## 当前随机化与质量分布
+
+startup在每个环境创建时采样，局部/自动reset后保持；reset项每回合重采样。
+
+| 项目 | 当前范围 | 时机 |
+|---|---|---|
+| 腰部附加质量 | U(-2,3) kg，仅质量变化 | startup |
+| 腰部局部COM偏移 | x ±0.035 m，y/z ±0.07 m | startup |
+| 两脚附加质量 | 每个ankle_roll_Link独立U(0,0.15) kg，保持校准后的COM/惯量 | startup |
+| 12个腿关节armature | 各自乘U(0.8,1.2) | startup |
+| 四踝frictionloss | 标称0.1 + 独立U(0,0.15) N·m；其余23轴固定0.1 | startup |
+| 全27关节Kp、Kd | 分别独立乘U(0.8,1.2) | reset |
+| encoder bias | 四踝±0.02 rad，其余±0.01 rad，独立均匀采样 | reset |
+| 足地滑动摩擦系数 | U(0.3,1.2)，同一环境左右脚共用 | reset |
+| 初始状态 | root xyz ±(0.05,0.05,0.01) m；rpy ±(0.1,0.1,0.2) rad；关节角±0.1 rad | reset |
+| 初始速度 | root线速度xyz ±(0.5,0.5,0.2) m/s；角速度xyz ±(0.52,0.52,0.78) rad/s | reset |
+| 采集执行噪声 | 27 轴的归一化动作 std=0 | 控制步 |
+| 传感器噪声 | q±0.01 rad，qd±0.5 rad/s，角速度±0.2 rad/s，重力投影±0.07，未来姿态6D分量±0.05 | 观测采样 |
+| actor goal噪声 | z±0.01 m，参考关节角±0.05 rad；critic/reward使用干净参考 | 编码器输入采样 |
+
+执行器延迟默认关闭，未加入间隙模型或episode级参考高度偏置。qd和角速度噪声进入actor前另乘0.2、0.5。
+标称eval关闭DR和噪声：使用校准后的重脚、全关节frictionloss=0.1及固定足地摩擦系数1.0。
+
+XML整机标称质量为 **41.03253498863909 kg**。startup后的总质量为
+`M = 41.03253498863909 + W + L + R`，其中W~U(-2,3)、L/R各自独立~U(0,0.15) kg。
+支持范围 **39.0325349886–44.3325349886 kg**，均值 **41.6825349886 kg**，标准差 **1.4446741270 kg**。
+这是三个均匀变量之和，不是整个范围内均匀采样；COM、armature和摩擦随机化不改变上述body_mass总和。
+
+ξ的前101维字段位置保持，足部质量增量以新标称质量为基准，center/scale均为0.075 kg；
+末尾四维依次为左pitch、左roll、右pitch、右roll实际frictionloss总值，center=0.175、scale=0.075 N·m。
+这些参数从生效后的物理模型读回，Replay、WM及critic使用相同的ξ，想象期间固定。actor输入维度保持465/155。
+新checkpoint记录context v4和robot contract v14，资产生成器同步包含标称足部修正。
+
+## 历史配置与验证记录
+
+以下保留2026-11-12及更早的配置、命令和测试记录。ξ91、四踝reset随机化、
+reference residual和相应旧run名不代表上面的当前默认配置，不能用于恢复到本次新资产。
 
 2026-11-09参考残差更新：新Khan训练默认执行 `q_ref(t+1)+0.5*decoder_residual`，
 并仅给actor编码器goal加入高度±0.01 m／参考关节±0.05 rad的均匀噪声。
@@ -180,9 +257,9 @@ bash scripts/training/train_khan_server.sh --num-envs 4096 --run-name khan_lafan
 | WM、actor、critic LR | 单GPU均2e-4 |
 | gamma / lambda | 0.99 / 0.95 |
 | 训练长度 / LR衰减 | 320000步 / 250000步余弦衰减到0.03× |
-| obs/reset/域随机化/执行噪声 | prop噪声开、encoder goal加噪／参考直通干净；服务器默认关闭delay（可选0–20 ms）；实际机器人reset z+0.05 m；执行噪声std0.1 |
+| obs/reset/域随机化/执行噪声 | prop 和 encoder goal 噪声开启，实际机器人 reset z+0.05 m，延迟默认关闭，采集执行噪声为 0 |
 | 观测 / 激活重计算 | isaac_khan，未来/历史5/5 / 关闭 |
-| torch.compile | default |
+| learner 执行 | WM 整窗和 Actor/Critic 网络使用 `torch.compile`，单 GPU 捕获完整更新，批量参考编码和 CDF 采样默认开启 |
 
 `--stop-after-iterations` 只限制当前进程执行步数，不缩短学习率衰减时间基准。
 脚本复用原配置，不提供batch/H等参数覆写入口。完整观察、奖励和DR列表见

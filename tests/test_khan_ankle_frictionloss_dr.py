@@ -32,23 +32,24 @@ def test_frictionloss_context_appends_four_axes_without_reinterpreting_v3():
     assert v3.dim == 101 and v4.dim == 105
     assert v4.slices[FIELD] == slice(101, 105)
     assert {name: v4.slices[name] for name in v3.slices} == v3.slices
-    assert v4.offset[:101] == v3.offset and v4.scale[:101] == v3.scale
-    assert v4.offset[101:] == (0.15,) * 4 and v4.scale[101:] == (0.10,) * 4
+    assert v4.offset[:99] == v3.offset[:99] and v4.scale[:99] == v3.scale[:99]
+    assert v4.offset[99:] == (0.075,) * 2 + (0.175,) * 4
+    assert v4.scale[99:] == (0.075,) * 6
 
     state = StateSpec(StateSpecCfg(context_layout=v4.kind), "cpu", num_joints=27)
     raw = state.xi_offset.repeat(1, 1)
-    raw[:, v4.slices[FIELD]] = torch.tensor([[0.05, 0.15, 0.25, 0.0]])
+    raw[:, v4.slices[FIELD]] = torch.tensor([[0.1, 0.175, 0.25, 0.1]])
     normalized = state.normalize_xi(raw)
-    torch.testing.assert_close(normalized[:, 101:], torch.tensor([[-1.0, 0.0, 1.0, -1.5]]))
+    torch.testing.assert_close(normalized[:, 101:], torch.tensor([[-1.0, 0.0, 1.0, -1.0]]))
 
 
-def test_frictionloss_is_independent_absolute_startup_sampling_for_v4():
+def test_frictionloss_is_independent_additive_startup_sampling_for_v4():
     active = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused.npz"], robot="khan_mini"))
     term = active.events[FIELD]
     assert term.mode == "startup" and term.func is dr.joint_friction
     assert "dof_frictionloss" in term.func.model_fields
     assert term.params["asset_cfg"].joint_names == ANKLES
-    assert term.params["operation"] == "abs" and term.params["ranges"] == (0.05, 0.25)
+    assert term.params["operation"] == "add" and term.params["ranges"] == (0.0, 0.15)
     assert term.params.get("distribution", "uniform") == "uniform"
     assert term.params.get("shared_random", False) is False
     assert active.recorders["replay"].params["context_layout"] == "khan_dr_v4"
@@ -108,11 +109,11 @@ def _check_frictionloss_readback(env, randomized):
     torch.testing.assert_close(applied[:, other_dofs], nominal[other_dofs].expand(env.num_envs, -1),
                                rtol=0, atol=0)
     if randomized:
-        assert ((actual >= 0.05) & (actual <= 0.25)).all()
+        assert ((actual >= 0.1) & (actual <= 0.25)).all()
         assert (actual.std(dim=0) > 0).all()
         assert all(row.unique().numel() > 1 for row in actual)
     else:
-        torch.testing.assert_close(actual, torch.zeros_like(actual), rtol=0, atol=0)
+        torch.testing.assert_close(actual, nominal[dofs].expand_as(actual), rtol=0, atol=0)
     return actual
 
 
@@ -146,7 +147,7 @@ def test_applied_ankle_frictionloss_reaches_replay_and_survives_reset(randomized
             pointer = rec.buffer.ptr.clone()
             env.step(actions)
             data = env.sim.wp_data
-            expected_rows = len(ANKLES) if randomized else 0
+            expected_rows = spec.num_joints
             constraint_count = wp.to_torch(data.nefc)
             assert data.njmax == 512 and (constraint_count < data.njmax).all()
             assert (wp.to_torch(data.nf) == expected_rows).all()

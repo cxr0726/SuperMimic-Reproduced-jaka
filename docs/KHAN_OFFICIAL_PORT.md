@@ -1,10 +1,12 @@
 # Khan 官方组件迁移分支
 
-当前分支 `codex/khan-muon-only` 在混合 Muon 训练上沿用
-`feat/khan-dr-v3-only` 的默认姿态动作和奖励，并增加踝轴干摩擦随机化。官方组件基于 SuperMimic
+`codex/khan-muon-only` 使用 `feat/khan-dr-v3-only` 的 DR、膝限位和分体脚底资产，
+并启用该分支原有的完整 learner 编译。官方组件最初基于 SuperMimic
 `5efbf114e11f725c31d83e217be987c13c0e4ce2`，在现有 Khan 框架内适配。
 `main` 上已有训练方案保持在原提交。请为当前新配置新建训练 run；
-历史策略仍按其 checkpoint 保存的动作和网络配置 play/export。
+历史策略需配套原资产及其 checkpoint 保存的动作和网络配置 play/export；
+本次标称脚质量/惯量修正改变了资产 hash，四踝frictionloss DR将ξ扩为105维，不能直接恢复此前101维检查点。
+当前服务器命令和完整DR范围见 [服务器训练说明](KHAN_SERVER_TRAINING.md)。
 
 ## 默认组件
 
@@ -23,9 +25,16 @@
 | actor 网络 | encoder1024/512/256，decoder2048/1024/512/256，隐藏层均为LayerNorm/GELU，latent32 |
 | critic 网络 | 256/128，隐藏层为LayerNorm/GELU，最终输出仍为普通Linear |
 | Actor EMA | 0.995，采集/优化使用 live；eval/export 默认自动选择 EMA |
+| 膝关节限位 | 硬范围 `[-0.15099473684210526, 2.2689]` rad，factor=0.9，计算后的软下界为 `-0.03` rad |
+| 关节 frictionloss | 全部27个 hinge 标称 `0.1 N·m`；四踝独立加startup U(0,0.15) N·m，nominal eval固定0.1 |
+| 标称脚质量/惯量 | 两侧ankle_roll_Link各0.58502 kg，惯量按原质量比例乘1.2061770648633046，COM与主轴不变 |
+| 足部质量DR | 两脚各自startup加U(0,0.15) kg，仅质量变化 |
+| encoder bias | 四踝±0.02 rad，其余23轴±0.01 rad，每回合独立均匀采样 |
+| 执行噪声 | 两个服务器脚本对全部 27 轴设为 0，Replay 的 `a_exec` 与 `a` 相等 |
 | 额外足部跟踪 | 默认关闭；保留原15 body及颈关节奖励，不改变足部质量随机化 |
-| DR | `khan_dr_v4` 在 DR v3 上追加踝轴干摩擦，ξ105维、WM输入199维、critic619维 |
-| 优化器 | WM、Actor、Critic 的中间 Linear 矩阵用 Muon，其余参数在 CUDA 用 fused capturable Adam |
+| DR | `khan_dr_v4` 物理上下文，ξ105 维、WM 输入 199 维、critic 619 维 |
+| 学习侧执行 | WM 整窗和 Actor/Critic 网络编译、完整更新 CUDA Graph（单 GPU）、H32 批量参考编码、合法窗口和起点的 CDF 采样 |
+| 优化器 | WM、Actor、Critic 均为 Adam，单 GPU 初始学习率均 2e-4，weight decay 为 0。Actor β=(0.9, 0.95)，WM/Critic β=(0.9, 0.999) |
 
 保留当前 clip 内分 bin、尾 bin 合并、物理及想象 H32 合法性、15 body/颈关节奖励、
 base_link anchor、Khan DR、reset 实际 root 抬高 0.05m、5/5 observation
@@ -33,11 +42,13 @@ base_link anchor、Khan DR、reset 实际 root 抬高 0.05m、5/5 observation
 WM、Actor、Critic隐藏层均为Linear→LayerNorm→GELU。encoder最终latent仍经tanh，
 decoder动作输出和critic价值输出仍为普通Linear，不添加输出归一化或限幅。
 WM 仍使用现有 heading 表示（Khan67维状态特征）、66维速度/pose residual 输出、
-8次真实transition监督及原误差尺度。
+8 次真实 transition 监督及原误差尺度。
 运行输入归一化取代WM原固定输入除数，输出scale和loss scale保持现有实现。
+完整更新捕获使用 capturable Adam，将学习率与步数留在 CUDA 张量中。
+融合归约、随机数调用顺序以及 Adam 步长计算的浮点实现可造成执行路径间数值差异。
 
 本分支用新run隔离上一轮的参考残差和额外足部奖励：默认关闭这两项，保留
-DR v3 的随机化、官方采样器/归一化/LayerNorm/GELU、网络、混合 Muon 及学习率调度。
+扩展后的DR v3、官方采样器/归一化/LayerNorm/GELU、网络、优化器及学习率调度。
 `--reference-residual` 和 `--foot-tracking` 可分别恢复残差和足部奖励；
 `--no-reference-residual` 和 `--no-foot-tracking` 可显式指定当前默认值。
 这两个开关独立，不会关闭双脚质量随机化，也不会缩减ξ或critic输入。
@@ -49,6 +60,39 @@ DR v3 的随机化、官方采样器/归一化/LayerNorm/GELU、网络、混合 
 benchmark的满分仍为1。这没有改变原15 body和颈部奖励的相对权重。当前默认
 与上一轮足部权重各0.25的训练目标不同，须新建run，不能直接比较两种定义的
 原始`train_ret`或直接续训；效果比较须使用一致奖励定义和条件。
+
+## 膝限位、固定关节摩擦与颈部执行噪声（2026-11-16）
+
+本节记录2026-11-16的改动。2026-11-17在此基础上增加脚质量/惯量校准、
+四踝startup摩擦DR及105维context v4；当前值以上方默认组件表和服务器说明为准。
+
+两膝保留硬上界 `u=2.2689` rad 和软限位比例 `f=0.9`，按
+`soft_lower = l + (1-f)*(u-l)/2` 反算硬下界：
+
+```text
+l = (-0.03 - 0.05 * 2.2689) / 0.95 = -0.15099473684210526 rad
+soft_lower = -0.03 rad
+```
+
+继续复用原有 `joint_limit` 奖励，权重仍为 `-2`，没有新增膝关节奖励项。
+只有实际关节角低于 `-0.03` 才产生下限惩罚，`[-0.03, 0)` 仍不触发；
+惩罚不是对 PD target 的裁剪。真实环境和 WM 解析奖励共用实际模型生成的软限位。
+reset 也沿用这套软限位裁剪初始关节角，参考动作库和后续 goal 没有重写。
+
+参考 PartyMimic RP1，将全部27个 hinge 的 `frictionloss` 固定为 `0.1 N·m`，
+包含双膝、四踝和颈部；浮动根不加摩擦。该值写入 XML/profile 并由资产生成器保留，
+训练、play和eval加载相同值，关闭DR也不会清零。它不是脚底 `geom_friction` 或
+PD damping，不增加域随机化项或ξ维度：仍为 `khan_dr_v3`、ξ101、WM195、critic615。
+`new.urdf` 和导出元数据同步记录这套限位及关节摩擦，原始输入 `source.urdf` 保留。
+
+11 月 16 日的旧 Khan 配置只屏蔽颈部执行噪声。当前训练脚本传
+`--env.action-noise-std 0.0`，采用 Actor 输出作为送往仿真的归一化命令。
+WM 仍读取 Replay 的 `a_exec` 并执行与仿真相同的动作仿射映射，历史动作和
+action-rate 使用 `a`。采集禁用噪声后两列数值一致。
+[官方移除采集噪声的提交](https://github.com/HybridRobotics/supermimic/commit/7e94b073940b7a19b9a82ff01e191cfb35c4ba91)
+
+必须为这套资产新建run，不能用 `--resume` 接着训练旧160k或新版Muon检查点。
+已导出的旧ONNX文件不会被本次改动重写；实机YAML的目标角限位和控制参数也不会自动同步。
 
 ## 可选参考残差与运行归一化
 
@@ -132,7 +176,8 @@ v2验证（2026-11-12）：纯CPU回归745通过；实际CUDA环境验证startup
 
 ## 双脚附加质量与可选独立跟踪（khan_dr_v3）
 
-DR v3 在 v2 基础上增加：
+以下记录此前 `khan_dr_v3` 的101维定义；当前新训练选择 `khan_dr_v4`。
+v3在v2基础上增加：
 
 - 左右 `ankle_roll_Link` 各自独立在startup采样附加质量 `U(0,0.2) kg`，
   加到原始质量上，均值0.1kg；后续完整、局部和自动reset保持，不累加。
@@ -145,7 +190,7 @@ DR v3 在 v2 基础上增加：
   std分别0.1m和0.25rad。两脚各自计算指数奖励后取平均，独立于原15body平均。
   使用已有xy/yaw reference reanchor，保留参考z与roll/pitch；不消除足部高度差。
   物理与想象使用同一奖励核、干净参考，想象复用已有FK，不添加contact/滑移项。
-  当前分支默认关闭两项；`--foot-tracking`启用。DR上下文版本
+  当前DR-v3-only分支默认关闭两项；`--foot-tracking`启用。DR上下文版本
   只决定动力学随机化和ξ，不再隐式决定是否加入这两项奖励。
 
 对于位置误差e和姿态测地角误差theta，两项分别为：
@@ -172,7 +217,7 @@ r_foot_ori = 0.02*0.25*mean_feet(exp(-theta² / 0.25²))
 bash scripts/training/train_khan_compact_server.sh \
   --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
   --run-name khan_8452_official_residual_dr_v3_feet_4096 --num-envs 4096 \
-  --no-ankle-frictionloss --reference-residual --foot-tracking
+  --reference-residual --foot-tracking
 ```
 
 v3验证（2026-11-12，足部权重各0.25）：纯CPU756项通过；实际CUDA下两脚质量
@@ -182,15 +227,9 @@ v3验证（2026-11-12，足部权重各0.25）：纯CPU756项通过；实际CUDA
 网络和batch采用当前正式值；仅本机显存短测开启activation checkpoint，服务器仍关闭。
 旧v1/v2真实checkpoint契约和策略加载仍通过。此处验证实现一致性，效果需重新训练评估。
 
-## 踝轴干摩擦（khan_dr_v4）
+## 学习侧执行加速（2026-11-13 的实现与验证记录）
 
-训练时每个环境在 startup 对左 pitch、左 roll、右 pitch、右 roll 独立抽取
-`U(0.05, 0.25) N·m`，按绝对值写入 `dof_frictionloss`，并在 reset 后沿用各环境
-已抽取的值。ξ从仿真读取实际值，追加在 DR v3 的101维后。WM 和 Critic 使用
-`(frictionloss - 0.15) / 0.10`，replay 存原始物理值。关闭域随机化的标准评估使用
-资产名义值 0 N·m，`--no-ankle-frictionloss` 可用原 DR v3 训练。
-
-## 学习侧执行加速（2026-11-13）
+本节保留原加速分支的实施细节和历史实验。当前训练默认值见前表与服务器训练说明。
 
 新训练默认启用 `wm_trainer.cuda_graph`、`policy_trainer.cuda_graph` 和
 `policy_trainer.batch_reference_encoder`。这些开关控制学习侧执行方式。
@@ -487,7 +526,8 @@ G30 = r30 + 0.99*r31 + ... + 0.99^19*r49 + 0.99^20*V[bin(50)]
 
 先同步并切换到本分支，再在服务器项目目录运行。切换前应保存服务器自己的
 代码改动；以下命令不覆盖本地修改。默认eager参考FK、delay关闭、default动作、
-额外足部奖励关闭，使用 DR v4、混合 Muon 和 encoder goal 噪声：
+额外足部奖励关闭，采用 context v4，开启 encoder goal 噪声并关闭全部执行噪声。
+使用本次重脚标称模型、startup脚质量/四踝摩擦DR和膝限位资产，从头新建run：
 
 ```bash
 cd /home/jaka/Workspace/SuperMimic-Reproduced-jaka
@@ -497,8 +537,8 @@ git pull --ff-only origin codex/khan-muon-only
 
 bash scripts/training/train_khan_compact_server.sh \
   --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
-  --run-name khan_8452_muon_ankle_frictionloss_4096 \
-  --num-envs 4096 --optimizer muon
+  --run-name khan_8452_adam_clean_dr_v4_4096 \
+  --num-envs 4096
 ```
 
 开启参考 FK 编译时增加 `--reference-fk-compile`，并使用不同 run-name。
@@ -510,16 +550,16 @@ NPZ 混合库沿用原入口：
 ```bash
 bash scripts/training/train_khan_server.sh \
   --data-dir data/npz/khan_mini/mixed \
-  --run-name khan_mixed_muon_ankle_frictionloss_4096 \
-  --num-envs 4096 --optimizer muon
+  --run-name khan_mixed_dr_v3_footb_fricdr015_bias02_4096 \
+  --num-envs 4096 --ankle-encoder-bias 0.02 --no-neck-action-noise --no-actuator-delay
 ```
 
 两个 wrapper 都保留环境变量清理、路径/资产检查、已有 checkpoint 防覆盖和
-`--resume`、`--stop-after-iterations` 功能。只允许从相同本分支配置恢复；
+`--resume`、`--stop-after-iterations` 功能。只允许从相同配置和新资产训练的检查点恢复；
 `--stop-after-iterations` 不缩短正式 320k 学习率调度。
-旧 v3 残差＋足部奖励 run 续训时使用 `--no-ankle-frictionloss --reference-residual --foot-tracking`，
-并用 `--optimizer` 指定原优化器。v3 与 v4 的 WM、Critic 输入维度不同，
-训练入口会校验 checkpoint 的配置。
+使用可选残差、足部奖励或颈部噪声的run，续训时还需显式匹配相应开关；
+脚本不会从文件名猜测设置，训练入口会检查checkpoint兼容性。原资产的旧run不能
+通过增加这些开关变成兼容；应在原版本和原资产下恢复。
 
 ## 观察指标
 

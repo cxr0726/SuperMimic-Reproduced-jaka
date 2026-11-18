@@ -86,7 +86,7 @@
     "Neck_yaw_joint",
     "Neck_pitch_joint"
   ],
-  "training_semantics_version": 2,
+  "training_semantics_version": 5,
   "tracked_bodies": [
     "base_link",
     "Left_hip_roll_Link",
@@ -108,7 +108,7 @@
     "Left_ankle_roll_Link",
     "Right_ankle_roll_Link"
   ],
-  "foot_geom_regex": "^(Left|Right)_ankle_roll_Link_convex_collision$",
+  "foot_geom_regex": "^(Left|Right)_ankle_roll_Link_(rear|forefoot)_collision$",
   "initial_pos": [
     0.0,
     0.0,
@@ -320,7 +320,7 @@
       "velocity": 11.519
     },
     "Left_knee_joint": {
-      "lower": -0.349,
+      "lower": -0.15099473684210526,
       "upper": 2.2689,
       "effort": 120.0,
       "velocity": 11.519
@@ -356,7 +356,7 @@
       "velocity": 11.519
     },
     "Right_knee_joint": {
-      "lower": -0.349,
+      "lower": -0.15099473684210526,
       "upper": 2.2689,
       "effort": 120.0,
       "velocity": 11.519
@@ -464,6 +464,35 @@
       "velocity": 12.566
     }
   },
+  "joint_frictionloss": {
+    "Left_hip_pitch_joint": 0.1,
+    "Left_hip_roll_joint": 0.1,
+    "Left_hip_yaw_joint": 0.1,
+    "Left_knee_joint": 0.1,
+    "Left_ankle_pitch_joint": 0.1,
+    "Left_ankle_roll_joint": 0.1,
+    "Right_hip_pitch_joint": 0.1,
+    "Right_hip_roll_joint": 0.1,
+    "Right_hip_yaw_joint": 0.1,
+    "Right_knee_joint": 0.1,
+    "Right_ankle_pitch_joint": 0.1,
+    "Right_ankle_roll_joint": 0.1,
+    "waist_yaw_joint": 0.1,
+    "Left_shoulder_pitch_joint": 0.1,
+    "Left_shoulder_roll_joint": 0.1,
+    "Left_shoulder_yaw_joint": 0.1,
+    "Left_elbow_joint": 0.1,
+    "Left_wrist_roll_joint": 0.1,
+    "Left_wrist_yaw_joint": 0.1,
+    "Right_shoulder_pitch_joint": 0.1,
+    "Right_shoulder_roll_joint": 0.1,
+    "Right_shoulder_yaw_joint": 0.1,
+    "Right_elbow_joint": 0.1,
+    "Right_wrist_roll_joint": 0.1,
+    "Right_wrist_yaw_joint": 0.1,
+    "Neck_yaw_joint": 0.1,
+    "Neck_pitch_joint": 0.1
+  },
   "action_scale": {
     "Left_hip_pitch_joint": 0.5,
     "Left_hip_roll_joint": 0.5,
@@ -494,6 +523,68 @@
     "Neck_pitch_joint": 0.5
   },
   "parameter_overrides": {
+    "knee_lower_limit": {
+      "joint_names": [
+        "Left_knee_joint",
+        "Right_knee_joint"
+      ],
+      "source_limits": {
+        "Left_knee_joint": {
+          "lower": -0.349,
+          "upper": 2.2689,
+          "effort": 120.0,
+          "velocity": 11.519
+        },
+        "Right_knee_joint": {
+          "lower": -0.349,
+          "upper": 2.2689,
+          "effort": 120.0,
+          "velocity": 11.519
+        }
+      },
+      "effective_lower_limits": {
+        "Left_knee_joint": -0.15099473684210526,
+        "Right_knee_joint": -0.15099473684210526
+      },
+      "soft_lower_limit": -0.03,
+      "soft_joint_pos_limit_factor": 0.9,
+      "source": "user-requested hard lower limits yielding a -0.03 rad soft lower limit; upper limits unchanged"
+    },
+    "joint_frictionloss": {
+      "joint_names": [
+        "Left_hip_pitch_joint",
+        "Left_hip_roll_joint",
+        "Left_hip_yaw_joint",
+        "Left_knee_joint",
+        "Left_ankle_pitch_joint",
+        "Left_ankle_roll_joint",
+        "Right_hip_pitch_joint",
+        "Right_hip_roll_joint",
+        "Right_hip_yaw_joint",
+        "Right_knee_joint",
+        "Right_ankle_pitch_joint",
+        "Right_ankle_roll_joint",
+        "waist_yaw_joint",
+        "Left_shoulder_pitch_joint",
+        "Left_shoulder_roll_joint",
+        "Left_shoulder_yaw_joint",
+        "Left_elbow_joint",
+        "Left_wrist_roll_joint",
+        "Left_wrist_yaw_joint",
+        "Right_shoulder_pitch_joint",
+        "Right_shoulder_roll_joint",
+        "Right_shoulder_yaw_joint",
+        "Right_elbow_joint",
+        "Right_wrist_roll_joint",
+        "Right_wrist_yaw_joint",
+        "Neck_yaw_joint",
+        "Neck_pitch_joint"
+      ],
+      "value": 0.1,
+      "units": "N*m",
+      "randomized": false,
+      "source": "user-requested nominal all-hinge frictionloss, following PartyMimic RP1; runtime DR belongs to the environment"
+    },
     "waist_velocity_limit": {
       "source_config_value": 120.0,
       "effective_value": 11.519,
@@ -526,59 +617,6 @@
       },
       "effective_value": 0.01,
       "source": "user-requested alignment with audited jaka.py ankle settings"
-    },
-    "nonfoot_sliding_friction": {
-      "value": 1.0,
-      "source": "user-requested alignment with mjlab G1 non-foot contacts"
-    },
-    "foot_collision": {
-      "shape": "whole-foot CAD mesh convex hull, including instep",
-      "source": "existing URDF visual STL; identical to SDK whole-foot collision mesh",
-      "feet": {
-        "Left_ankle_roll_Link": {
-          "geom": "Left_ankle_roll_Link_convex_collision",
-          "mesh": "Left_ankle_roll_Link",
-          "source_collision_count": 7,
-          "effective_collision_count": 1
-        },
-        "Right_ankle_roll_Link": {
-          "geom": "Right_ankle_roll_Link_convex_collision",
-          "mesh": "Right_ankle_roll_Link",
-          "source_collision_count": 7,
-          "effective_collision_count": 1
-        }
-      },
-      "inertials": "preserved from URDF; collision geom density is zero"
-    },
-    "waist_collision_box": {
-      "geom": "waist_yaw_Link_45_collision",
-      "source_half_size_m": [
-        0.075,
-        0.1,
-        0.15
-      ],
-      "effective_half_size_m": [
-        0.075,
-        0.07,
-        0.15
-      ],
-      "source_full_size_m": [
-        0.15,
-        0.2,
-        0.3
-      ],
-      "effective_full_size_m": [
-        0.15,
-        0.14,
-        0.3
-      ],
-      "local_position_m": [
-        0.0,
-        0.0,
-        0.03
-      ],
-      "source": "user-requested narrower torso collision box",
-      "rationale": "Fit the 126--140 mm central visual shell; wider upper flanges are outside this simplified collision core. Preserve X/Z size, pose and explicit inertial properties"
     },
     "ankle_pitch_pd": {
       "joint_names": [
@@ -617,6 +655,113 @@
       "effective_stiffness": 20.0,
       "effective_damping": 1.0,
       "source": "user-requested alignment with audited jaka.py ankle settings"
+    },
+    "nonfoot_sliding_friction": {
+      "value": 1.0,
+      "source": "user-requested alignment with mjlab G1 non-foot contacts"
+    },
+    "foot_collision": {
+      "schema": "measured_rear_and_forefoot_convex_meshes",
+      "source": "foot_photo/foot3.jpg: rear width 87 mm, forefoot width 105 mm, toe to widest 56 mm, flare length 46 mm",
+      "dimensions_mm": {
+        "length": 202,
+        "heel_x": -75,
+        "rear_width": 87,
+        "forefoot_width": 105,
+        "toe_to_widest": 56,
+        "flare_length": 46,
+        "heel_cap_length": 34,
+        "edge_radius": 2,
+        "bottom_z": -48,
+        "sole_top_z": -38
+      },
+      "assumptions": "202 mm overall length; symmetric about the existing foot centerline; 34 mm heel cap and 2 mm bottom-edge fillet; upper profile from the CAD hull",
+      "feet": {
+        "Left_ankle_roll_Link": {
+          "geoms": [
+            "Left_ankle_roll_Link_rear_collision",
+            "Left_ankle_roll_Link_forefoot_collision"
+          ],
+          "source_collision_count": 7,
+          "effective_collision_count": 2
+        },
+        "Right_ankle_roll_Link": {
+          "geoms": [
+            "Right_ankle_roll_Link_rear_collision",
+            "Right_ankle_roll_Link_forefoot_collision"
+          ],
+          "source_collision_count": 7,
+          "effective_collision_count": 2
+        }
+      },
+      "inertials": "collision geom density is zero; foot_nominal_inertia separately records the mass/inertia correction"
+    },
+    "foot_nominal_inertia": {
+      "mass_delta_kg_per_body": 0.1,
+      "assumption": "uniform density increase on ankle_roll_Link only; fixed child bodies unchanged",
+      "com_and_principal_axes": "unchanged",
+      "bodies": {
+        "Left_ankle_roll_Link": {
+          "source_mass_kg": 0.48502,
+          "effective_mass_kg": 0.58502,
+          "inertia_scale": 1.2061770648633046,
+          "source_principal_inertia_kg_m2": [
+            0.0012700137038266434,
+            0.0010371,
+            0.0002633062961733568
+          ],
+          "effective_principal_inertia_kg_m2": [
+            0.001531861401617795,
+            0.0012509262339697332,
+            0.0003175940154784075
+          ]
+        },
+        "Right_ankle_roll_Link": {
+          "source_mass_kg": 0.48502,
+          "effective_mass_kg": 0.58502,
+          "inertia_scale": 1.2061770648633046,
+          "source_principal_inertia_kg_m2": [
+            0.0012700137038266434,
+            0.0010371,
+            0.0002633062961733568
+          ],
+          "effective_principal_inertia_kg_m2": [
+            0.001531861401617795,
+            0.0012509262339697332,
+            0.0003175940154784075
+          ]
+        }
+      }
+    },
+    "waist_collision_box": {
+      "geom": "waist_yaw_Link_45_collision",
+      "source_half_size_m": [
+        0.075,
+        0.1,
+        0.15
+      ],
+      "effective_half_size_m": [
+        0.075,
+        0.07,
+        0.15
+      ],
+      "source_full_size_m": [
+        0.15,
+        0.2,
+        0.3
+      ],
+      "effective_full_size_m": [
+        0.15,
+        0.14,
+        0.3
+      ],
+      "local_position_m": [
+        0.0,
+        0.0,
+        0.03
+      ],
+      "source": "user-requested narrower torso collision box",
+      "rationale": "Fit the 126--140 mm central visual shell; wider upper flanges are outside this simplified collision core. Preserve X/Z size, pose and explicit inertial properties"
     }
   },
   "contact_friction": {
@@ -635,9 +780,9 @@
     "nq": 34,
     "nv": 33,
     "nbody": 46,
-    "ngeom": 59,
-    "nmesh": 44,
-    "mass_kg": 40.8325349886391,
+    "ngeom": 61,
+    "nmesh": 48,
+    "mass_kg": 41.03253498863909,
     "initial_self_contacts": 0
   }
 }

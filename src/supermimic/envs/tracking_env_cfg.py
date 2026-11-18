@@ -35,6 +35,7 @@ from mjlab.viewer import ViewerConfig
 
 from supermimic.data.recorder import ReplayRecorderCfg
 from supermimic.envs.actions import NoisyJointPositionActionCfg
+from supermimic.envs.encoder_bias import khan_encoder_bias
 from supermimic.envs.mdp import observations as sm_obs
 from supermimic.envs.mdp import rewards as sm_rewards
 from supermimic.envs.mdp import terminations as sm_term
@@ -50,17 +51,16 @@ from supermimic.robots.registry import (
     G1_TRACKED_BODIES,
     RobotName,
     get_robot_spec,
+    resolve_action_noise_std,
     resolve_robot_environment,
 )
 from supermimic.sim_context import (
-    KHAN_ANKLE_FRICTIONLOSS_RANGE,
     KHAN_ANKLE_JOINTS,
     KHAN_FOOT_BODIES,
-    KHAN_FOOT_MASS_LAYOUTS,
     KHAN_LOWER_BODY_JOINTS,
-    KHAN_STARTUP_ARMATURE_LAYOUTS,
     ContextKind,
     resolve_context_layout,
+    validate_ankle_encoder_bias_half_range,
 )
 
 
@@ -87,7 +87,7 @@ class SuperMimicEnvCfgArgs:
     future_frames: int | None = None
     history_length: int | None = None
     episode_length_s: float = 10.0
-    action_noise_std: float = 0.1
+    action_noise_std: float | None = None  # Khan: clean collection; G1: 0.1.
     obs_noise: bool = True
     reset_noise: bool = True
     domain_randomization: bool = True
@@ -120,6 +120,7 @@ class SuperMimicEnvCfgArgs:
     foot_tracking: bool = False
     extra_command_kwargs: dict = field(default_factory=dict)
     disable_neck_action_noise: bool = False
+    ankle_encoder_bias_half_range: float = 0.01  # Legacy/direct API default; training passes its saved range.
 
 
 def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
@@ -127,6 +128,9 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     if a.disable_neck_action_noise and a.robot != "khan_mini":
         raise ValueError("disable_neck_action_noise is only supported for Khan Mini")
     a.context_layout = resolve_context_layout(a.robot, a.context_layout)
+    a.ankle_encoder_bias_half_range = validate_ankle_encoder_bias_half_range(
+        a.robot, a.ankle_encoder_bias_half_range,
+    )
     settings = resolve_robot_environment(
         a.robot, actuator_delay=a.actuator_delay,
         actuator_delay_max_ms=a.actuator_delay_max_ms,
@@ -148,8 +152,8 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     a.future_frames, a.history_length = resolve_observation_sizes(
         a.observation_layout, a.future_frames, a.history_length, a.anchor_obs,
     )
-    if a.foot_tracking and a.context_layout not in KHAN_FOOT_MASS_LAYOUTS:
-        raise ValueError("Extra foot rewards require a Khan DR v3 or v4 layout")
+    if a.foot_tracking and a.context_layout not in ("khan_dr_v3", "khan_dr_v4"):
+        raise ValueError("Extra foot rewards require the Khan DR v3 or v4 layout")
     tracking_rewards = TrackingRewardCfg.for_joint_names(
         robot_spec.joint_names, foot_tracking=a.foot_tracking,
     )
@@ -229,7 +233,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             actuator_names=(".*",),
             scale=robot_spec.action_scale,
             use_default_offset=True,
-            noise_std=a.action_noise_std,
+            noise_std=resolve_action_noise_std(a.robot, a.action_noise_std),
             noise_excluded_joint_names=robot_spec.neck_joint_names if a.disable_neck_action_noise else (),
             delay_reset_first_step_no_delay=a.delay_reset_first_step_no_delay,
         )
@@ -282,7 +286,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                 "asset_cfg": SceneEntityCfg("robot", body_names=(robot_spec.com_body,)),
                 "operation": "add",
                 "ranges": ({0: (-0.035, 0.035), 1: (-0.07, 0.07), 2: (-0.07, 0.07)}
-                           if a.context_layout in KHAN_STARTUP_ARMATURE_LAYOUTS else
+                           if a.context_layout in ("khan_dr_v2", "khan_dr_v3", "khan_dr_v4") else
                            {0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05)}),
             },
         )
@@ -291,6 +295,16 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             func=dr.encoder_bias,
             params={"asset_cfg": SceneEntityCfg("robot"), "bias_range": (-0.01, 0.01)},
         )
+        if a.robot == "khan_mini" and a.ankle_encoder_bias_half_range != 0.01:
+            events["encoder_bias"] = EventTermCfg(
+                mode="reset", func=khan_encoder_bias,
+                params={
+                    "asset_cfg": SceneEntityCfg(
+                        "robot", joint_names=KHAN_ANKLE_JOINTS, preserve_order=True,
+                    ),
+                    "ankle_half_range": a.ankle_encoder_bias_half_range,
+                },
+            )
         events["foot_friction"] = EventTermCfg(
             mode="reset",
             func=dr.geom_friction,
@@ -337,7 +351,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                     "operation": "add", "ranges": (-2.0, 3.0),
                 },
             )
-            if a.context_layout in KHAN_FOOT_MASS_LAYOUTS:
+            if a.context_layout in ("khan_dr_v3", "khan_dr_v4"):
                 # Independent point payloads at each foot body's authored COM.
                 # No assumed payload shape: COM and rotational inertia stay
                 # authored; the stock startup event refreshes model constants.
@@ -347,20 +361,18 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                         "asset_cfg": SceneEntityCfg(
                             "robot", body_names=KHAN_FOOT_BODIES, preserve_order=True,
                         ),
-                        "operation": "add", "ranges": (0.0, 0.2), "shared_random": False,
+                        "operation": "add", "ranges": (0.0, 0.15 if a.context_layout == "khan_dr_v4" else 0.2),
+                        "shared_random": False,
                     },
                 )
             if a.context_layout == "khan_dr_v4":
-                # Each simulated robot keeps its own four joint friction forces.
-                # The nominal model has zero frictionloss, so sample absolute values.
                 events["ankle_frictionloss"] = EventTermCfg(
                     mode="startup", func=dr.joint_friction,
                     params={
                         "asset_cfg": SceneEntityCfg(
                             "robot", joint_names=KHAN_ANKLE_JOINTS, preserve_order=True,
                         ),
-                        "operation": "abs", "ranges": KHAN_ANKLE_FRICTIONLOSS_RANGE,
-                        "shared_random": False,
+                        "operation": "add", "ranges": (0.0, 0.15), "shared_random": False,
                     },
                 )
     else:

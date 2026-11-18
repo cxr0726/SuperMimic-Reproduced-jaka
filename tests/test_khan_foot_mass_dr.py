@@ -18,7 +18,7 @@ from supermimic.envs.sim_context import SimContext
 from supermimic.envs.state_io import StateIO
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.robots.registry import get_robot_spec
-from supermimic.sim_context import KHAN_FOOT_BODIES, SimContextLayout
+from supermimic.sim_context import KHAN_ANKLE_JOINTS, KHAN_FOOT_BODIES, SimContextLayout
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.state_spec import StateSpec, StateSpecCfg
 from supermimic.world_model.wm_trainer import reference_at
@@ -76,11 +76,11 @@ def test_foot_payload_is_independent_startup_only_and_opt_in_by_context_version(
     assert set(nominal.events) == {"foot_friction"}
 
 
-def _make_env(*, randomized, foot_tracking=False):
+def _make_env(*, randomized, foot_tracking=False, context_layout="khan_dr_v3"):
     if not torch.cuda.is_available() or not NPZ.is_file():
         pytest.skip("needs CUDA and converted Khan LAFAN1")
     return make_env(SuperMimicEnvCfgArgs(
-        npz_files=[str(NPZ)], robot="khan_mini", context_layout="khan_dr_v3",
+        npz_files=[str(NPZ)], robot="khan_mini", context_layout=context_layout,
         foot_tracking=foot_tracking, num_envs=4, replay_capacity=64, action_noise_std=0., obs_noise=False,
         reset_noise=False, domain_randomization=randomized, actuator_delay=False,
         sampling_mode="start", seed=317,
@@ -99,7 +99,7 @@ def _readback(env, *, randomized):
     robot = env.scene["robot"]
     ctx = env.recorder_manager.get_term("replay").ctx
     xi = ctx.read()
-    assert xi.shape == (4, 101) and torch.isfinite(xi).all()
+    assert xi.shape == (4, ctx.layout.dim) and torch.isfinite(xi).all()
     foot_ids = torch.tensor([
         int(robot.indexing.body_ids[robot.body_names.index(name)]) for name in FEET
     ], device=env.device)
@@ -121,10 +121,25 @@ def _readback(env, *, randomized):
     v2 = SimContext(env, robot_spec.foot_geom_regex, robot_spec.com_body,
                     context_layout="khan_dr_v2")
     torch.testing.assert_close(xi[:, :99], v2.read(), rtol=0, atol=0)
-    spec = StateSpec(StateSpecCfg(context_layout="khan_dr_v3"), env.device, num_joints=27)
+    spec = StateSpec(StateSpecCfg(context_layout=ctx.layout.kind), env.device, num_joints=27)
     assert (spec.normalize_xi(xi).abs() <= 1 + 1e-5).all()
+    v4 = ctx.layout.kind == "khan_dr_v4"
+    if v4:
+        joint_ids = [robot.joint_names.index(name) for name in KHAN_ANKLE_JOINTS]
+        dofs = robot.indexing.joint_v_adr.reshape(-1)[joint_ids]
+        friction, default_friction = _world_field(env, "dof_frictionloss")
+        torch.testing.assert_close(xi[:, 101:105], friction[:, dofs], rtol=0, atol=0)
+        other_dofs = torch.ones(default_friction.shape, dtype=torch.bool, device=env.device)
+        other_dofs[dofs] = False
+        torch.testing.assert_close(friction[:, other_dofs], default_friction[other_dofs].expand(4, -1), rtol=0, atol=0)
+        if randomized:
+            assert ((xi[:, 101:] >= .1) & (xi[:, 101:] <= .25)).all()
+            assert (xi[:, 101:].std(dim=0) > 0).all()
+            assert not torch.equal(xi[:, 101], xi[:, 102])
+        else:
+            torch.testing.assert_close(xi[:, 101:], torch.full_like(xi[:, 101:], .1), rtol=0, atol=0)
     if randomized:
-        assert ((delta >= 0.) & (delta <= 0.2 + 1e-7)).all()
+        assert ((delta >= 0.) & (delta <= (0.15 if v4 else 0.2) + 1e-7)).all()
         assert not torch.equal(delta[:, 0], delta[:, 1])
         assert (delta.std(dim=0) > 0.005).all()
         assert ((xi[:, 97] >= -2.) & (xi[:, 97] <= 3.)).all()
@@ -132,7 +147,7 @@ def _readback(env, *, randomized):
         torch.testing.assert_close(delta, torch.zeros_like(delta), rtol=0, atol=0)
         torch.testing.assert_close(mass, nominal.expand_as(mass), rtol=0, atol=0)
         # A zero physical payload is the lower endpoint, not the centered mean.
-        torch.testing.assert_close(spec.normalize_xi(xi)[:, 99:],
+        torch.testing.assert_close(spec.normalize_xi(xi)[:, 99:101],
                                    -torch.ones_like(delta), rtol=0, atol=0)
     return xi
 
@@ -218,15 +233,16 @@ def _assert_reward_parity(env, *, foot_tracking):
 
 
 @pytest.mark.slow
-def test_startup_foot_payload_survives_partial_and_automatic_resets_with_matching_constants():
-    env = _make_env(randomized=True)
+@pytest.mark.parametrize("context_layout", ["khan_dr_v3", "khan_dr_v4"])
+def test_startup_foot_payload_survives_partial_and_automatic_resets_with_matching_constants(context_layout):
+    env = _make_env(randomized=True, context_layout=context_layout)
     try:
         startup_mass = _world_field(env, "body_mass")[0].clone()
         _assert_constants(env)
         env.reset(seed=317)
         rec = env.recorder_manager.get_term("replay")
         xi = _readback(env, randomized=True)
-        frozen_ids = [*range(28, 31), *range(85, 98), 99, 100]
+        frozen_ids = [*range(28, 31), *range(85, 98), *range(99, xi.shape[-1])]
         frozen = xi[:, frozen_ids].clone()
         constants = {name: _world_field(env, name)[0].clone() for name in DERIVED}
         ids = torch.tensor([1, 3], device=env.device)
@@ -255,15 +271,16 @@ def test_startup_foot_payload_survives_partial_and_automatic_resets_with_matchin
         for name in DERIVED:
             torch.testing.assert_close(_world_field(env, name)[0], constants[name], rtol=0, atol=0)
         _assert_constants(env)
-        assert rec.buffer.sample_starts(8, hist=5).xi.shape == (8, 101)
+        assert rec.buffer.sample_starts(8, hist=5).xi.shape == (8, xi.shape[-1])
     finally:
         env.close()
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("foot_tracking", [False, True])
-def test_nominal_v3_evaluation_has_no_foot_payload_and_matches_all_analytic_rewards(foot_tracking):
-    env = _make_env(randomized=False, foot_tracking=foot_tracking)
+@pytest.mark.parametrize("context_layout", ["khan_dr_v3", "khan_dr_v4"])
+def test_nominal_evaluation_has_no_foot_payload_and_matches_all_analytic_rewards(foot_tracking, context_layout):
+    env = _make_env(randomized=False, foot_tracking=foot_tracking, context_layout=context_layout)
     try:
         env.reset(seed=317)
         xi = _readback(env, randomized=False)

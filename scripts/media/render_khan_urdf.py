@@ -121,7 +121,7 @@ def render_urdf(urdf: Path, profile_path: Path, output_dir: Path) -> dict:
         model.geom_group[foot_visuals] = 5
         foot_canvas = Image.new("RGB", (3 * width, header + 2 * (height + banner) + footer), "#101722")
         draw = ImageDraw.Draw(foot_canvas)
-        draw.text((24, 16), "new.urdf: whole-foot convex collision hulls", fill="#f4f7fa", font=title_font)
+        draw.text((24, 16), "Khan foot collision geometry from new.urdf", fill="#f4f7fa", font=title_font)
         draw.text((24, 62), "Blue: explicit collision mesh, including instep and sole (visual surfaces hidden)",
                   fill="#d6e0eb", font=note_font)
         for row, name in enumerate(profile["foot_bodies"]):
@@ -148,9 +148,9 @@ def render_urdf(urdf: Path, profile_path: Path, output_dir: Path) -> dict:
                 draw.text((x + 14, y + 10), f"{'Left' if row == 0 else 'Right'} foot: {label}",
                           fill="#f4f7fa", font=label_font)
                 foot_canvas.paste(Image.fromarray(rgb), (x, y + banner))
-        draw.text((24, foot_canvas.height - 66), "One convex mesh per foot. This shows the exported URDF geometry, not an MJCF screenshot.",
+        draw.text((24, foot_canvas.height - 66), f"{len(feet)} collision meshes across both feet, loaded from the exported URDF.",
                   fill="#d6e0eb", font=note_font)
-        draw.text((24, foot_canvas.height - 36), "The convex hull fills CAD concavities; the original visual mesh remains unchanged.",
+        draw.text((24, foot_canvas.height - 36), "Each row shows one foot at the same pose from three angles.",
                   fill="#d6e0eb", font=note_font)
         path = output_dir / "foot_collision_views.png"
         foot_canvas.save(path)

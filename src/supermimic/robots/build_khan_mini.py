@@ -10,18 +10,24 @@ import re
 import shutil
 import tempfile
 import xml.etree.ElementTree as ET
+from dataclasses import asdict
 from pathlib import Path
 
 import mujoco
 import numpy as np
 
 from supermimic.robots.khan_mini import DEFAULT_ASSET_DIR, ROOT
+from supermimic.robots.khan_sole import SOLE_MM, sole_meshes
 
 DEFAULT_CONFIG = (
     ROOT / "ref_thirdparty/jaka_code/Textop/TextOpTracker/source/textop_tracker"
     "/textop_tracker/robots/K1L.py"
 )
 FOOT_BODIES = ("Left_ankle_roll_Link", "Right_ankle_roll_Link")
+KNEE_JOINTS = ("Left_knee_joint", "Right_knee_joint")
+KNEE_SOFT_LOWER_LIMIT = -0.03
+JOINT_FRICTIONLOSS = 0.1  # Nominal N*m; the training environment owns any friction DR.
+FOOT_NOMINAL_MASS_DELTA_KG = 0.1  # Same spatial distribution as the original foot body.
 # Fit the central torso shell (126--140 mm wide), not its wider upper flanges.
 # Depth, height and placement stay unchanged; this is a collision-core approximation.
 WAIST_COLLISION_HALF_SIZE = (0.075, 0.07, 0.15)
@@ -111,20 +117,27 @@ def _source_label(path: Path) -> str:
 
 
 def _precise_xml(spec: mujoco.MjSpec) -> str:
-    """Avoid to_xml()'s six-digit rounding of mass, inertia and transforms."""
+    """Avoid to_xml()'s six-digit rounding of physics and joint limits."""
     model = spec.compile()
     root = ET.fromstring(spec.to_xml())
 
     def vector(values) -> str:
         return " ".join(format(float(value), ".17g") for value in values)
 
+    for joint in root.findall(".//joint"):
+        if "range" in joint.attrib:
+            # Shortest round-trip decimals keep ordinary limits readable while
+            # retaining the exactly derived knee lower limit.
+            limits = spec.joint(joint.attrib["name"]).range
+            joint.set("range", " ".join(str(float(value)) for value in limits))
     for body in root.findall(".//body"):
         index = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body.attrib["name"])
         body.set("pos", vector(model.body_pos[index]))
         body.set("quat", vector(model.body_quat[index]))
         inertial = body.find("inertial")
         if inertial is not None:
-            inertial.set("mass", format(float(model.body_mass[index]), ".17g"))
+            mass = float(model.body_mass[index])
+            inertial.set("mass", str(mass) if body.attrib["name"] in FOOT_BODIES else format(mass, ".17g"))
             inertial.set("pos", vector(model.body_ipos[index]))
             inertial.set("quat", vector(model.body_iquat[index]))
             inertial.set("diaginertia", vector(model.body_inertia[index]))
@@ -153,9 +166,9 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
         "body_names": links, "root_body": "base_link", "anchor_body": "base_link",
         "com_body": "waist_yaw_Link",
         "neck_joint_names": ["Neck_yaw_joint", "Neck_pitch_joint"],
-        "training_semantics_version": 2,
+        "training_semantics_version": 5,
         "tracked_bodies": list(TRACKED_BODIES), "foot_bodies": list(FOOT_BODIES),
-        "foot_geom_regex": r"^(Left|Right)_ankle_roll_Link_convex_collision$",
+        "foot_geom_regex": r"^(Left|Right)_ankle_roll_Link_(rear|forefoot)_collision$",
         "initial_pos": source["initial_pos"], "standing_height": source["initial_pos"][2],
         "default_joint_pos": source["default_joint_pos"],
         "soft_joint_pos_limit_factor": source["soft_joint_pos_limit_factor"],
@@ -183,6 +196,20 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
         j.attrib["name"]: {k: float(v) for k, v in j.find("limit").attrib.items()}
         for j in joints
     }
+    # The profile's limits describe the effective MJCF (also used by ONNX
+    # metadata). Preserve the original URDF limits in the explicit override.
+    source_knee_limits = {name: dict(profile["urdf_limits"][name]) for name in KNEE_JOINTS}
+    factor = float(profile["soft_joint_pos_limit_factor"])
+    if not 0 < factor <= 1:
+        raise ValueError("Knee soft-limit conversion requires a factor in (0, 1]")
+    for name in KNEE_JOINTS:
+        upper = profile["urdf_limits"][name]["upper"]
+        # soft_lower = ((1 + factor) * lower + (1 - factor) * upper) / 2
+        lower = (2 * KNEE_SOFT_LOWER_LIMIT - (1 - factor) * upper) / (1 + factor)
+        if lower >= upper:
+            raise ValueError(f"Invalid knee range for {name}")
+        profile["urdf_limits"][name]["lower"] = lower
+    profile["joint_frictionloss"] = dict.fromkeys(joint_names, JOINT_FRICTIONLOSS)
     # Local corrections requested for Khan_mini. Keep the third-party input
     # unchanged and make the overrides explicit so rebuilding preserves them.
     original_waist_velocity = profile["velocity_limit"]["waist_yaw_joint"]
@@ -204,6 +231,21 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
     profile["damping"].update(dict.fromkeys(ankle_roll_names, 1.0))
     profile["action_scale"] = dict.fromkeys(joint_names, 0.5)
     profile["parameter_overrides"] = {
+        "knee_lower_limit": {
+            "joint_names": list(KNEE_JOINTS),
+            "source_limits": source_knee_limits,
+            "effective_lower_limits": {name: profile["urdf_limits"][name]["lower"] for name in KNEE_JOINTS},
+            "soft_lower_limit": KNEE_SOFT_LOWER_LIMIT,
+            "soft_joint_pos_limit_factor": factor,
+            "source": "user-requested hard lower limits yielding a -0.03 rad soft lower limit; upper limits unchanged",
+        },
+        "joint_frictionloss": {
+            "joint_names": joint_names,
+            "value": JOINT_FRICTIONLOSS,
+            "units": "N*m",
+            "randomized": False,
+            "source": "user-requested nominal all-hinge frictionloss, following PartyMimic RP1; runtime DR belongs to the environment",
+        },
         "waist_velocity_limit": {
             "source_config_value": original_waist_velocity,
             "effective_value": profile["velocity_limit"]["waist_yaw_joint"],
@@ -269,6 +311,8 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
     spec.body("base_link").pos = source["initial_pos"]
     for name in joint_names:
         spec.joint(name).armature = profile["armature"][name]
+        spec.joint(name).frictionloss = profile["joint_frictionloss"][name]
+        spec.joint(name).range = [profile["urdf_limits"][name][key] for key in ("lower", "upper")]
     for index, geom in enumerate(spec.geoms):
         if geom.group == 1:
             geom.name = f"{geom.parent.name}_{index}_visual"
@@ -286,11 +330,8 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
             geom.rgba = [0.2, 0.6, 0.2, 0.3]
             if source["replace_cylinders_with_capsules"] and geom.type == mujoco.mjtGeom.mjGEOM_CYLINDER:
                 geom.type = mujoco.mjtGeom.mjGEOM_CAPSULE
-    # The simplified URDF has seven sole capsules per foot. Use the existing
-    # whole-foot CAD mesh, as in the SDK model, so collision includes the instep.
-    # MuJoCo collides meshes using their convex hull. Reuse the visual mesh's raw
-    # pose (not the compiled, recentered mesh pose) and keep training contact
-    # masks/friction/priority. Explicit URDF inertials remain authoritative.
+    # Compile once to read the CAD in the ankle frame and the authored body inertials.
+    reference_model = spec.compile()
     foot_shapes = {}
     for body_name in FOOT_BODIES:
         body = spec.body(body_name)
@@ -299,27 +340,60 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
         if (len(visuals) != 1 or visuals[0].type != mujoco.mjtGeom.mjGEOM_MESH
                 or len(collisions) != 7):
             raise ValueError(f"Expected one whole-foot visual mesh and seven sole collisions: {body_name}")
-        visual, collision = visuals[0], collisions[0]
-        collision.name = f"{body_name}_convex_collision"
-        collision.type = mujoco.mjtGeom.mjGEOM_MESH
-        collision.meshname = visual.meshname
-        collision.pos = np.array(visual.pos)
-        collision.quat = np.array(visual.quat)
-        collision.size[:] = 0
-        collision.density = 0
-        for obsolete in collisions[1:]:
+        meshes = sole_meshes(reference_model, visuals[0].name)
+        geom_names = []
+        for collision, (part, vertices) in zip(collisions[:len(meshes)], meshes.items(), strict=True):
+            mesh_name = f"{body_name}_{part}"
+            spec.add_mesh(name=mesh_name, uservert=vertices.ravel())
+            collision.name = f"{mesh_name}_collision"
+            collision.type = mujoco.mjtGeom.mjGEOM_MESH
+            collision.meshname = mesh_name
+            collision.pos = [0, 0, 0]
+            collision.quat = [1, 0, 0, 0]
+            collision.size[:] = 0
+            collision.density = 0
+            geom_names.append(collision.name)
+        for obsolete in collisions[len(meshes):]:
             spec.delete(obsolete)
         foot_shapes[body_name] = {
-            "geom": collision.name,
-            "mesh": visual.meshname,
+            "geoms": geom_names,
             "source_collision_count": len(collisions),
-            "effective_collision_count": 1,
+            "effective_collision_count": len(meshes),
         }
     profile["parameter_overrides"]["foot_collision"] = {
-        "shape": "whole-foot CAD mesh convex hull, including instep",
-        "source": "existing URDF visual STL; identical to SDK whole-foot collision mesh",
+        "schema": "measured_rear_and_forefoot_convex_meshes",
+        "source": "foot_photo/foot3.jpg: rear width 87 mm, forefoot width 105 mm, toe to widest 56 mm, flare length 46 mm",
+        "dimensions_mm": asdict(SOLE_MM),
+        "assumptions": "202 mm overall length; symmetric about the existing foot centerline; 34 mm heel cap and 2 mm bottom-edge fillet; upper profile from the CAD hull",
         "feet": foot_shapes,
-        "inertials": "preserved from URDF; collision geom density is zero",
+        "inertials": "collision geom density is zero; foot_nominal_inertia separately records the mass/inertia correction",
+    }
+    # Correct the known foot mass deficit as a uniform density change. Keep
+    # body pose, COM and principal axes; only these two bodies get heavier.
+    foot_inertials = {}
+    for name in FOOT_BODIES:
+        body = spec.body(name)
+        original = reference_model.body(name)
+        source_mass = float(original.mass[0])
+        target_mass = source_mass + FOOT_NOMINAL_MASS_DELTA_KG
+        scale = target_mass / source_mass
+        body.mass = target_mass
+        if np.isfinite(body.fullinertia).all():
+            body.fullinertia[:] *= scale
+        else:
+            body.inertia[:] *= scale
+        foot_inertials[name] = {
+            "source_mass_kg": source_mass,
+            "effective_mass_kg": target_mass,
+            "inertia_scale": scale,
+            "source_principal_inertia_kg_m2": original.inertia.tolist(),
+            "effective_principal_inertia_kg_m2": (original.inertia * scale).tolist(),
+        }
+    profile["parameter_overrides"]["foot_nominal_inertia"] = {
+        "mass_delta_kg_per_body": FOOT_NOMINAL_MASS_DELTA_KG,
+        "assumption": "uniform density increase on ankle_roll_Link only; fixed child bodies unchanged",
+        "com_and_principal_axes": "unchanged",
+        "bodies": foot_inertials,
     }
     waist_boxes = [
         geom for geom in spec.geoms
@@ -344,7 +418,8 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
     }
     # Export only portable mesh paths; MuJoCo may resolve URDF filenames absolutely.
     for mesh in spec.meshes:
-        mesh.file = str(Path("meshes") / Path(mesh.file).name)
+        if mesh.file:
+            mesh.file = str(Path("meshes") / Path(mesh.file).name)
     # Compile relative files against the converted URDF's directory.
     xml_path = stage / "robot.xml"
     xml_path.write_text(_precise_xml(spec))
@@ -381,7 +456,8 @@ def _convert(urdf_path: Path, config_path: Path, source: dict, stage: Path) -> N
         "conversion": {
             "fixed_links": "preserved", "visual_meshes": "preserved",
             "freejoint": "floating_base", "cylinders": "capsules with original radius/axis half-length",
-            "foot_collisions": "seven sole capsules replaced by each existing whole-foot CAD mesh convex hull; training contact parameters and explicit inertials preserved",
+            "foot_collisions": "measured rear and forefoot convex pieces joined at the start of the flare, with CAD instep and rounded sole edges",
+            "foot_inertials": "each ankle_roll_Link mass +0.1 kg, inertia scaled by the mass ratio, COM and principal axes retained",
             "actuators": "created by get_khan_mini_cfg from profile.json",
             "velocity_limits": "recorded only; not enforced by builtin position servos",
             "contacts": "self-collision masks retained; feet condim=3, other contacts condim=1",

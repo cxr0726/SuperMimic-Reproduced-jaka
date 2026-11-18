@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from supermimic.robots.contracts import robot_contract, validate_robot_contract
+from supermimic.robots.contracts import robot_contract, robot_contract_differences, validate_robot_contract
 
 
 def test_legacy_g1_stays_compatible_but_legacy_khan_is_not_silently_reinterpreted():
@@ -75,6 +75,7 @@ def test_saved_nondefault_delay_and_reset_semantics_are_validated():
 @pytest.mark.parametrize("field,value", [
     ("actuator_delay", False), ("actuator_delay_max_ms", 10.0),
     ("reset_root_z_offset", 0.0), ("domain_randomization", False),
+    ("action_noise_std", 0.1),
 ])
 def test_resume_rejects_changed_delay_or_reset_before_loading_weights(tmp_path, field, value):
     from dataclasses import asdict
@@ -99,3 +100,53 @@ def test_resume_rejects_changed_delay_or_reset_before_loading_weights(tmp_path, 
     # No networks are constructed: reject incompatible semantics before loading.
     with pytest.raises(ValueError, match="Checkpoint environment semantics differ"):
         trainer.load(path)
+
+
+def test_fixed_joint_physics_and_neck_noise_are_saved_without_expanding_dr_v3():
+    settings = {"context_layout": "khan_dr_v3", "foot_tracking": False,
+                "disable_neck_action_noise": True, "action_noise_std": 0.1}
+    contract = robot_contract("khan_mini", env_config=settings)
+    assert contract["version"] == 12
+    physics = contract["nominal_joint_physics"]
+    assert physics["training_semantics_version"] == 5
+    assert contract["simulation_schema"]["foot_collision"] == "measured_rear_and_forefoot_convex_meshes"
+    assert physics["joint_frictionloss_nm"] == dict.fromkeys(contract["joint_names"], 0.1)
+    assert physics["joint_frictionloss_randomized"] is False
+    assert physics["knee_soft_lower_limit_rad"] == -0.03
+    for name in ("Left_knee_joint", "Right_knee_joint"):
+        lo, hi = physics["joint_position_limits_rad"][name]
+        assert hi == 2.2689
+        assert lo + 0.05 * (hi - lo) == pytest.approx(-0.03, abs=1e-12)
+    assert contract["simulation_schema"]["xi_dim"] == 101
+    assert contract["simulation_schema"]["world_model_input_dim"] == 195
+    assert contract["observation_schema"]["critic_input_dim"] == 615
+    noise = contract["execution_noise_schema"]
+    assert noise["disabled_joint_names"] == ["Neck_yaw_joint", "Neck_pitch_joint"]
+    assert noise["other_joint_std_normalized"] == 0.1
+    checkpoint = {"config": {"env": settings}, "robot_contract": contract}
+    validate_robot_contract(checkpoint, "khan_mini")
+    checkpoint["config"]["env"] = {**settings, "disable_neck_action_noise": False}
+    with pytest.raises(ValueError, match="execution_noise_schema"):
+        validate_robot_contract(checkpoint, "khan_mini")
+
+
+def test_range_format_migration_accepts_only_the_audited_xml_pair():
+    current = robot_contract("khan_mini")
+    expected = deepcopy(current)
+    expected["model_sha256"] = "db6bc5d5192deeaceafb1f5c7ece4bbec7ae6a8ba3e196323077502903320294"
+    saved = deepcopy(expected)
+    saved["model_sha256"] = "ec825ef0e79e9b68782f2bbbe564aec63a686c129a6664c2109508202e77a1e8"
+    assert not robot_contract_differences(saved, expected)
+    # Neither historical spelling is equivalent to the heavier nominal feet.
+    for historical in (saved, expected):
+        assert "model_sha256" in robot_contract_differences(historical, current)
+        with pytest.raises(ValueError, match="model_sha256"):
+            validate_robot_contract({"robot_contract": historical}, "khan_mini")
+    saved = deepcopy(current)
+    saved["profile_sha256"] = "different physics"
+    with pytest.raises(ValueError, match="profile_sha256"):
+        validate_robot_contract({"robot_contract": saved}, "khan_mini")
+    saved["profile_sha256"] = current["profile_sha256"]
+    saved["model_sha256"] = "unverified XML"
+    with pytest.raises(ValueError, match="model_sha256"):
+        validate_robot_contract({"robot_contract": saved}, "khan_mini")

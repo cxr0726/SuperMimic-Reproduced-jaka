@@ -45,7 +45,7 @@
     <origin xyz="0 0.12485 0" rpy="0 0 0" />
     <axis xyz="0 1 0" />
     <limit lower="-1.9198" upper="1.2217" effort="120" velocity="11.52" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Left_hip_roll_Link">
     <inertial>
@@ -69,7 +69,7 @@
     <origin xyz="0 0 -0.025000000000000001" rpy="0 0 0" />
     <axis xyz="1 0 0" />
     <limit lower="-0.52359999999999995" upper="2.3561999999999999" effort="120" velocity="11.52" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Left_hip_yaw_Link">
     <inertial>
@@ -93,7 +93,7 @@
     <origin xyz="0 0 0" rpy="0 0 0" />
     <axis xyz="0 0 1" />
     <limit lower="-2.0070999999999999" upper="3.5779000000000001" effort="120" velocity="11.52" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Left_knee_Link">
     <inertial>
@@ -122,8 +122,8 @@
     <child link="Left_knee_Link" />
     <origin xyz="0 0 -0.27505000000000002" rpy="0 0 0" />
     <axis xyz="0 1 0" />
-    <limit lower="-0.34899999999999998" upper="2.2688999999999999" effort="120" velocity="11.52" />
-    <dynamics damping="0" friction="0" />
+    <limit lower="-0.15099473684210526" upper="2.2688999999999999" effort="120" velocity="11.52" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Left_ankle_pitch_Link">
     <inertial>
@@ -147,13 +147,13 @@
     <origin xyz="0 0 -0.29999999999999999" rpy="0 0 0" />
     <axis xyz="0 -1 0" />
     <limit lower="-0.52359999999999995" upper="0.61080000000000001" effort="96" velocity="14.6" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Left_ankle_roll_Link">
     <inertial>
       <origin xyz="0.013731 3.6954000000000001e-11 -0.034294999999999999" rpy="0 0 0" />
-      <mass value="0.48502000000000001" />
-      <inertia ixx="0.00026352000000000005" ixy="2.6680998642176056e-12" ixz="1.4665999999999925e-05" iyy="0.0010371" iyz="-2.0881991409591043e-14" izz="0.0012698000000000004" />
+      <mass value="0.58501999999999998" />
+      <inertia ixx="0.00031785178013277811" ixy="3.2182008629841735e-12" ixz="1.7689792833285134e-05" iyy="0.0012509262339697332" iyz="-2.5187379106921292e-14" izz="0.0015316036369634246" />
     </inertial>
     <visual name="Left_ankle_roll_Link_8_visual">
       <origin xyz="0 0 0" rpy="0 0 0" />
@@ -164,10 +164,16 @@
         <color rgba="0.22352999448776245 0.22352999448776245 0.22352999448776245 1" />
       </material>
     </visual>
-    <collision name="Left_ankle_roll_Link_convex_collision">
-      <origin xyz="0.010701064064218961 -6.0434693847028406e-06 -0.032404654429706123" rpy="3.1378305318689828 -1.4728971327785698 0.0039574299553475356" />
+    <collision name="Left_ankle_roll_Link_rear_collision">
+      <origin xyz="-0.018177636633091878 1.0947847006147251e-10 -0.022729829224502899" rpy="0 -1.4336287203976605 3.1415926535897931" />
       <geometry>
-        <mesh filename="meshes/collision_hulls/Left_ankle_roll_Link_convex_collision.obj" />
+        <mesh filename="meshes/collision_hulls/Left_ankle_roll_Link_rear_collision.obj" />
+      </geometry>
+    </collision>
+    <collision name="Left_ankle_roll_Link_forefoot_collision">
+      <origin xyz="0.062827888494806555 6.9197341841331635e-09 -0.030577177925013788" rpy="-3.1415914469429822 -1.3256746477001993 -1.2438275478476868e-06" />
+      <geometry>
+        <mesh filename="meshes/collision_hulls/Left_ankle_roll_Link_forefoot_collision.obj" />
       </geometry>
     </collision>
   </link>
@@ -177,7 +183,7 @@
     <origin xyz="0 0 0" rpy="0 0 0" />
     <axis xyz="1 0 0" />
     <limit lower="-0.34899999999999998" upper="0.34899999999999998" effort="96" velocity="14.6" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="left_ankle_base_Link">
     <inertial>
@@ -348,7 +354,7 @@
     <origin xyz="0 -0.12485 0" rpy="0 0 0" />
     <axis xyz="0 1 0" />
     <limit lower="-1.9198" upper="1.2217" effort="120" velocity="11.52" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Right_hip_roll_Link">
     <inertial>
@@ -372,7 +378,7 @@
     <origin xyz="0 0 -0.025000000000000001" rpy="0 0 0" />
     <axis xyz="-1 0 0" />
     <limit lower="-0.52359999999999995" upper="3.5779000000000001" effort="120" velocity="11.52" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Right_hip_yaw_Link">
     <inertial>
@@ -396,7 +402,7 @@
     <origin xyz="0 0 0" rpy="0 0 0" />
     <axis xyz="0 0 -1" />
     <limit lower="-2.0070999999999999" upper="3.5779000000000001" effort="120" velocity="11.52" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Right_knee_Link">
     <inertial>
@@ -425,8 +431,8 @@
     <child link="Right_knee_Link" />
     <origin xyz="0 0 -0.27505000000000002" rpy="0 0 0" />
     <axis xyz="0 1 0" />
-    <limit lower="-0.34899999999999998" upper="2.2688999999999999" effort="120" velocity="11.52" />
-    <dynamics damping="0" friction="0" />
+    <limit lower="-0.15099473684210526" upper="2.2688999999999999" effort="120" velocity="11.52" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Right_ankle_pitch_Link">
     <inertial>
@@ -450,13 +456,13 @@
     <origin xyz="0 0 -0.29999999999999999" rpy="0 0 0" />
     <axis xyz="0 -1 0" />
     <limit lower="-0.52359999999999995" upper="0.61080000000000001" effort="96" velocity="14.6" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Right_ankle_roll_Link">
     <inertial>
       <origin xyz="0.013731 8.4158000000000006e-11 -0.034294999999999999" rpy="0 0 0" />
-      <mass value="0.48502000000000001" />
-      <inertia ixx="0.00026352000000000005" ixy="2.902100003035735e-12" ixz="1.4665999999999929e-05" iyy="0.0010371" iyz="-2.9595999229924186e-13" izz="0.0012698000000000004" />
+      <mass value="0.58501999999999998" />
+      <inertia ixx="0.00031785178013277811" ixy="3.5004464636014298e-12" ixz="1.7689792833285138e-05" iyy="0.0012509262339697332" iyz="-3.5698015482846558e-13" izz="0.0015316036369634246" />
     </inertial>
     <visual name="Right_ankle_roll_Link_29_visual">
       <origin xyz="0 0 0" rpy="0 0 0" />
@@ -467,10 +473,16 @@
         <color rgba="0.22352999448776245 0.22352999448776245 0.22352999448776245 1" />
       </material>
     </visual>
-    <collision name="Right_ankle_roll_Link_convex_collision">
-      <origin xyz="0.010721075121361921 7.2792435446435012e-06 -0.032422061753961291" rpy="-3.1375940620810052 -1.4731905070170548 -0.0042127232608517584" />
+    <collision name="Right_ankle_roll_Link_rear_collision">
+      <origin xyz="-0.018177636402275342 -9.6399241538278626e-11 -0.022729829474760994" rpy="0 -1.4336287063216944 3.1415926535897931" />
       <geometry>
-        <mesh filename="meshes/collision_hulls/Right_ankle_roll_Link_convex_collision.obj" />
+        <mesh filename="meshes/collision_hulls/Right_ankle_roll_Link_rear_collision.obj" />
+      </geometry>
+    </collision>
+    <collision name="Right_ankle_roll_Link_forefoot_collision">
+      <origin xyz="0.062827888475376625 6.9816705963305881e-09 -0.030577177890951279" rpy="-3.141591440422288 -1.3256746465422578 -1.2505491662206936e-06" />
+      <geometry>
+        <mesh filename="meshes/collision_hulls/Right_ankle_roll_Link_forefoot_collision.obj" />
       </geometry>
     </collision>
   </link>
@@ -480,7 +492,7 @@
     <origin xyz="0 0 0" rpy="0 0 0" />
     <axis xyz="-1 0 0" />
     <limit lower="-0.34899999999999998" upper="0.34899999999999998" effort="96" velocity="14.6" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Right_ankle_base_Link">
     <inertial>
@@ -657,7 +669,7 @@
     <origin xyz="0 0 0.22384999999999999" rpy="0 0 0" />
     <axis xyz="0 0 1" />
     <limit lower="-2.0070999999999999" upper="3.5779000000000001" effort="120" velocity="11.519" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="IMU_Link">
     <inertial>
@@ -723,7 +735,7 @@
     <origin xyz="0 0.16702 0.15332999999999999" rpy="0 0 0" />
     <axis xyz="0 0.98480744882115179 0.1736499028113023" />
     <limit lower="-1.5707" upper="1.5707" effort="96" velocity="11.5" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Left_shoulder_roll_Link">
     <inertial>
@@ -747,7 +759,7 @@
     <origin xyz="0 0 0" rpy="0 0 0" />
     <axis xyz="1 0 0" />
     <limit lower="-1.9189000000000001" upper="1.9189000000000001" effort="96" velocity="11.5" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Left_shoulder_yaw_Link">
     <inertial>
@@ -777,7 +789,7 @@
     <origin xyz="0 0 0" rpy="0 0 0" />
     <axis xyz="0 0.98480744882115179 0.1736499028113023" />
     <limit lower="-1.5707" upper="1.5707" effort="36" velocity="15.699999999999999" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Left_elbow_Link">
     <inertial>
@@ -807,7 +819,7 @@
     <origin xyz="0 0.18706 0.032983999999999999" rpy="0 0 0" />
     <axis xyz="0 0.1736499028113023 -0.98480744882115179" />
     <limit lower="-0.87260000000000004" upper="2.2688999999999999" effort="36" velocity="15.699999999999999" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Left_wrist_roll_Link">
     <inertial>
@@ -837,7 +849,7 @@
     <origin xyz="0 0 0" rpy="0 0 0" />
     <axis xyz="0 0.98480744882115179 0.1736499028113023" />
     <limit lower="-1.5707" upper="1.5707" effort="8" velocity="12.5" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Left_wrist_yaw_Link">
     <inertial>
@@ -867,7 +879,7 @@
     <origin xyz="0 0.18662000000000001 0.032905999999999998" rpy="0 0 0" />
     <axis xyz="0 0.1736499028113023 -0.98480744882115179" />
     <limit lower="0" upper="1.5707" effort="8" velocity="12.5" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Right_shoulder_pitch_Link">
     <inertial>
@@ -891,7 +903,7 @@
     <origin xyz="0 -0.16702 0.15332999999999999" rpy="0 0 0" />
     <axis xyz="0 0.98480744882115179 -0.1736499028113023" />
     <limit lower="-1.5707" upper="1.5707" effort="96" velocity="11.5" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Right_shoulder_roll_Link">
     <inertial>
@@ -915,7 +927,7 @@
     <origin xyz="0 0 0" rpy="0 0 0" />
     <axis xyz="-1 0 0" />
     <limit lower="-1.9189000000000001" upper="1.9189000000000001" effort="96" velocity="11.5" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Right_shoulder_yaw_Link">
     <inertial>
@@ -945,7 +957,7 @@
     <origin xyz="0 0 0" rpy="0 0 0" />
     <axis xyz="0 0.98480744882115179 -0.1736499028113023" />
     <limit lower="-1.5707" upper="1.5707" effort="36" velocity="15.699999999999999" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Right_elbow_Link">
     <inertial>
@@ -975,7 +987,7 @@
     <origin xyz="0 -0.18706 0.032983999999999999" rpy="0 0 0" />
     <axis xyz="0 0.1736499028113023 0.98480744882115179" />
     <limit lower="-0.87260000000000004" upper="2.2688999999999999" effort="36" velocity="15.699999999999999" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Right_wrist_roll_Link">
     <inertial>
@@ -1005,7 +1017,7 @@
     <origin xyz="0 0 0" rpy="0 0 0" />
     <axis xyz="0 0.98480744882115179 -0.1736499028113023" />
     <limit lower="-1.5707" upper="1.5707" effort="8" velocity="12.5" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Right_wrist_yaw__Link">
     <inertial>
@@ -1035,7 +1047,7 @@
     <origin xyz="0 -0.18662000000000001 0.032905999999999998" rpy="0 0 0" />
     <axis xyz="0 0.1736499028113023 0.98480744882115179" />
     <limit lower="0" upper="1.5707" effort="8" velocity="12.5" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Neck_yaw_Link">
     <inertial>
@@ -1059,7 +1071,7 @@
     <origin xyz="0 0 0.26000000000000001" rpy="0 0 0" />
     <axis xyz="0 0 1" />
     <limit lower="-1.5707" upper="1.5707" effort="8" velocity="8" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Neck_pitch_Link">
     <inertial>
@@ -1083,7 +1095,7 @@
     <origin xyz="0 0 0" rpy="0 0 0" />
     <axis xyz="0 1 0" />
     <limit lower="-0.61080000000000001" upper="0.61080000000000001" effort="8" velocity="8" />
-    <dynamics damping="0" friction="0" />
+    <dynamics damping="0" friction="0.10000000000000001" />
   </joint>
   <link name="Camera_Link">
     <inertial>

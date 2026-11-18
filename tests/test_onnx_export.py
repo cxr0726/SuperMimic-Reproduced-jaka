@@ -51,6 +51,18 @@ def _metadata(path):
     return model, {item.key: item.value for item in model.metadata_props}
 
 
+def test_export_rejects_older_collision_model_even_with_equivalent_range_spelling(checkpoint, tmp_path):
+    from supermimic.deployment.onnx_export import export_policy
+
+    ckpt, _, saved = checkpoint
+    saved["robot_contract"]["model_sha256"] = (
+        "ec825ef0e79e9b68782f2bbbe564aec63a686c129a6664c2109508202e77a1e8"
+    )
+    torch.save(saved, ckpt)
+    with pytest.raises(ValueError, match="model_sha256"):
+        export_policy(ckpt, tmp_path / "historical_collision.onnx", validation_samples=2)
+
+
 @pytest.mark.parametrize("layout", ["packed", "split"])
 def test_exported_actor_matches_pytorch_for_dynamic_batches(checkpoint, tmp_path, layout):
     from supermimic.deployment.onnx_export import export_policy
@@ -86,10 +98,17 @@ def test_exported_actor_matches_pytorch_for_dynamic_batches(checkpoint, tmp_path
         assert value.data_location != onnx.TensorProto.EXTERNAL
 
 
-def test_export_metadata_preserves_current_robot_and_observation_semantics(checkpoint, tmp_path):
+@pytest.mark.parametrize("context_layout", ["khan_dr_v1", "khan_dr_v4"])
+def test_export_metadata_preserves_current_robot_and_observation_semantics(
+    checkpoint, tmp_path, context_layout,
+):
     from supermimic.deployment.onnx_export import export_policy
 
     ckpt, _, saved = checkpoint
+    env_config = saved["config"]["env"]
+    env_config.update(context_layout=context_layout, action_noise_std=0.0)
+    saved["robot_contract"] = robot_contract("khan_mini", "isaac_khan", env_config=env_config)
+    torch.save(saved, ckpt)
     output = tmp_path / "actor.onnx"
     export_policy(ckpt, output, validation_samples=4)
     model, metadata = _metadata(output)
@@ -101,10 +120,21 @@ def test_export_metadata_preserves_current_robot_and_observation_semantics(check
         ("joint_damping", "damping"),
         ("default_joint_pos", "default_joint_pos"),
         ("action_scale", "action_scale"),
+        ("joint_frictionloss", "joint_frictionloss"),
     ):
         actual = np.fromstring(metadata[key], sep=",")
         expected = [profile[profile_key][name] for name in names]
         np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
+    assert json.loads(metadata["joint_frictionloss_randomized_in_training"]) is (
+        context_layout == "khan_dr_v4"
+    )
+    lower = np.fromstring(metadata["joint_pos_lower"], sep=",")
+    upper = np.fromstring(metadata["joint_pos_upper"], sep=",")
+    factor = float(metadata["soft_joint_pos_limit_factor"])
+    for name in ("Left_knee_joint", "Right_knee_joint"):
+        index = names.index(name)
+        soft_lower = lower[index] + (1 - factor) * (upper[index] - lower[index]) / 2
+        assert soft_lower == pytest.approx(-0.03, abs=1e-12)
     assert metadata["anchor_body_name"] == "base_link"
     assert metadata["body_names"].split(",") == profile["tracked_bodies"]
     assert metadata["observation_names"].split(",") == [

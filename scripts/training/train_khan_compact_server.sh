@@ -5,7 +5,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 NUM_ENVS=4096
-RUN_NAME=khan_8452_muon_ankle_frictionloss_4096
+RUN_NAME=khan_8452_adam_clean_dr_v4_4096
 LIBRARY="$PROJECT_DIR/data/pt/khan_combined_8452_compact.pt"
 REFERENCE_FK_COMPILE=0
 RESUME=''
@@ -15,14 +15,14 @@ UPDATE_CAPTURE=1
 BATCH_REFERENCE_ENCODER=1
 LEARNER_FUSION=1
 REPLAY_SAMPLING=''
-OPTIMIZER=muon
+OPTIMIZER=adam
 ACTUATOR_DELAY=False
 ACTION_MODE=default
 FOOT_TRACKING=0
 CONTEXT_LAYOUT=khan_dr_v4
+ANKLE_ENCODER_BIAS_HALF_RANGE=0.02
 GOAL_NOISE_Z=0.01
 GOAL_NOISE_JOINT_POS=0.05
-DISABLE_NECK_ACTION_NOISE=0
 
 usage() {
     cat <<'HELP'
@@ -33,19 +33,22 @@ Uses the same training entry point and current network/optimization defaults
 as train_khan_server.sh: encoder 1024/512/256, decoder 2048/1024/512/256,
 actor EMA 0.995, H=32, batch=2048/4096, UTD=0.4, 320k LR schedule,
 Isaac observation layout with future/history 5/5, goal 155, policy 465.
-WM, Actor and Critic use hybrid Muon: hidden matrices use Muon with decay 0.1;
-input/output Linear weights, biases and LayerNorm use fused capturable Adam with
-zero decay. --optimizer adam selects the previous Adam path for all three.
-Network/state tensors stay FP32; Muon's Newton-Schulz calculation internally uses BF16.
+WM, Actor and Critic use Adam. Whole-update CUDA Graph capture, compiler
+fusion, batched reference encoding and the CDF replay sampler are enabled.
+Physical collection passes the Actor action through with zero execution noise.
+Use --optimizer muon to select hybrid Muon for a separate run.
 The encoder goal has uniform z +/-0.01 m and q +/-0.05 rad noise; critic/reward
 stay clean. The default run uses q_default + 0.5 * actor_output actions and disables
 the extra foot pos/ori rewards (raw reward cap 0.112). --reference-residual
 opts in to raw clean q_ref(t+1) + 0.5 * decoder_output (beta 1). Only the encoder
 goal is noise-augmented and running-normalized; the optional reference skip
 uses raw joint positions in radians. --foot-tracking restores extra foot rewards.
-DR v4 adds independent left/right pitch/roll joint frictionloss sampled once
-per environment at startup, U(0.05, 0.25) N m per ankle axis, to DR v3.
-This gives xi 105 and critic 619 (DR v3: 101 and 615).
+Khan uses measured rear and forefoot colliders and a knee soft lower limit
+of -0.03 rad. All 27 hinges have a nominal frictionloss of 0.1 N m. DR v4 adds
+independent startup U(0,0.15) N m to each of the four ankle axes and U(0,0.15) kg
+to each foot. Episode-held encoder bias is +/-0.02 rad on the ankles and
++/-0.01 rad elsewhere. DR v4 gives xi 105 and critic 619. DR v3 gives 101 and
+615, with nominal ankle frictionloss and startup foot payload U(0,0.2) kg.
 Actuator delay is disabled by default for this server experiment; --actuator-delay
 enables held 0–20 ms delay with an immediate first control step.
 Reset clearance remains 0.05 m and first-step action-rate is unchanged. Every
@@ -62,7 +65,7 @@ its effect on total training throughput depends on the target GPU.
 Options:
   --library PATH             Packed compact .pt file (default: project data/pt/khan_combined_8452_compact.pt)
   --num-envs N               Parallel robot environments (default: 4096)
-  --run-name NAME            Directory under project logs/ (default: khan_8452_muon_ankle_frictionloss_4096)
+  --run-name NAME            Directory under project logs/ (default: khan_8452_adam_clean_dr_v4_4096)
   --reference-fk-compile     Compile current/imagination reference FK on CUDA
   --no-reference-fk-compile  Use eager reference FK (default)
   --no-reference-residual    Use default-pose actions (default)
@@ -70,10 +73,10 @@ Options:
   --no-foot-tracking         Disable extra foot pos/ori rewards (default)
   --foot-tracking            Enable extra foot pos/ori rewards, weights 0.25/0.25
   --ankle-frictionloss       Randomize four ankle axes with DR v4 (default)
-  --no-ankle-frictionloss    Use DR v3 with the nominal ankle frictionloss
+  --no-ankle-frictionloss    Use DR v3 with nominal ankle frictionloss and U(0,0.2) kg foot payload
+  --ankle-encoder-bias RAD   Ankle encoder bias half-range (default: 0.02 rad)
   --no-goal-noise            Disable encoder goal augmentation
   --goal-noise               Enable Isaac encoder goal noise (default)
-  --no-neck-action-noise     Set execution noise to zero on both neck axes; keep std 0.1 on the other 25
   --no-actuator-delay        Disable actuator delay (default for this server experiment)
   --actuator-delay           Enable held 0–20 ms delay; first control step is immediate
   --update-capture          Capture full WM and Actor/Critic updates (default; single GPU)
@@ -83,7 +86,7 @@ Options:
   --learner-fusion          Compile full WM window and Actor/Critic blocks (default)
   --no-learner-fusion       Use the d98f4df single-step compilation boundary
   --replay-sampling MODE    cdf (default) or multinomial; same legal-pair distribution
-  --optimizer MODE          muon (default) or adam; selects WM, Actor and Critic together
+  --optimizer MODE          adam (default) or muon; selects WM, Actor and Critic together
   --resume PATH              Restore a Khan checkpoint with matching data/configuration/assets
   --stop-after-iterations N  Optional execution limit; retains the 320k LR schedule
   --dry-run                 Check paths and print command without executing Python or training
@@ -92,8 +95,8 @@ Options:
 Use a new run-name for a fresh run; existing checkpoints are never silently
 overwritten. Dry-run checks file paths, not the tensors or metadata inside .pt.
 Training validates library/robot metadata and checkpoint compatibility.
-Start a fresh run when changing optimizer algorithms. To resume an Adam run,
-pass --optimizer adam; training rejects optimizer/checkpoint algorithm mismatch.
+Use matching model assets, action noise and optimizer settings for resume.
+Start a fresh run when changing any of those settings.
 Use train_khan_server.sh --data-dir PATH for a directory of full NPZ motions.
 HELP
 }
@@ -119,9 +122,9 @@ while (($#)); do
         --foot-tracking) FOOT_TRACKING=1; shift ;;
         --no-ankle-frictionloss) CONTEXT_LAYOUT=khan_dr_v3; shift ;;
         --ankle-frictionloss) CONTEXT_LAYOUT=khan_dr_v4; shift ;;
+        --ankle-encoder-bias) need_value "$@"; ANKLE_ENCODER_BIAS_HALF_RANGE="$2"; shift 2 ;;
         --no-goal-noise) GOAL_NOISE_Z=0.0; GOAL_NOISE_JOINT_POS=0.0; shift ;;
         --goal-noise) GOAL_NOISE_Z=0.01; GOAL_NOISE_JOINT_POS=0.05; shift ;;
-        --no-neck-action-noise) DISABLE_NECK_ACTION_NOISE=1; shift ;;
         --no-actuator-delay) ACTUATOR_DELAY=False; shift ;;
         --actuator-delay) ACTUATOR_DELAY=True; shift ;;
         --update-capture) UPDATE_CAPTURE=1; shift ;;
@@ -139,6 +142,8 @@ while (($#)); do
 done
 
 positive_integer "$NUM_ENVS" || die '--num-envs must be a positive integer'
+[[ "$ANKLE_ENCODER_BIAS_HALF_RANGE" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || \
+    die '--ankle-encoder-bias must be a nonnegative decimal in radians'
 [[ -z "$REPLAY_SAMPLING" || "$REPLAY_SAMPLING" == cdf || "$REPLAY_SAMPLING" == multinomial ]] || die '--replay-sampling must be cdf or multinomial'
 [[ "$OPTIMIZER" == muon || "$OPTIMIZER" == adam ]] || die '--optimizer must be muon or adam'
 [[ -z "$STOP_AFTER" ]] || positive_integer "$STOP_AFTER" || \
@@ -193,14 +198,12 @@ command=(
     --policy.action-mode "$ACTION_MODE"
     --policy.goal-noise-z "$GOAL_NOISE_Z" --policy.goal-noise-joint-pos "$GOAL_NOISE_JOINT_POS"
     --env.actuator-delay "$ACTUATOR_DELAY" --env.delay-reset-first-step-no-delay True
+    --env.action-noise-std 0.0 --env.ankle-encoder-bias-half-range "$ANKLE_ENCODER_BIAS_HALF_RANGE"
     --env.merge-short-tail-bins True --env.tail-bin-merge-fraction 1.0
     --env.reset-min-remaining-steps 32
     --wm-trainer.optimizer "$OPTIMIZER"
     --policy-trainer.optimizer "$OPTIMIZER" --policy-trainer.critic-optimizer "$OPTIMIZER"
 )
-if ((DISABLE_NECK_ACTION_NOISE)); then
-    command+=(--env.disable-neck-action-noise)
-fi
 # Additional foot rewards are independent of foot payload randomization.
 RAW_REWARD_CAP=0.112
 CRITIC_UPPER_BOUND=11.2
@@ -242,13 +245,13 @@ fi
 printf '[INFO] Khan compact library: %s\n' "$LIBRARY"
 printf '[INFO] Reference FK: %s; parallel environments: %s; learning batch: 4096; H: 32\n' \
     "$REFERENCE_FK_MODE" "$NUM_ENVS"
-printf '[INFO] Learner execution: full-update capture=%s; batched reference encoder=%s; collection/reset unchanged\n' "$UPDATE_CAPTURE" "$BATCH_REFERENCE_ENCODER"
+printf '[INFO] Learner execution: full-update capture=%s; batched reference encoder=%s\n' "$UPDATE_CAPTURE" "$BATCH_REFERENCE_ENCODER"
 printf '[INFO] Learner fusion=%s; replay sampling=%s; FP32 model/state tensors and original learning budget retained\n' "$LEARNER_FUSION" "${REPLAY_SAMPLING:-cdf}"
 if [[ "$OPTIMIZER" == muon ]]; then
     printf '[INFO] WM/Actor/Critic optimizer: hybrid Muon; hidden matrices Muon (decay 0.1); input/output weights and vectors fused capturable Adam (decay 0); live LR follows cosine schedule\n'
     printf '[INFO] Muon Newton-Schulz internally uses BF16; network autocast remains OFF\n'
 else
-    printf '[INFO] WM/Actor/Critic optimizer: Adam; previous optimizer path; use this to resume matching Adam checkpoints\n'
+    printf '[INFO] WM/Actor/Critic optimizer: Adam; zero weight decay; CUDA Graph-compatible when capture is enabled\n'
 fi
 printf '[INFO] Khan observations: future/history 5/5; goal 155; policy 465; activation recomputation: OFF\n'
 printf '[INFO] Actor hidden defaults: encoder 1024/512/256; decoder 2048/1024/512/256; EMA decay 0.995; training uses live, inference auto-selects EMA\n'
@@ -260,16 +263,18 @@ else
     printf '[INFO] Actions: reference_residual; PD target=raw clean q_ref(t+1) + 0.5*decoder_output; beta 1\n'
 fi
 printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; then running normalization; critic/reward stay clean\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
-if ((DISABLE_NECK_ACTION_NOISE)); then
-    printf '[INFO] Execution action noise std: 0 on Neck_yaw_joint and Neck_pitch_joint; 0.1 on the other 25 joints\n'
-fi
+printf '[INFO] Physical collection execution noise: 0 on all 27 joints\n'
+printf '[INFO] Episode encoder bias: four ankle axes +/- %s rad; other 23 axes +/- 0.01 rad\n' "$ANKLE_ENCODER_BIAS_HALF_RANGE"
+printf '[INFO] Knee soft lower -0.03 rad; nominal frictionloss 0.1 N m on all 27 hinges\n'
 if [[ "$CONTEXT_LAYOUT" == khan_dr_v4 ]]; then
-    printf '[INFO] Khan DR v4: xi 105; critic 619; ankle frictionloss: four independent U(0.05,0.25) N m samples per environment at startup\n'
+    printf '[INFO] Khan DR v4: xi 105; critic 619; four ankles add independent startup U(0,0.15) N m\n'
+    FOOT_PAYLOAD_MAX=0.15
 else
     printf '[INFO] Khan DR v3: xi 101; critic 615; ankle frictionloss: nominal\n'
+    FOOT_PAYLOAD_MAX=0.2
 fi
 printf '[INFO] Kp/Kd x0.8-1.2 per reset; 12 leg armatures x0.8-1.2 at startup; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$ACTUATOR_DELAY"
-printf '[INFO] Foot payload: independent left/right U(0,0.2) kg at startup, authored COM/inertia retained\n'
+printf '[INFO] Feet: nominal ankle_roll_Link mass 0.58502 kg; independent startup payload U(0,%s) kg per foot, authored COM/inertia retained\n' "$FOOT_PAYLOAD_MAX"
 if ((FOOT_TRACKING)); then
     printf '[INFO] Extra foot pos/ori rewards: ON, weights 0.25/0.25; raw reward cap %s\n' "$RAW_REWARD_CAP"
 else
@@ -277,7 +282,7 @@ else
 fi
 printf '[INFO] Waist local COM offset at startup: x +/-0.035 m, y/z +/-0.07 m\n'
 printf '[INFO] Reset bins: merge every incomplete final bin; require >=32 remaining reference steps; first-step action-rate unchanged\n'
-printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; full convex feet\n'
+printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; measured rear and forefoot colliders\n'
 printf '[COMMAND]'
 printf ' %q' "${command[@]}"
 printf '\n'

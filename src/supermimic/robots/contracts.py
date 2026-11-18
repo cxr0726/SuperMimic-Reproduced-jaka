@@ -9,15 +9,13 @@ from supermimic.envs.mdp.rewards import TrackingRewardCfg
 from supermimic.observation_layout import resolve_observation_layout
 from supermimic.robots.registry import RobotName, get_robot_spec, resolve_robot_environment
 from supermimic.sim_context import (
-    KHAN_ANKLE_FRICTIONLOSS_RANGE,
     KHAN_ANKLE_JOINTS,
     KHAN_FOOT_BODIES,
-    KHAN_FOOT_MASS_LAYOUTS,
     KHAN_LOWER_BODY_JOINTS,
-    KHAN_STARTUP_ARMATURE_LAYOUTS,
     ContextKind,
     SimContextLayout,
     resolve_context_layout,
+    validate_ankle_encoder_bias_half_range,
 )
 
 
@@ -61,11 +59,23 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
         "action_scale": spec.action_scale,
     }
     if robot == "khan_mini":
-        from supermimic.robots.khan_mini import DEFAULT_ASSET_DIR
+        from supermimic.robots.khan_mini import DEFAULT_ASSET_DIR, load_profile
 
         # Neither equal tensor widths nor matching body names prove equal physics.
         contract["model_sha256"] = hashlib.sha256((DEFAULT_ASSET_DIR / "robot.xml").read_bytes()).hexdigest()
         contract["profile_sha256"] = hashlib.sha256((DEFAULT_ASSET_DIR / "profile.json").read_bytes()).hexdigest()
+        profile = load_profile()
+        contract["nominal_joint_physics"] = {
+            "training_semantics_version": profile["training_semantics_version"],
+            "joint_frictionloss_nm": profile["joint_frictionloss"],
+            "joint_frictionloss_randomized": False,
+            "joint_position_limits_rad": {
+                name: [profile["urdf_limits"][name][key] for key in ("lower", "upper")]
+                for name in spec.joint_names
+            },
+            "soft_joint_pos_limit_factor": profile["soft_joint_pos_limit_factor"],
+            "knee_soft_lower_limit_rad": profile["parameter_overrides"]["knee_lower_limit"]["soft_lower_limit"],
+        }
         layout = resolve_observation_layout(robot, observation_layout)
         contract["version"] = 6
         contract["observation_layout"] = layout
@@ -103,7 +113,8 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
             },
             "reset_offset_scope": "actual_robot_only_all_resets_including_nominal_evaluation",
             "reference_height_offset": 0.0,
-            "foot_collision": "one_full_CAD_convex_mesh_per_foot",
+            "foot_collision": profile["parameter_overrides"]["foot_collision"].get(
+                "schema", "one_full_CAD_convex_mesh_per_foot"),
         }
         # Missing/False preserves v6 byte-for-byte for historical checkpoint
         # validation. New training records its distinct reset queue semantics.
@@ -114,7 +125,7 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
                 "delay_initial_pending_target": "first_processed_command_after_encoder_bias",
                 "delay_reset_scope": "only_reset_worlds_first_control_step_all_substeps",
             })
-        if kind in KHAN_STARTUP_ARMATURE_LAYOUTS:
+        if kind in ("khan_dr_v2", "khan_dr_v3", "khan_dr_v4"):
             contract["version"] = 8
             schema = contract["simulation_schema"]
             del schema["ankle_armature_joint_order"]
@@ -129,23 +140,16 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
                 "mode": "startup", "body": spec.com_body, "frame": "body_local",
             }
         foot_tracking = checkpoint_foot_tracking({"robot": robot, "env": env_config})
-        if foot_tracking and kind not in KHAN_FOOT_MASS_LAYOUTS:
-            raise ValueError("Extra foot rewards require a Khan DR v3 or v4 layout")
-        if kind in KHAN_FOOT_MASS_LAYOUTS:
+        if foot_tracking and kind not in ("khan_dr_v3", "khan_dr_v4"):
+            raise ValueError("Extra foot rewards require the Khan DR v3 or v4 layout")
+        if kind in ("khan_dr_v3", "khan_dr_v4"):
             contract["version"] = 9 if foot_tracking else 10
             contract["simulation_schema"]["foot_mass_body_order"] = list(KHAN_FOOT_BODIES)
             contract["simulation_schema"]["dynamics_randomization"]["foot_mass_delta_kg"] = {
-                "range": [0.0, 0.2], "mode": "startup", "independent_per_body": True,
+                "range": [0.0, 0.15 if kind == "khan_dr_v4" else 0.2],
+                "mode": "startup", "independent_per_body": True,
                 "bodies": list(KHAN_FOOT_BODIES), "operation": "add_to_nominal",
                 "inertia": "unchanged_COM_point_mass", "com": "unchanged",
-            }
-        if kind == "khan_dr_v4":
-            contract["version"] = 11
-            schema["ankle_frictionloss_joint_order"] = list(KHAN_ANKLE_JOINTS)
-            randomization["ankle_frictionloss"] = {
-                "model_field": "dof_frictionloss", "unit": "N*m",
-                "range": list(KHAN_ANKLE_FRICTIONLOSS_RANGE), "mode": "startup",
-                "operation": "abs", "independent_per_joint": True,
             }
         if foot_tracking:
             foot_reward = TrackingRewardCfg.for_joint_names(spec.joint_names, foot_tracking=True)
@@ -156,6 +160,53 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
                 "aggregation": "mean_of_per_foot_exponentials",
                 "physical_and_imagined": True,
                 "max_step_reward": foot_reward.max_step_reward,
+            }
+        noise_std = env_config.get("action_noise_std", 0.1)
+        neck_mask = env_config.get("disable_neck_action_noise", False)
+        if noise_std == 0:
+            contract["execution_noise_schema"] = {
+                "std_normalized": 0.0,
+                "replay_action": "clean_policy_action",
+                "last_action_and_action_rate": "clean_policy_action",
+            }
+        elif neck_mask:
+            contract["version"] = 12
+            contract["execution_noise_schema"] = {
+                "disabled_joint_names": list(profile["neck_joint_names"]),
+                "other_joint_std_normalized": noise_std,
+                "rng_sampling": "full_action_tensor_before_neck_mask",
+                "replay_action": "executed_after_noise_mask",
+                "last_action_and_action_rate": "clean_policy_action",
+            }
+        elif noise_std not in (None, 0.1):
+            contract["execution_noise_schema"] = {
+                "std_normalized": noise_std,
+                "replay_action": "executed_after_noise",
+                "last_action_and_action_rate": "clean_policy_action",
+            }
+        # Missing means the historical +/-0.01 rad draw. Keep those contracts
+        # byte-for-byte identical, including explicit legacy resume overrides.
+        ankle_bias = validate_ankle_encoder_bias_half_range(
+            robot, env_config.get("ankle_encoder_bias_half_range", 0.01),
+        )
+        if ankle_bias != 0.01:
+            contract["version"] = 13
+            contract["simulation_schema"]["dynamics_randomization"]["encoder_bias_rad"] = {
+                "ankle_joint_names": list(KHAN_ANKLE_JOINTS),
+                "ankle_range": [-ankle_bias, ankle_bias], "other_range": [-0.01, 0.01],
+                "mode": "reset", "independent_per_joint": True,
+                "observation": "q_plus_bias", "physical_target": "command_minus_bias",
+                "xi": "actual_bias_in_radians", "xi_divisor_rad": 0.01,
+            }
+        if kind == "khan_dr_v4":
+            contract["version"] = 14
+            contract["nominal_foot_inertials"] = profile["parameter_overrides"]["foot_nominal_inertia"]
+            contract["nominal_joint_physics"]["joint_frictionloss_randomized"] = env_config.get("domain_randomization", True)
+            contract["simulation_schema"]["ankle_frictionloss_joint_order"] = list(KHAN_ANKLE_JOINTS)
+            contract["simulation_schema"]["dynamics_randomization"]["ankle_frictionloss_nm"] = {
+                "delta_range": [0.0, 0.15], "nominal": 0.1, "total_range": [0.1, 0.25],
+                "mode": "startup", "independent_per_joint": True,
+                "operation": "add_to_nominal", "xi": "actual_total_frictionloss_nm",
             }
         if layout == "isaac_khan":
             contract["observation_schema"] = {
@@ -205,6 +256,21 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
     return contract
 
 
+def robot_contract_differences(saved: dict, expected: dict) -> list[str]:
+    """Compare contracts, allowing only the audited range-formatting migration."""
+    differences = {key for key in set(saved) | set(expected) if saved.get(key) != expected.get(key)}
+    # 81c5b42's .17g ranges and their shortest-round-trip spelling compile to
+    # identical physics. No other model/profile/config change is exempted.
+    equivalent_xml = {
+        "ec825ef0e79e9b68782f2bbbe564aec63a686c129a6664c2109508202e77a1e8",
+        "db6bc5d5192deeaceafb1f5c7ece4bbec7ae6a8ba3e196323077502903320294",
+    }
+    if (saved.get("robot") == expected.get("robot") == "khan_mini"
+            and {saved.get("model_sha256"), expected.get("model_sha256")} == equivalent_xml):
+        differences.discard("model_sha256")
+    return sorted(differences)
+
+
 def validate_robot_contract(checkpoint: dict, robot: RobotName, observation_layout: str = "auto") -> None:
     saved = checkpoint.get("robot_contract")
     if saved is None:
@@ -219,6 +285,6 @@ def validate_robot_contract(checkpoint: dict, robot: RobotName, observation_layo
         )
     expected = robot_contract(robot, observation_layout,
                               env_config=checkpoint.get("config", {}).get("env", {}))
-    differences = sorted(key for key in set(saved) | set(expected) if saved.get(key) != expected.get(key))
+    differences = robot_contract_differences(saved, expected)
     if differences:
         raise ValueError("Checkpoint robot_contract differs from current model: " + ", ".join(differences))

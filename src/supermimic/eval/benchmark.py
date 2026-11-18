@@ -24,11 +24,7 @@ from supermimic.observation_layout import (
     resolve_observation_sizes,
 )
 from supermimic.policy.nets import Policy, PolicyCfg
-from supermimic.robots.contracts import (
-    checkpoint_context_layout,
-    checkpoint_foot_tracking,
-    validate_robot_contract,
-)
+from supermimic.robots.contracts import checkpoint_context_layout, checkpoint_foot_tracking, validate_robot_contract
 from supermimic.robots.registry import RobotName, get_robot_spec
 from supermimic.sim_context import ContextKind
 

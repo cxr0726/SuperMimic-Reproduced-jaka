@@ -20,7 +20,7 @@ from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.observation_layout import goal_dimension
 from supermimic.policy.nets import Critic, Policy
-from supermimic.robots.contracts import robot_contract, validate_robot_contract
+from supermimic.robots.contracts import robot_contract, robot_contract_differences, validate_robot_contract
 from supermimic.robots.registry import get_robot_spec
 from supermimic.training.distributed import (
     allreduce_mean,
@@ -237,6 +237,7 @@ class Trainer:
                 episode_length_s=cfg.env.episode_length_s,
                 action_noise_std=cfg.env.action_noise_std,
                 disable_neck_action_noise=cfg.env.disable_neck_action_noise,
+                ankle_encoder_bias_half_range=cfg.env.ankle_encoder_bias_half_range,
                 obs_noise=cfg.env.obs_noise,
                 reset_noise=cfg.env.reset_noise,
                 domain_randomization=cfg.env.domain_randomization,
@@ -436,10 +437,13 @@ class Trainer:
                 "use matching settings or start a new run"
             )
         validate_robot_contract(ck, self.cfg.robot, self.cfg.env.observation_layout)
-        if self.cfg.robot == "khan_mini" and ck["robot_contract"] != robot_contract(
+        if self.cfg.robot == "khan_mini" and robot_contract_differences(ck["robot_contract"], robot_contract(
             self.cfg.robot, self.cfg.env.observation_layout, env_config=asdict(self.cfg.env),
-        ):
-            raise ValueError("Checkpoint environment semantics differ (delay/reset/DR/reward); start a new run or use matching settings")
+        )):
+            raise ValueError(
+                "Checkpoint environment semantics differ (delay/reset/DR/reward/execution noise); "
+                "start a new run or use matching settings"
+            )
         if self.cfg.policy.action_mode == "reference_residual":
             for key in ("reference_q_default", "reference_action_scale"):
                 actual = ck["policy"].get(key)

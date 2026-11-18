@@ -57,8 +57,7 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
     assert khan.terminations["root_tilt"].params["threshold"] == 0.8
     assert khan.terminations["time_out"].time_out and khan.terminations["clip_end"].time_out
     assert set(khan.events) - set(g1.events) == (
-        {"actuator_gains", "lower_body_armature", "waist_mass", "foot_mass", "ankle_frictionloss"}
-        if randomized else set()
+        {"actuator_gains", "lower_body_armature", "waist_mass", "foot_mass", "ankle_frictionloss"} if randomized else set()
     )
     for name in g1.events:
         a, b = asdict(khan.events[name]), asdict(g1.events[name])
@@ -91,7 +90,7 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
         foot_mass = khan.events["foot_mass"]
         assert foot_mass.mode == "startup"
         assert foot_mass.params["operation"] == "add"
-        assert foot_mass.params["ranges"] == (0.0, 0.2)
+        assert foot_mass.params["ranges"] == (0.0, 0.15)
         assert foot_mass.params["shared_random"] is False
         assert foot_mass.params["asset_cfg"].body_names == (
             "Left_ankle_roll_Link", "Right_ankle_roll_Link",
@@ -118,8 +117,9 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
     action_a, action_b = asdict(khan.actions["joint_pos"]), asdict(g1.actions["joint_pos"])
     assert set(action_a.pop("scale").values()) == {0.5}
     assert action_b.pop("scale") == G1_ACTION_SCALE
+    assert action_a.pop("noise_std") == 0.0
+    assert action_b.pop("noise_std") == 0.1
     assert action_a == action_b
-    assert action_a["noise_std"] == 0.1
     command_a, command_b = asdict(khan.commands["motion"]), asdict(g1.commands["motion"])
     assert command_a.pop("g_max") == pytest.approx(11.2)
     assert command_b.pop("g_max") == pytest.approx(10.0)
@@ -176,7 +176,7 @@ def test_robot_bindings_and_g1_compatibility_defaults():
     model = khan.load_model()
     assert all(name in [model.body(i).name for i in range(model.nbody)] for name in khan.tracked_bodies)
     feet = [i for i in range(model.ngeom) if re.fullmatch(khan.foot_geom_regex, model.geom(i).name)]
-    assert len(feet) == 2
+    assert len(feet) == 4
     assert (model.geom_type[feet] == mujoco.mjtGeom.mjGEOM_MESH).all()
     assert (model.geom_priority[feet] == 1).all() and (model.geom_condim[feet] == 3).all()
     assert cfg.scene.entities["robot"].articulation.soft_joint_pos_limit_factor == 0.9

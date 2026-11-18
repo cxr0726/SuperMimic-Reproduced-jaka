@@ -14,7 +14,8 @@ from supermimic.robots.registry import get_robot_spec
 NECK = ("Neck_yaw_joint", "Neck_pitch_joint")
 
 
-def test_only_named_neck_actions_are_excluded_after_the_standard_noise_draw():
+@pytest.mark.parametrize("noise_std", [0.0, 0.1])
+def test_only_named_neck_actions_are_excluded_after_the_standard_noise_draw(noise_std):
     joint_names = get_robot_spec("khan_mini").joint_names
     neck = [joint_names.index(name) for name in NECK]
     other = [i for i, name in enumerate(joint_names) if name not in NECK]
@@ -41,7 +42,7 @@ def test_only_named_neck_actions_are_excluded_after_the_standard_noise_draw():
 
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(413)
-        expected = actions + 0.1 * torch.randn_like(actions)
+        expected = actions + noise_std * torch.randn_like(actions) if noise_std else actions.clone()
         expected_rng = torch.random.get_rng_state()
 
         for exclusions in ((), NECK):
@@ -49,6 +50,7 @@ def test_only_named_neck_actions_are_excluded_after_the_standard_noise_draw():
                 entity_name="robot",
                 actuator_names=(".*",),
                 scale=0.5,
+                noise_std=noise_std,
                 use_default_offset=True,
                 clip={".*": (-0.3, 0.3)},
                 noise_excluded_joint_names=exclusions,
@@ -71,7 +73,7 @@ def test_only_named_neck_actions_are_excluded_after_the_standard_noise_draw():
 
 
 def test_environment_toggle_leaves_observations_rewards_and_randomization_unchanged():
-    options = {"npz_files": ["unused.npz"], "robot": "khan_mini"}
+    options = {"npz_files": ["unused.npz"], "robot": "khan_mini", "action_noise_std": 0.1}
     default = make_env_cfg(SuperMimicEnvCfgArgs(**options))
     masked = make_env_cfg(SuperMimicEnvCfgArgs(**options, disable_neck_action_noise=True))
     before = asdict(default.actions["joint_pos"])

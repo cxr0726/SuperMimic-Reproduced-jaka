@@ -40,6 +40,7 @@ def test_new_khan_training_primes_delay_and_requires_horizon():
 def test_explicit_old_delay_and_unmerged_bins_remain_available():
     cfg = TrainConfig(robot="khan_mini")
     cfg.env.context_layout = "khan_dr_v1"
+    cfg.env.action_noise_std = 0.1  # The historical delay/bin checkpoint collected noisy actions.
     cfg.env.actuator_delay = True
     cfg.env.delay_reset_first_step_no_delay = False
     cfg.env.merge_short_tail_bins = False

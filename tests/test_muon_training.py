@@ -134,15 +134,16 @@ def test_real_model_parameter_groups_match_official_per_mlp_rule(role):
             assert id(linear.bias) in {id(parameter) for parameter in actual_adam}
 
 
-def test_training_defaults_select_muon_but_standalone_trainers_keep_legacy_adam():
+def test_training_defaults_select_adam_and_keep_full_learner_capture():
     from supermimic.imagination.policy_trainer import PolicyTrainerCfg
     from supermimic.world_model.wm_trainer import WMTrainerCfg
 
     cfg = TrainConfig()
-    assert cfg.wm_trainer.optimizer == "muon"
-    assert cfg.policy_trainer.optimizer == cfg.policy_trainer.critic_optimizer == "muon"
-    assert cfg.wm_trainer.muon_weight_decay == .1
-    assert cfg.policy_trainer.muon_weight_decay == cfg.policy_trainer.critic_muon_weight_decay == .1
+    assert cfg.wm_trainer.optimizer == "adam"
+    assert cfg.policy_trainer.optimizer == cfg.policy_trainer.critic_optimizer == "adam"
+    assert cfg.wm_trainer.cuda_graph and cfg.wm_trainer.compile_full_window
+    assert cfg.policy_trainer.cuda_graph and cfg.policy_trainer.compile_networks
+    assert cfg.policy_trainer.batch_reference_encoder and cfg.replay_sampling == "cdf"
     assert WMTrainerCfg().optimizer == "adam"
     assert PolicyTrainerCfg().optimizer == PolicyTrainerCfg().critic_optimizer == "adam"
 

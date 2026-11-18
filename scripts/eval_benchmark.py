@@ -23,11 +23,7 @@ from supermimic.eval.benchmark import (
     save_results,
     summarize,
 )
-from supermimic.robots.contracts import (
-    checkpoint_context_layout,
-    checkpoint_foot_tracking,
-    robot_contract,
-)
+from supermimic.robots.contracts import checkpoint_context_layout, checkpoint_foot_tracking, robot_contract
 from supermimic.robots.registry import get_robot_spec
 
 

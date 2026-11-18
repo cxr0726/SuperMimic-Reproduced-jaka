@@ -28,7 +28,7 @@ class WMTrainerCfg:
     lr: float = 2e-4
     grad_clip: float = 1.0
     weight_decay: float = 0.0
-    optimizer: Literal["adam", "muon"] = "adam"  # Standalone/legacy default; fresh training selects Muon.
+    optimizer: Literal["adam", "muon"] = "adam"
     muon_weight_decay: float = 0.1  # Official torch.optim.Muon default, only for intermediate matrices.
     compile: str | None = "default"
     compile_full_window: bool = True

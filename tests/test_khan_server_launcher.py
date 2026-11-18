@@ -82,7 +82,7 @@ def test_dry_run_selects_isaac_observations_without_overriding_production_budget
     cfg = parse_config(result.stdout)
     assert cfg.robot == "khan_mini" and cfg.env.num_envs == num_envs
     assert cfg.data.npz_dir == root / "data/npz/khan_mini/lafan1"
-    assert cfg.run_name == "khan_lafan1_muon_ankle_frictionloss_4096" and cfg.log_root == root / "logs"
+    assert cfg.run_name == "khan_lafan1_adam_clean_dr_v4_4096" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is cfg.data.library is None
     assert cfg.env.actuator_delay is False and cfg.env.merge_short_tail_bins is True
     assert cfg.env.delay_reset_first_step_no_delay is True
@@ -90,11 +90,17 @@ def test_dry_run_selects_isaac_observations_without_overriding_production_budget
     assert "actuator delay False" in result.stdout
     assert cfg.env.foot_tracking is False
     assert cfg.env.context_layout == "khan_dr_v4"
+    assert cfg.env.action_noise_std == 0.0 and cfg.env.obs_noise
+    assert cfg.env.ankle_encoder_bias_half_range == 0.02 and cfg.env.domain_randomization
+    assert "Physical collection execution noise: 0 on all 27 joints" in result.stdout
+    assert "Knee soft lower -0.03 rad" in result.stdout
+    assert "nominal frictionloss 0.1 N m on all 27 hinges" in result.stdout
     assert "--env.no-foot-tracking" in result.stdout
     assert "raw reward cap 0.112" in result.stdout
     assert "critic upper bound 11.2" in result.stdout
     baseline = TrainConfig(robot="khan_mini")
     baseline.env.actuator_delay = False
+    baseline.env.action_noise_std = 0.0
     resolve_training_observations(cfg)
     resolve_training_observations(baseline)
     for name in ("world_model", "wm_trainer", "policy", "critic", "policy_trainer", "schedule"):
@@ -161,6 +167,15 @@ def test_resume_and_short_execution_keep_original_lr_horizon(project):
     assert not (root / "logs").exists()
 
 
+def test_ankle_encoder_bias_override_reaches_training_cli(project):
+    result = run_launcher(project, "--dry-run", "--ankle-encoder-bias", "0.01")
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    resolve_training_observations(cfg)
+    assert cfg.env.ankle_encoder_bias_half_range == 0.01
+    assert cfg.env.action_noise_std == 0.0
+
+
 @pytest.mark.parametrize("args,expected", [
     (["--run-name", "../escape"], "one nonempty directory name"),
     (["--num-envs", "0"], "positive integer"),
@@ -170,6 +185,7 @@ def test_resume_and_short_execution_keep_original_lr_horizon(project):
     (["--policy-trainer.batch-size", "128"], "Unknown option"),
     (["--run-name", "--dry-run"], "requires a value"),
     (["--optimizer", "sgd"], "muon or adam"),
+    (["--ankle-encoder-bias", "nan"], "nonnegative decimal"),
     (["--optimizer", "--dry-run"], "requires a value"),
 ])
 def test_invalid_inputs_rejected_without_execution(project, args, expected):
@@ -184,7 +200,7 @@ def test_missing_data_and_existing_checkpoint_rejected(project):
     empty.mkdir()
     result = run_launcher(project, "--dry-run", "--data-dir", str(empty))
     assert result.returncode != 0 and "No converted Khan NPZ" in result.stderr
-    run = root / "logs/khan_lafan1_muon_ankle_frictionloss_4096"
+    run = root / "logs/khan_lafan1_adam_clean_dr_v4_4096"
     run.mkdir(parents=True)
     (run / "ckpt_latest.pt").touch()
     result = run_launcher(project, "--dry-run")
@@ -208,7 +224,7 @@ def test_missing_robot_asset_rejected_before_execution(project):
 
 
 @pytest.mark.parametrize("flags,expected", [
-    ([], "muon"),
+    ([], "adam"),
     (["--optimizer", "muon"], "muon"),
     (["--optimizer", "adam"], "adam"),
     (["--optimizer", "muon", "--optimizer", "adam"], "adam"),
@@ -294,7 +310,7 @@ def test_foot_rewards_switch_keeps_dynamics_randomization(project, flags, enable
     assert cfg.policy.goal_noise_z == 0.01 and cfg.policy.goal_noise_joint_pos == 0.05
     assert cfg.env.actuator_delay is False
     assert "xi 105; critic 619" in result.stdout
-    assert "Foot payload: independent left/right U(0,0.2) kg at startup" in result.stdout
+    assert "independent startup payload U(0,0.15) kg per foot" in result.stdout
     assert f"raw reward cap {0.122 if enabled else 0.112}" in result.stdout
     assert f"critic upper bound {12.2 if enabled else 11.2}" in result.stdout
     assert ("--env.foot-tracking" if enabled else "--env.no-foot-tracking") in result.stdout
@@ -314,7 +330,9 @@ def test_ankle_frictionloss_can_be_switched_without_changing_action_or_rewards(
     resolve_training_observations(cfg)
     assert cfg.env.context_layout == cfg.world_model.state_spec.context_layout == layout
     assert cfg.policy.action_mode == "default" and not cfg.env.foot_tracking
-    assert cfg.wm_trainer.optimizer == cfg.policy_trainer.optimizer == cfg.policy_trainer.critic_optimizer == "muon"
+    assert cfg.wm_trainer.optimizer == cfg.policy_trainer.optimizer == cfg.policy_trainer.critic_optimizer == "adam"
+    foot_payload_max = 0.15 if layout == "khan_dr_v4" else 0.2
+    assert f"independent startup payload U(0,{foot_payload_max}) kg per foot" in result.stdout
     assert dimensions in result.stdout
 
 

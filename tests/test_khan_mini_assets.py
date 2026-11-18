@@ -1,5 +1,7 @@
 """CPU regressions for the portable Khan_mini asset and its mjlab configuration."""
 
+import hashlib
+import json
 import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -7,6 +9,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 import pytest
+from scipy.spatial import ConvexHull
 
 from supermimic.robots.build_khan_mini import build_khan_mini
 from supermimic.robots.khan_mini import (
@@ -42,6 +45,8 @@ MOTOR_GROUPS = (
     (("Neck_yaw_joint", "Neck_pitch_joint"), (6.7, 0.67, 0.01, 8.0, 8.0)),
 )
 PARAMETER_NAMES = ("stiffness", "damping", "armature", "effort_limit", "velocity_limit")
+KNEE_NAMES = ("Left_knee_joint", "Right_knee_joint")
+KNEE_HARD_LOWER = -0.15099473684210526
 
 
 def expected_parameters(name):
@@ -67,17 +72,17 @@ def bundle(tmp_path_factory):
     return output
 
 
-def test_conversion_preserves_original_tree_mass_and_joint_limits(bundle):
+def test_conversion_preserves_tree_except_requested_foot_mass_and_knee_overrides(bundle):
     source = ET.parse(SOURCE_URDF).getroot()
     model = mujoco.MjModel.from_xml_path(str(bundle / "robot.xml"))
     assert (model.nq, model.nv, model.njnt, model.nbody, model.ngeom, model.nmesh) == (
-        34, 33, 28, 46, 59, 44
+        34, 33, 28, 46, 61, 48
     )
     assert model.nu == 0 and model.nkey == 0
     assert model.jnt_type[0] == mujoco.mjtJoint.mjJNT_FREE
     assert (model.jnt_type[1:] == mujoco.mjtJoint.mjJNT_HINGE).all()
     np.testing.assert_allclose(model.qpos0[:7], [0, 0, 0.65, 1, 0, 0, 0])
-    assert model.body_mass.sum() == pytest.approx(40.8325349886391, abs=1e-9)
+    assert model.body_mass.sum() == pytest.approx(41.0325349886391, abs=1e-9)
 
     names = {mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i)
              for i in range(1, model.nbody)}
@@ -85,16 +90,78 @@ def test_conversion_preserves_original_tree_mass_and_joint_limits(bundle):
     for link in source.findall("link"):
         body = model.body(link.attrib["name"])
         mass = float(link.find("inertial/mass").attrib["value"])
+        if link.attrib["name"] in ("Left_ankle_roll_Link", "Right_ankle_roll_Link"):
+            mass += .1
         assert body.mass[0] == pytest.approx(mass, rel=1e-5, abs=1e-10)
     for joint in source.findall("joint"):
         if joint.attrib["type"] == "fixed":
             continue
         limit = joint.find("limit")
+        name = joint.attrib["name"]
+        lower = KNEE_HARD_LOWER if name in KNEE_NAMES else float(limit.attrib["lower"])
         np.testing.assert_allclose(
-            model.joint(joint.attrib["name"]).range,
-            [float(limit.attrib["lower"]), float(limit.attrib["upper"])],
-            atol=1e-7,
+            model.joint(name).range, [lower, float(limit.attrib["upper"])],
+            rtol=0, atol=1e-12,
         )
+
+
+@pytest.mark.parametrize("asset_source", ["rebuilt", "checked_in"])
+def test_knee_soft_lower_and_fixed_joint_friction_match_compiled_assets(bundle, asset_source):
+    asset = bundle if asset_source == "rebuilt" else ROOT / "assets/robots/khan_mini"
+    profile = load_profile(asset)
+    cfg = get_khan_mini_cfg(asset)
+    models = (
+        mujoco.MjModel.from_xml_path(str(asset / "robot.xml")),
+        cfg.build().spec.compile(),
+    )
+    source = ET.parse(asset / "source.urdf").getroot()
+    source_limits = {
+        joint.attrib["name"]: joint.find("limit").attrib
+        for joint in source.findall("joint") if joint.attrib["type"] != "fixed"
+    }
+    assert profile["joint_frictionloss"] == dict.fromkeys(profile["joint_names"], 0.1)
+    factor = cfg.articulation.soft_joint_pos_limit_factor
+    assert factor == 0.9
+    for model in models:
+        assert not (model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_FRICTIONLOSS)
+        np.testing.assert_array_equal(model.dof_frictionloss[:6], np.zeros(6))
+        assert model.njnt == 28
+        for name in profile["joint_names"]:
+            joint = model.joint(name)
+            assert model.jnt_type[joint.id] == mujoco.mjtJoint.mjJNT_HINGE
+            dof = model.jnt_dofadr[joint.id]
+            assert model.dof_frictionloss[dof] == pytest.approx(0.1, abs=1e-12)
+            lower, upper = joint.range
+            expected_lower = (KNEE_HARD_LOWER if name in KNEE_NAMES
+                              else float(source_limits[name]["lower"]))
+            np.testing.assert_allclose(
+                [lower, upper], [expected_lower, float(source_limits[name]["upper"])],
+                rtol=0, atol=1e-12,
+            )
+            assert profile["urdf_limits"][name]["lower"] == pytest.approx(lower, abs=1e-12)
+            assert profile["urdf_limits"][name]["upper"] == pytest.approx(upper, abs=1e-12)
+            if name in KNEE_NAMES:
+                assert upper == pytest.approx(2.2689, abs=1e-12)
+                soft_lower = (lower + upper) / 2 - factor * (upper - lower) / 2
+                assert soft_lower == pytest.approx(-0.03, abs=1e-12)
+
+    # The generated profile documents the source/effective distinction used
+    # by export metadata; the archived source URDF remains unchanged.
+    override = profile["parameter_overrides"]["knee_lower_limit"]
+    assert override["soft_lower_limit"] == -0.03
+    for name in KNEE_NAMES:
+        assert float(source_limits[name]["lower"]) == -0.349
+        assert override["source_limits"][name]["lower"] == -0.349
+        assert override["effective_lower_limits"][name] == pytest.approx(KNEE_HARD_LOWER, abs=1e-12)
+
+
+def test_checked_in_asset_provenance_matches_generated_physics():
+    asset = ROOT / "assets/robots/khan_mini"
+    provenance = json.loads((asset / "source.json").read_text())
+    profile = load_profile(asset)
+    assert provenance["parameter_overrides"] == profile["parameter_overrides"]
+    for name, expected in provenance["output_sha256"].items():
+        assert hashlib.sha256((asset / name).read_bytes()).hexdigest() == expected, name
 
 
 def test_bundle_contains_relative_meshes_and_loads_after_relocation(bundle, tmp_path):
@@ -106,6 +173,9 @@ def test_bundle_contains_relative_meshes_and_loads_after_relocation(bundle, tmp_
     mesh_dir = Path(compiler.attrib.get("meshdir", "")) if compiler is not None else Path()
     assert not mesh_dir.is_absolute()
     for mesh in xml.findall("./asset/mesh"):
+        if "vertex" in mesh.attrib:
+            assert mesh.attrib["name"].endswith(("_rear", "_forefoot"))
+            continue
         filename = Path(mesh.attrib["file"])
         assert not filename.is_absolute()
         assert ".." not in filename.parts and ".." not in mesh_dir.parts
@@ -115,7 +185,7 @@ def test_bundle_contains_relative_meshes_and_loads_after_relocation(bundle, tmp_
     shutil.copytree(bundle, relocated)
     model = mujoco.MjModel.from_xml_path(str(relocated / "robot.xml"))
     configured = get_khan_mini_cfg(relocated).build().spec.compile()
-    assert (model.nq, model.nmesh, configured.nu) == (34, 44, 27)
+    assert (model.nq, model.nmesh, configured.nu) == (34, 48, 27)
     assert load_profile(relocated) == load_profile(bundle)
 
 
@@ -265,7 +335,7 @@ def test_visuals_collisions_capsules_and_feet_remain_distinct(bundle):
     ):
         visual = model.geom_group == 2
         collision = model.geom_group == 3
-        assert visual.sum() == 45 and collision.sum() == 14
+        assert visual.sum() == 45 and collision.sum() == 16
         assert (visual | collision).all()
         assert (model.geom_contype[visual] == 0).all()
         assert (model.geom_conaffinity[visual] == 0).all()
@@ -282,10 +352,10 @@ def test_visuals_collisions_capsules_and_feet_remain_distinct(bundle):
             assert name.endswith("_collision") and body_name in name
             if body_name in ("Left_ankle_roll_Link", "Right_ankle_roll_Link"):
                 feet.append(geom_id)
-        assert len(feet) == 2
+        assert len(feet) == 4
         assert (model.geom_type[feet] == mujoco.mjtGeom.mjGEOM_MESH).all()
         np.testing.assert_allclose(
-            model.geom_friction[feet], np.tile([0.6, 0.005, 0.0001], (2, 1))
+            model.geom_friction[feet], np.tile([0.6, 0.005, 0.0001], (4, 1))
         )
         nonfeet = np.flatnonzero(collision & ~np.isin(np.arange(model.ngeom), feet))
         np.testing.assert_allclose(
@@ -293,7 +363,7 @@ def test_visuals_collisions_capsules_and_feet_remain_distinct(bundle):
         )
 
 
-def test_foot_convex_collisions_share_full_visual_mesh_and_preserve_inertials(bundle):
+def test_compiled_foot_hulls_follow_measured_sections_and_preserve_inertials(bundle):
     model = mujoco.MjModel.from_xml_path(str(bundle / "robot.xml"))
     reference = mujoco.MjModel.from_xml_path(str(bundle / "source.urdf"))
     profile = load_profile(bundle)
@@ -301,24 +371,50 @@ def test_foot_convex_collisions_share_full_visual_mesh_and_preserve_inertials(bu
         body = model.body(name).id
         collisions = np.flatnonzero((model.geom_bodyid == body) & (model.geom_group == 3))
         visuals = np.flatnonzero((model.geom_bodyid == body) & (model.geom_group == 2))
-        assert len(collisions) == len(visuals) == 1
-        collision, visual = int(collisions[0]), int(visuals[0])
-        assert model.geom(collision).name == f"{name}_convex_collision"
-        assert model.geom_dataid[collision] == model.geom_dataid[visual]
-        assert model.mesh(model.geom_dataid[collision]).name == name
-        np.testing.assert_allclose(model.geom_pos[collision], model.geom_pos[visual], atol=1e-12)
-        np.testing.assert_allclose(model.geom_quat[collision], model.geom_quat[visual], atol=1e-12)
-        assert model.geom_condim[collision] == 3 and model.geom_priority[collision] == 1
+        assert len(collisions) == 2 and len(visuals) == 1
+        assert model.mesh(model.geom_dataid[visuals[0]]).name == name
         override = profile["parameter_overrides"]["foot_collision"]["feet"][name]
         assert override["source_collision_count"] == 7
-        assert override["effective_collision_count"] == 1
-    # Changing contact envelopes must not change the robot's physical inertials.
+        assert override["effective_collision_count"] == 2
+        assert set(override["geoms"]) == {model.geom(g).name for g in collisions}
+        assert (model.geom_condim[collisions] == 3).all()
+        assert (model.geom_priority[collisions] == 1).all()
+        for part, xmin, xmax in (("rear", -75, 25), ("forefoot", 25, 127)):
+            gid = model.geom(f"{name}_{part}_collision").id
+            mesh = model.geom_dataid[gid]
+            start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
+            rotation = np.empty(9)
+            mujoco.mju_quat2Mat(rotation, model.geom_quat[gid])
+            points = 1000 * (model.mesh_vert[start:start + count] @ rotation.reshape(3, 3).T
+                             + model.geom_pos[gid])
+            np.testing.assert_allclose([points[:, 0].min(), points[:, 0].max(),
+                                        points[:, 2].min()], [xmin, xmax, -48], atol=.01)
+            # Intersect the compiled outer hull and its flat sole with vertical
+            # measurement planes. A single convex hull would fill in the waist.
+            for height, inset in ((-46, 0), (-48, 2)):
+                ring = points[points[:, 2] <= height + .001, :2]
+                poly = ring[ConvexHull(ring).vertices]
+                stations = [(-35, 87), (0, 87), (24.9, 87)] if part == "rear" else [
+                    (25.1, 87), (45, 98.3), (71, 105)]
+                for x, expected in stations:
+                    edges = np.roll(poly, -1, axis=0)
+                    hit = (poly[:, 0] < x) != (edges[:, 0] < x)
+                    a, b = poly[hit], edges[hit]
+                    y = a[:, 1] + (x - a[:, 0]) * (b[:, 1] - a[:, 1]) / (b[:, 0] - a[:, 0])
+                    assert np.ptp(y) == pytest.approx(expected - 2 * inset, abs=.08)
+            if part == "rear":
+                assert points[:, 2].max() == pytest.approx(14, abs=.01)
+    # Contact edits change no inertials; only the explicit uniform foot mass
+    # correction changes these two bodies' mass and inertia, not COM or axes.
     for body_id in range(1, model.nbody):
         name = model.body(body_id).name
         old_id = reference.body(name).id
         for field in ("body_mass", "body_ipos", "body_iquat", "body_inertia"):
+            expected = getattr(reference, field)[old_id]
+            if name in ("Left_ankle_roll_Link", "Right_ankle_roll_Link") and field in ("body_mass", "body_inertia"):
+                expected = expected * ((reference.body_mass[old_id] + .1) / reference.body_mass[old_id])
             np.testing.assert_allclose(
-                getattr(model, field)[body_id], getattr(reference, field)[old_id],
+                getattr(model, field)[body_id], expected,
                 rtol=1e-10, atol=1e-12,
             )
 

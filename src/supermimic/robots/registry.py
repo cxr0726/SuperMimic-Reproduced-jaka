@@ -14,6 +14,16 @@ from typing import Literal
 
 RobotName = Literal["g1", "khan_mini"]
 
+
+def resolve_action_noise_std(robot: RobotName, requested: float | None) -> float:
+    """Gaussian noise on normalized actor output during physical collection."""
+    if requested is None:
+        return 0.0 if robot == "khan_mini" else 0.1
+    if not math.isfinite(requested) or requested < 0:
+        raise ValueError("action_noise_std must be finite and nonnegative")
+    return requested
+
+
 G1_TRACKED_BODIES = (
     "pelvis", "left_hip_roll_link", "left_knee_link", "left_ankle_roll_link",
     "right_hip_roll_link", "right_knee_link", "right_ankle_roll_link", "torso_link",

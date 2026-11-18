@@ -17,6 +17,7 @@ assets/robots/khan_mini/
 ```
 
 整个目录可复制到其他位置；加载配置时传入 `asset_dir` 即可。原始 URDF、配置和网格未修改。
+本地生成资产包含下述膝限位和固定关节摩擦覆盖，不能与此前资产混用。
 
 ### 从当前训练 XML 导出更新后的 URDF
 
@@ -30,15 +31,15 @@ MUJOCO_GL=egl .venv/bin/python scripts/media/render_khan_urdf.py
 
 输出位于 `assets/robots/khan_mini/`：
 
-- `new.urdf`：45 个 link、27 个可动关节、45 个 visual、14 个 collision。
-- `meshes/collision_hulls/`：12 个显式凸包 OBJ；包含双脚完整脚背和足底，
+- `new.urdf` 包含 45 个 link、27 个可动关节、45 个 visual 和 16 个 collision。
+- `meshes/collision_hulls/` 中导出使用的 14 个 OBJ 覆盖双脚的后段、前掌与脚背，
   以及手臂凸包和胶囊曲面网格。腰盒全尺寸为 `0.15×0.14×0.30 m`。
 - `new.urdf.json`：输入/输出 SHA、几何和运动学验证结果，以及标准 URDF
   无法表达的 armature、PD 增益、action scale、接触参数等。
 
 URDF 无标准 capsule 图元，因此训练中的四个 capsule 分别导出为单个凸网格，
-保持碰撞体数量为 14（12 mesh + 2 box）。曲面近似的理论最大误差小于 0.1 mm；
-当前 518 个支撑方向的最大误差约为 0.081 mm，八个 CAD 凸包误差小于 `4e-9 m`。
+合计 16 个碰撞体（14 mesh + 2 box）。曲面近似的理论最大误差小于 0.1 mm。
+当前 518 个支撑方向的最大误差约为 0.081 mm，十个原生 mesh 凸包的导出误差均小于 `4e-9 m`。
 导出后重新加载 URDF，核对 18 组姿态的 FK、质量、COM、完整惯量张量及碰撞外形。
 root 世界位置属于加载时的 spawn 设置，不写入 URDF 的 link/joint 结构。
 
@@ -52,7 +53,7 @@ root 世界位置属于加载时的 spawn 设置，不写入 URDF 的 link/joint
 全身图上排只显示碰撞体，下排叠加半透明 visual；橙色是非脚碰撞体，蓝色是脚部凸包。
 复制模型到其他项目时须同时携带 `new.urdf` 和完整 `meshes/` 目录。
 这些导出不修改当前训练的 XML、profile 或原始 source.urdf。
-训练加载入口 `get_khan_mini_spec()` 仍只读取 `robot.xml`；XML 使用原有 STL 和原生 capsule，
+训练加载入口 `get_khan_mini_spec()` 读取 `robot.xml`。XML 使用原有 STL、内嵌的脚部碰撞网格和原生 capsule，
 没有引用 `new.urdf` 或 `collision_hulls/`。因此导出这些 OBJ 不会改变训练碰撞几何或增加训练解算开销；
 它们用于把同样的碰撞外形交给 URDF 的加载器，只有使用 `new.urdf` 时才需要加载。
 
@@ -64,32 +65,35 @@ root 世界位置属于加载时的 spawn 设置，不写入 URDF 的 link/joint
 | 跟踪 body | 原14个部位末尾追加 `Neck_pitch_Link`，共15个 |
 | 浮动根关节 | `floating_base` |
 | `nq / nv / njnt` | 34 / 33 / 28（包含根的自由关节） |
-| `nbody / ngeom / nmesh` | 46 / 59 / 44，nbody 包含 world |
+| `nbody / ngeom / nmesh` | 46 / 61 / 48，nbody 包含 world |
 | 执行器 | 原始 MJCF 的 nu=0；mjlab EntityCfg 创建 27 个 position servo |
-| 总质量 | 40.8325349886391 kg |
+| XML 标称总质量 | 41.0325349886391 kg |
 | 资产home根位置 | `(0, 0, 0.65)` m；运动跟踪reset另在参考root上加0.05 m |
 | 初始关节角 | 按 Khan_mini_CFG：双肩 roll=-1.57、双肘=1.57、双腕 yaw=0.3，其余 0 |
 | 软关节限位 | 硬限位区间的 90% |
-| 碰撞 | 45 个视觉 geom 与 14 个碰撞 geom 分开；含双脚各1个完整mesh凸包，保留自碰撞 |
+| 两膝硬范围 / 软下界 | `[-0.15099473684210526, 2.2689]` rad / `-0.03` rad |
+| 关节 frictionloss | XML 中 27 个 hinge 的标称值为 `0.1 N·m`，浮动根为 0。`khan_dr_v4` 训练时四个踝关节各有 startup 增量 `U(0, 0.15) N·m` |
+| 碰撞 | 45 个视觉 geom、16 个碰撞 geom，每只脚两个凸包，启用自碰撞 |
 
 带地面的 mjlab scene 多出一个 terrain body 和一个地面 geom，因此预览汇总显示
-`nbody=47, ngeom=60`，机器人本身的拓扑保持上述数值。
+`nbody=47, ngeom=62`，机器人本身的拓扑保持上述数值。
 
 ## 转换处理
 
 - 显式关闭 URDF 导入时的 `discardvisual` 和 `fusestatic`，保留全部网格及固定 link。
-- 为根添加 freejoint，保留原始大小写、关节轴、限位和父子关系，包括
+- 为根添加 freejoint，保留原始大小写、关节轴和父子关系，包括
   `Right_wrist_yaw__Link` 的双下划线。
+- 两膝硬下界按软下界 `-0.03` rad 反算，其余关节限位保留源值；
+  全部27个 hinge 固定关节摩擦 `0.1 N·m`。这两项覆盖写入生成器，重建不会恢复旧值。
 - 视觉放在 group 2，碰撞放在 group 3；视觉不参与接触，碰撞 contype/conaffinity 均为 1。
 - 非脚部的4个cylinder碰撞按源配置转成capsule，保留半径和轴向半长，端部由半球补齐。
-- 双脚原有每脚7个sole capsule替换为每脚1个完整CAD mesh凸包，包含脚背与踝连接结构。
-  复用随资产分发的 `Left_ankle_roll_Link.STL` / `Right_ankle_roll_Link.STL`，与SDK脚碰撞源mesh一致；
-  使用visual原始局部姿态，由MuJoCo生成碰撞凸包，不引入SDK的其他接触掩码或关节动力学设置。
-  脚接触仍为condim=3、priority=1、μ=0.6；非脚接触仍为condim=1。碰撞geom密度为0，显式URDF惯量不变。
-  新名称为 `Left_ankle_roll_Link_convex_collision` / `Right_ankle_roll_Link_convex_collision`，profile和训练足部正则同步。
-  部署只需已生成资产，不依赖外部SDK或ref目录；已有NPZ无需重新转换。
-  左脚凸包在ankle_roll局部坐标中的包围范围约为X[-0.07496,0.12497]、Y±0.0475、Z[-0.048,0.014] m；
-  最低点仍约为−0.048 m，替换凸包不会自动修复原始参考的接地偏差。
+- 每只脚由后段和前掌两个凸碰撞体在距脚跟 100 mm 处拼接，以保留实物前掌向后内收的轮廓。
+  脚长取 202 mm。脚跟端采用长 34 mm 的圆弧过渡，随后宽度保持 87 mm。
+  前掌在距脚跟 146 mm 处达到 105 mm 宽，此处距脚尖 56 mm。实测依据是 `foot_photo/foot3.jpg`。
+  左右轮廓按中心线对称建模。底边用 2 mm 圆角近似，上部沿用原 CAD 脚背。
+  在 ankle_roll 局部坐标中，最低点为 −48 mm，纵向范围为 [−75, 127] mm。
+  四个碰撞 geom 的名称后缀为 `_rear_collision` 或 `_forefoot_collision`，共用原足底接触参数。
+  [三维对比](../media/khan_sole_comparison_3d.png)和[俯视叠图及宽度曲线](../media/khan_sole_top_view.png)均由编译后网格绘制。
 - 接触摩擦按当前 G1 对齐：足底 `(0.6, 0.005, 0.0001)`，非足底
   `(1.0, 0.005, 0.0001)`。该用户指定的配置在重建时保持，并记录在 profile 的
   `contact_friction` 和 `parameter_overrides` 中，不等同于 Isaac Lab 的材质参数。
@@ -118,6 +122,25 @@ profile的 `parameter_overrides.waist_collision_box` 记录源尺寸、有效尺
 
 下表为 Khan_mini_CFG 加本地参数覆盖后的有效值。PD、转子惯量和力矩限制由
 `BuiltinPositionActuatorCfg` 应用，初态由 `EntityCfg.InitialStateCfg` 应用。
+
+### 膝限位与固定关节摩擦（2026-11-16）
+
+两膝上界 `u=2.2689` rad、软限位系数 `f=0.9` 保持不变。硬下界反算为
+`l=(-0.03-0.05*u)/0.95=-0.15099473684210526` rad，得到软下界 `-0.03` rad。
+因此 `q<-0.03` 才触发已有 `joint_limit` 下限惩罚，`[-0.03,0)` 仍不罚；
+没有新增膝关节奖励项，原有权重仍为 `-2`。训练将实际软界传给WM解析奖励，
+reset也使用该软界裁剪初始关节角；参考库和后续goal未修改。
+
+参考PartyMimic RP1，全部27个转动关节（包括颈部）在模型中固定
+`frictionloss=0.1 N·m`，没有额外关节摩擦随机化。它与脚底接触摩擦和PD damping不同，
+不修改其他增益、惯量或力矩限额；关闭DR的play/eval仍使用0.1。
+DR保持 `khan_dr_v3`，ξ维度仍为101。XML、profile、`new.urdf`及其导出记录保持一致；
+`source.urdf`继续作为原始输入副本保留。
+
+新的XML/profile hash意味着必须新建训练run；旧160k等检查点需原资产和匹配源码，
+不能直接恢复到本次资产。既有ONNX及实机YAML限位不会随资产修改而改变。
+
+### 标称执行器参数
 
 | 关节组 | 数量 | kp | kd | armature | 力矩限额 Nm | 速度元数据 rad/s |
 |---|---:|---:|---:|---:|---:|---:|
@@ -196,6 +219,10 @@ PhysX 的速度上限、去穿透速度及求解器设置也不能直接等同 M
 无执行噪声：q_target = q_home + 0.5 * action
 有执行噪声：q_target = q_home + 0.5 * (action + epsilon)
 ```
+
+当前两个Khan训练脚本默认令颈yaw/pitch的 `epsilon=0`，其余25轴仍为std=0.1；
+观测和encoder goal噪声不受影响。脚本的 `--neck-action-noise` 可恢复颈执行噪声，
+`--no-neck-action-noise` 显式选择默认值。该开关不改变上述固定摩擦值。
 
 action=1 对应相对 home 增加 0.5 rad（约 28.65°）。动作本身默认没有强制限制在 [-1,1]，
 因此 ±0.5 rad 不是硬位置范围；URDF 关节限位和执行器力矩限制仍由模型处理。
@@ -281,9 +308,9 @@ action_cfg = get_khan_mini_action_cfg()  # 全关节 0.5，默认执行噪声 st
 | 动作处理 | NoisyJointPositionActionCfg，全部 scale=0.5 | 相同类型，scale 按 0.25×effort/kp 分组 |
 | 视觉 / 碰撞组 | 2 / 3 | 2 / 3 |
 | 自碰撞 mask | 1 / 1，开启 | 1 / 1，开启 |
-| 足底碰撞 | 2个完整CAD mesh凸包，condim=3、priority=1 | 14个足底几何，condim=3、priority=1 |
+| 足底碰撞 | 4 个 mesh 凸包，每脚两个，condim=3、priority=1 | 14个足底几何，condim=3、priority=1 |
 | 非足底接触 | condim=1、priority=0 | 相同 |
-| 碰撞几何数 / 覆盖 body | 14 / 14 | 33 / 18 |
+| 碰撞几何数 / 覆盖 body | 16 / 14 | 33 / 18 |
 | 足底摩擦 | (0.6, 0.005, 0.0001) | 相同 |
 | 非足底摩擦 | (1.0, 0.005, 0.0001) | 相同 |
 | 显式碰撞排除对 | 0 | 4 |
@@ -300,7 +327,7 @@ G1 显式排除 pelvis 与左右 hip_roll，以及左右 elbow 与 wrist_pitch �
 确认自碰撞检测实际生效；这不是当前14 cm宽腰盒的接触数量结论。历史实编译对比及姿态记录在
 `logs/khan_mini_collision/g1_comparison.json`。
 
-Khan 的14个碰撞geom只覆盖14个body，其余31个link没有独立碰撞体，包括头颈和部分髋/肩部。
+Khan 的 16 个碰撞 geom 覆盖 14 个 body，其余 31 个 link 没有独立碰撞体，包括头颈和部分髋/肩部。
 这与训练中跟踪15个body是两件事：增加 `Neck_pitch_Link` 跟踪不等于新增头部碰撞体。
 这是源URDF的简化结果；碰撞体截图显示真实覆盖范围。
 可用下列命令重新渲染多视角：
