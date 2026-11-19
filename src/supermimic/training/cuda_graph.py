@@ -28,7 +28,8 @@ def replay_sampling_key(buffer) -> tuple | None:
     sampling = getattr(buffer, "sampling", "multinomial")
     if not isinstance(sampling, str) or sampling not in ("multinomial", "cdf"):
         raise ValueError("Replay sampling must be 'multinomial' or 'cdf'")
-    return id(buffer), sampling
+    key = (id(buffer), sampling)
+    return (*key, True) if getattr(buffer, "delay_history", False) else key
 
 
 def _validate_configuration_key(key) -> None:

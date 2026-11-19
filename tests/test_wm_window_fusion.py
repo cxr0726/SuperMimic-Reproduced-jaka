@@ -9,13 +9,15 @@ import torch
 
 from supermimic.data.replay_buffer import ReplayBuffer, WindowBatch
 from supermimic.world_model.heads import AnalyticHeads, ReferenceFrame
+from supermimic.world_model.state_spec import StateSpecCfg
 from supermimic.world_model.wm_trainer import WMTrainerCfg, WorldModelTrainer
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 
 
-def _model(dtype, *, termination, normalized, device="cpu"):
+def _model(dtype, *, termination, normalized, device="cpu", delay_history=False):
+    joints = 27 if delay_history else 3
     heads = SimpleNamespace(
-        num_joints=3, default_joint_pos=torch.tensor([.1, -.2, .3], device=device),
+        num_joints=joints, default_joint_pos=torch.tensor([.1, -.2, .3], device=device).repeat(joints // 3),
         termination_features=AnalyticHeads.termination_features,
     )
     model = WorldModel(
@@ -23,7 +25,9 @@ def _model(dtype, *, termination, normalized, device="cpu"):
             hidden=(13, 11), term_hidden=(7,), input_normalization=normalized,
             hidden_layer_norm=True, hidden_activation="gelu",
             termination_mode=termination, term_loss_weight=.65,
-        ), heads, device, action_scale=torch.tensor([.4, .5, .6], device=device),
+            delay_history=delay_history,
+            state_spec=StateSpecCfg(context_layout="khan_dr_v4" if delay_history else "base"),
+        ), heads, device, action_scale=torch.tensor([.4, .5, .6], device=device).repeat(joints // 3),
     ).to(dtype=dtype)
     with torch.no_grad():
         # Avoid the zero-last initialization's zero action/hidden gradients.
@@ -38,13 +42,84 @@ def _model(dtype, *, termination, normalized, device="cpu"):
     return model
 
 
+def test_full_control_step_delay_does_not_leak_current_command_gradient():
+    torch.manual_seed(17)
+    wm = _model(torch.float64, termination="analytic", normalized=True, delay_history=True)
+    states, _, xi, *_ = _window(wm, torch.float64, transitions=2, batch=4)
+    xi[:, wm.delay_xi_index] = torch.tensor([0., 2., 4., 4.])
+    a0 = torch.randn(4, wm.spec.num_joints, dtype=states.dtype, requires_grad=True)
+    a1 = torch.randn_like(a0, requires_grad=True)
+    prev = torch.randn_like(a0, requires_grad=True)
+    fresh = torch.tensor([False, False, False, True])
+
+    result = wm.step(states[0], a0, xi, prev, fresh)
+    cur_grad, old_grad = torch.autograd.grad(result.sum(), (a0, prev), retain_graph=True)
+    assert (cur_grad.abs().sum(-1) > 0).tolist() == [True, True, False, True]
+    assert (old_grad.abs().sum(-1) > 0).tolist() == [False, True, True, False]
+
+    rollout = wm._window_rollout(states[0], torch.stack((a0, a1)), xi, prev, fresh)
+    torch.testing.assert_close(result, rollout[0])
+    # In the 20 ms world a0 can affect the second state only as the pending command.
+    a0_grad, a1_grad = torch.autograd.grad(rollout[1, 2].sum(), (a0, a1))
+    assert a0_grad[2].abs().sum() > 0
+    assert not a1_grad.count_nonzero()
+
+
+def test_delayed_window_fused_and_stepwise_loss_use_same_history():
+    torch.manual_seed(19)
+    wm = _model(torch.float64, termination="analytic", normalized=True, delay_history=True)
+    states, actions, xi, done, ref_pos, ref_quat = _window(wm, torch.float64, batch=5)
+    xi[:, wm.delay_xi_index] = torch.arange(5)
+    fresh = torch.tensor([False, True, False, False, True])
+    prev_exec = torch.randn_like(actions[0]).requires_grad_()
+    refs = [ReferenceFrame(None, None, None, None, pos, quat)
+            for pos, quat in zip(ref_pos, ref_quat, strict=True)]
+    fused_loss, _ = wm.window_loss_full(states, actions, xi, done, ref_pos, ref_quat, prev_exec, fresh)
+    step_loss, _ = wm.window_loss(states, actions, xi, done, refs, prev_exec, fresh)
+    torch.testing.assert_close(fused_loss, step_loss, rtol=1e-11, atol=1e-12)
+    torch.testing.assert_close(*[torch.autograd.grad(loss, prev_exec)[0]
+                                 for loss in (fused_loss, step_loss)], rtol=1e-11, atol=1e-12)
+
+
+def test_delayed_replay_never_reads_newest_action_as_oldest_rows_history():
+    torch.manual_seed(11)
+    replay = ReplayBuffer(1, 5, 1, 1, 1, "cpu", delay_history=True)
+
+    def add(t, first_step):
+        value = torch.tensor([[float(t)]])
+        replay.add(torch.tensor([0]), s=value, a=-value, a_exec=value, xi=value,
+                   r=value[0], done=torch.tensor([0.]), frame=torch.tensor([t]), clip=torch.tensor([0]),
+                   terminal=torch.tensor([False]), ep_start=torch.tensor([first_step]))
+
+    for t in range(5):
+        add(t, first_step=t == 0)
+    assert replay.window_mask(1)[0, 0]  # Real reset requires no predecessor.
+    add(5, first_step=False)
+    assert not replay.window_mask(1)[0, 1]  # Oldest row is mid-episode after wrap.
+    windows = replay.sample_windows(64, 1)
+    starts = replay.sample_starts(64, 1)
+    assert not windows.first_step.any() and not starts.first_step.any()
+    torch.testing.assert_close(windows.prev_exec[:, 0], windows.states[0, :, 0] - 1)
+    torch.testing.assert_close(starts.prev_exec[:, 0], starts.state[:, 0] - 1)
+    torch.testing.assert_close(starts.prev_action, -starts.prev_exec)
+
+    replay.end_episode(torch.tensor([0]))
+    add(6, first_step=True)
+    add(7, first_step=False)
+    windows = replay.sample_windows(64, 1)
+    first = windows.frame[0] == 6
+    assert first.any()
+    assert torch.equal(first, windows.first_step)
+    assert not windows.prev_exec[first].count_nonzero()
+
+
 def _window(model, dtype, *, transitions=8, batch=5):
     device = next(model.parameters()).device
     states = torch.randn(transitions + 1, batch, model.spec.state_dim, dtype=dtype, device=device) * .2
     states[..., 2] += .8
     quaternion = torch.randn(transitions + 1, batch, 4, dtype=dtype, device=device)
     states[..., 3:7] = quaternion / quaternion.norm(dim=-1, keepdim=True)
-    actions = torch.randn(transitions, batch, 3, dtype=dtype, device=device) * .3
+    actions = torch.randn(transitions, batch, model.spec.num_joints, dtype=dtype, device=device) * .3
     xi = model.spec.xi_offset.to(dtype).expand(batch, -1).clone()
     xi += torch.randn_like(xi) * .005
     done = (torch.arange(transitions * batch, device=device).reshape(transitions, batch) % 3 == 0).to(dtype)

@@ -54,6 +54,7 @@ def probes(trainer, start):
     critic_goal = torch.cat((goal, orientation, critic_reference_extras(
         window.joint_vel, window.root_quat_w, window.root_ang_vel_w, window.root_lin_vel_w)), -1)
     return {"obs": obs, "goal": goal, "state": start.state, "xi": start.xi,
+            "prev_exec": start.prev_exec, "first_step": start.first_step,
             "feat": wm.spec.canonical(start.state), "critic_goal": critic_goal,
             "xi_norm": wm.spec.normalize_xi(start.xi), "root_error": wm.heads.root_error_features(start.state, ref),
             "tracking_error": wm.heads.critic_error_features(start.state, ref)}
@@ -63,7 +64,8 @@ def probes(trainer, start):
 def outputs(trainer, data, action):
     return {"actor": trainer.policy(data["obs"], data["goal"]).cpu(),
             "ema": trainer.policy_trainer.ema.module(data["obs"], data["goal"]).cpu(),
-            "wm_next_state": trainer.wm.step(data["state"], action, data["xi"]).cpu(),
+            "wm_next_state": trainer.wm.step(data["state"], action, data["xi"],
+                                             data["prev_exec"], data["first_step"]).cpu(),
             "critic": trainer.critic(data["feat"], data["critic_goal"], data["xi_norm"],
                                      data["root_error"], data["tracking_error"]).cpu()}
 

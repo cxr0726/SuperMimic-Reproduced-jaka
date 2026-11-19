@@ -100,9 +100,11 @@ def verify_production_config(cfg: TrainConfig) -> dict:
     resolve_training_observations(formal)
     wm = asdict(cfg.world_model)
     original_wm = asdict(formal.world_model)
-    # Context is robot-specific; hidden networks and all optimizer settings match.
+    # Context and command history are robot-specific; optimizer settings match.
     wm["state_spec"].pop("context_layout")
     original_wm["state_spec"].pop("context_layout")
+    assert wm.pop("delay_history") == cfg.env.wm_delay_history
+    original_wm.pop("delay_history")
     assert wm == original_wm, "world_model optimization parameters changed"
     for name in ("wm_trainer", "critic"):
         assert asdict(getattr(cfg, name)) == asdict(getattr(formal, name)), name
@@ -137,7 +139,8 @@ def verify_production_config(cfg: TrainConfig) -> dict:
     env.pop("reference_fk_compile")
     reference_env.pop("reference_fk_compile")
     for key in ("anchor_obs", "observation_layout", "context_layout", "future_frames", "actuator_delay",
-                "actuator_delay_max_ms", "reset_root_z_offset", "merge_short_tail_bins",
+                "actuator_delay_max_ms", "wm_delay_history", "foot_mass_shared", "reset_root_z_offset",
+                "merge_short_tail_bins",
                 "delay_reset_first_step_no_delay", "tail_bin_merge_fraction", "reset_min_remaining_steps",
                 "ankle_encoder_bias_half_range", "action_noise_std"):
         env.pop(key)
@@ -161,6 +164,8 @@ def verify_production_config(cfg: TrainConfig) -> dict:
                                 "compact_library": cfg.env.compact_library,
                                 "reference_fk_compile": cfg.env.reference_fk_compile,
                                 "actuator_delay": cfg.env.actuator_delay,
+                                "wm_delay_history": cfg.env.wm_delay_history,
+                                "foot_mass_shared": cfg.env.foot_mass_shared,
                                 "merge_short_tail_bins": cfg.env.merge_short_tail_bins,
                                 "delay_reset_first_step_no_delay": cfg.env.delay_reset_first_step_no_delay,
                                 "tail_bin_merge_fraction": cfg.env.tail_bin_merge_fraction,
@@ -200,8 +205,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Optional 9D goal pose for supermimic layout only; incompatible with isaac_khan")
     parser.add_argument("--activation-checkpoint", action=argparse.BooleanOptionalAction, default=False,
                         help="Optional activation recomputation; disabled to match the original training")
-    parser.add_argument("--actuator-delay", action=argparse.BooleanOptionalAction, default=False,
-                        help="Held 0–20 ms actuator delay; off like the server launcher")
+    parser.add_argument("--actuator-delay", action=argparse.BooleanOptionalAction, default=True,
+                        help="Held 0–20 ms actuator delay; on like the server launcher")
     parser.add_argument("--reference-fk-compile", action=argparse.BooleanOptionalAction, default=False,
                         help="Compile CUDA compact reference queries; disable for eager A/B checks")
     args = parser.parse_args(argv)

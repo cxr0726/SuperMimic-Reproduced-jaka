@@ -83,6 +83,7 @@ def test_invalid_bias_rejected_before_training(value):
 def test_new_distribution_has_explicit_contract_without_reinterpreting_old_xi():
     cfg = TrainConfig(robot="khan_mini")
     cfg.env.context_layout = "khan_dr_v3"  # Preserve the v13 encoder-only contract.
+    cfg.env.wm_delay_history = False
     cfg.env.action_noise_std = 0.1  # Exercise the historical masked-noise contract.
     cfg.env.disable_neck_action_noise = True
     resolve_training_observations(cfg)

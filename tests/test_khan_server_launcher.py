@@ -84,10 +84,10 @@ def test_dry_run_selects_isaac_observations_without_overriding_production_budget
     assert cfg.data.npz_dir == root / "data/npz/khan_mini/lafan1"
     assert cfg.run_name == "khan_lafan1_adam_clean_dr_v4_4096" and cfg.log_root == root / "logs"
     assert cfg.data.clips is cfg.data.limit is cfg.data.manifest is cfg.data.library is None
-    assert cfg.env.actuator_delay is False and cfg.env.merge_short_tail_bins is True
+    assert cfg.env.actuator_delay is True and cfg.env.merge_short_tail_bins is True
     assert cfg.env.delay_reset_first_step_no_delay is True
     assert cfg.env.tail_bin_merge_fraction == 1.0 and cfg.env.reset_min_remaining_steps == 32
-    assert "actuator delay False" in result.stdout
+    assert "actuator delay True" in result.stdout
     assert cfg.env.foot_tracking is False
     assert cfg.env.context_layout == "khan_dr_v4"
     assert cfg.env.action_noise_std == 0.0 and cfg.env.obs_noise
@@ -99,10 +99,10 @@ def test_dry_run_selects_isaac_observations_without_overriding_production_budget
     assert "raw reward cap 0.112" in result.stdout
     assert "critic upper bound 11.2" in result.stdout
     baseline = TrainConfig(robot="khan_mini")
-    baseline.env.actuator_delay = False
     baseline.env.action_noise_std = 0.0
     resolve_training_observations(cfg)
     resolve_training_observations(baseline)
+    assert cfg.env.foot_mass_shared and cfg.env.wm_delay_history and cfg.world_model.delay_history
     for name in ("world_model", "wm_trainer", "policy", "critic", "policy_trainer", "schedule"):
         assert asdict(getattr(cfg, name)) == asdict(getattr(baseline, name)), name
     current_env, original_env = asdict(cfg.env), asdict(baseline.env)
@@ -244,7 +244,7 @@ def test_optimizer_switch_reaches_all_three_networks_without_changing_budget(pro
     assert cfg.policy_trainer.critic_epochs == 5 and cfg.policy_trainer.critic_minibatches == 4
     assert cfg.schedule.total_iterations == 320000 and cfg.schedule.updates_per_env_step == .4
     assert cfg.policy_trainer.cuda_graph and cfg.wm_trainer.cuda_graph
-    assert cfg.env.actuator_delay is False and cfg.policy.action_mode == "default"
+    assert cfg.env.actuator_delay is True and cfg.policy.action_mode == "default"
     label = "optimizer: hybrid Muon" if expected == "muon" else "optimizer: Adam"
     assert label in result.stdout
     assert not (root / "logs").exists()
@@ -260,6 +260,8 @@ def test_delay_switch_keeps_h32_and_full_tail_merge(project, flags, enabled):
     assert result.returncode == 0, result.stderr
     cfg = parse_config(result.stdout)
     assert cfg.env.actuator_delay is enabled
+    resolve_training_observations(cfg)
+    assert cfg.env.wm_delay_history is cfg.world_model.delay_history is enabled
     assert cfg.env.delay_reset_first_step_no_delay is True
     assert cfg.env.reset_min_remaining_steps == 32
     assert cfg.env.tail_bin_merge_fraction == 1.0
@@ -284,7 +286,7 @@ def test_action_space_and_encoder_noise_switches_are_independent(project, flags,
     assert cfg.policy.goal_noise_z == z_noise
     assert cfg.policy.goal_noise_joint_pos == q_noise
     assert cfg.policy_trainer.horizon == 32
-    assert cfg.env.actuator_delay is False
+    assert cfg.env.actuator_delay is True
     assert "critic/reward stay clean" in result.stdout
     if action_mode == "reference_residual":
         assert "PD target=raw clean q_ref(t+1) + 0.5*decoder_output; beta 1" in result.stdout
@@ -308,9 +310,10 @@ def test_foot_rewards_switch_keeps_dynamics_randomization(project, flags, enable
     assert cfg.env.context_layout == "khan_dr_v4"
     assert cfg.policy.action_mode == "default"
     assert cfg.policy.goal_noise_z == 0.01 and cfg.policy.goal_noise_joint_pos == 0.05
-    assert cfg.env.actuator_delay is False
+    assert cfg.env.actuator_delay is True
     assert "xi 105; critic 619" in result.stdout
-    assert "independent startup payload U(0,0.15) kg per foot" in result.stdout
+    assert cfg.env.foot_mass_shared
+    assert "shared startup payload U(0,0.15) kg" in result.stdout
     assert f"raw reward cap {0.122 if enabled else 0.112}" in result.stdout
     assert f"critic upper bound {12.2 if enabled else 11.2}" in result.stdout
     assert ("--env.foot-tracking" if enabled else "--env.no-foot-tracking") in result.stdout
@@ -331,8 +334,10 @@ def test_ankle_frictionloss_can_be_switched_without_changing_action_or_rewards(
     assert cfg.env.context_layout == cfg.world_model.state_spec.context_layout == layout
     assert cfg.policy.action_mode == "default" and not cfg.env.foot_tracking
     assert cfg.wm_trainer.optimizer == cfg.policy_trainer.optimizer == cfg.policy_trainer.critic_optimizer == "adam"
-    foot_payload_max = 0.15 if layout == "khan_dr_v4" else 0.2
-    assert f"independent startup payload U(0,{foot_payload_max}) kg per foot" in result.stdout
+    assert cfg.env.foot_mass_shared is (layout == "khan_dr_v4")
+    payload = ("shared startup payload U(0,0.15) kg" if cfg.env.foot_mass_shared
+               else "independent startup payload U(0,0.2) kg per foot")
+    assert payload in result.stdout
     assert dimensions in result.stdout
 
 

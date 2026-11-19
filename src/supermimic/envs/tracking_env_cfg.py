@@ -55,9 +55,11 @@ from supermimic.robots.registry import (
     resolve_robot_environment,
 )
 from supermimic.sim_context import (
+    CONTROL_SUBSTEPS,
     KHAN_ANKLE_JOINTS,
     KHAN_FOOT_BODIES,
     KHAN_LOWER_BODY_JOINTS,
+    PHYSICS_STEP_MS,
     ContextKind,
     resolve_context_layout,
     validate_ankle_encoder_bias_half_range,
@@ -94,6 +96,7 @@ class SuperMimicEnvCfgArgs:
     actuator_delay: bool | None = None
     actuator_delay_max_ms: float = 20.0
     delay_reset_first_step_no_delay: bool = False  # Historical direct/evaluation API default
+    wm_delay_history: bool = False  # Record sampling context for delayed learner updates.
     reset_root_z_offset: float | None = None
     sampling_mode: str = "return"  # return | uniform | start
     reset_sampler: str = "legacy"  # legacy | window_value (new training selects window_value)
@@ -121,6 +124,7 @@ class SuperMimicEnvCfgArgs:
     extra_command_kwargs: dict = field(default_factory=dict)
     disable_neck_action_noise: bool = False
     ankle_encoder_bias_half_range: float = 0.01  # Legacy/direct API default; training passes its saved range.
+    foot_mass_shared: bool | None = None  # Use the current recipe for the selected context unless specified.
 
 
 def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
@@ -128,6 +132,10 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     if a.disable_neck_action_noise and a.robot != "khan_mini":
         raise ValueError("disable_neck_action_noise is only supported for Khan Mini")
     a.context_layout = resolve_context_layout(a.robot, a.context_layout)
+    if a.foot_mass_shared is None:
+        a.foot_mass_shared = a.context_layout == "khan_dr_v4"
+    if a.foot_mass_shared and a.context_layout != "khan_dr_v4":
+        raise ValueError("foot_mass_shared requires the Khan DR v4 layout")
     a.ankle_encoder_bias_half_range = validate_ankle_encoder_bias_half_range(
         a.robot, a.ankle_encoder_bias_half_range,
     )
@@ -141,7 +149,8 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     entity_cfg = robot_spec.entity_cfg()
     # Match MorphMimic: one held lag per episode and fused actuator group.
     # Nominal evaluation uses domain_randomization=False and has no delay.
-    lag = round(a.actuator_delay_max_ms / 5) if a.actuator_delay and a.domain_randomization else 0
+    lag = (round(a.actuator_delay_max_ms / PHYSICS_STEP_MS)
+           if a.actuator_delay and a.domain_randomization else 0)
     if entity_cfg.articulation is not None and (a.actuator_delay or a.robot == "khan_mini"):
         entity_cfg.articulation.actuators = tuple(
             replace(actuator, delay_min_lag=0, delay_max_lag=lag, delay_hold_prob=0.0,
@@ -352,9 +361,8 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                 },
             )
             if a.context_layout in ("khan_dr_v3", "khan_dr_v4"):
-                # Independent point payloads at each foot body's authored COM.
-                # No assumed payload shape: COM and rotational inertia stay
-                # authored; the stock startup event refreshes model constants.
+                # Point payload at each foot body's authored COM. The stock
+                # startup event refreshes model constants after the mass change.
                 events["foot_mass"] = EventTermCfg(
                     mode="startup", func=dr.body_mass,
                     params={
@@ -362,7 +370,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                             "robot", body_names=KHAN_FOOT_BODIES, preserve_order=True,
                         ),
                         "operation": "add", "ranges": (0.0, 0.15 if a.context_layout == "khan_dr_v4" else 0.2),
-                        "shared_random": False,
+                        "shared_random": a.foot_mass_shared,
                     },
                 )
             if a.context_layout == "khan_dr_v4":
@@ -442,6 +450,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             "capacity": a.replay_capacity, "foot_geom_regex": robot_spec.foot_geom_regex,
             "com_body_name": robot_spec.com_body,
             "context_layout": a.context_layout,
+            "delay_history": a.wm_delay_history,
         })
 
     cfg = ManagerBasedRlEnvCfg(
@@ -454,8 +463,8 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         terminations=terminations,
         recorders=recorders,
         viewer=ViewerConfig(origin_type=ViewerConfig.OriginType.ASSET_BODY, entity_name="robot", body_name=robot_spec.anchor_body, distance=2.8, fovy=55.0, elevation=-5.0, azimuth=120.0),
-        sim=QuietSimulationCfg(nconmax=robot_spec.nconmax, njmax=robot_spec.njmax, mujoco=MujocoCfg(timestep=0.005, iterations=10, ls_iterations=20)),
-        decimation=4,
+        sim=QuietSimulationCfg(nconmax=robot_spec.nconmax, njmax=robot_spec.njmax, mujoco=MujocoCfg(timestep=PHYSICS_STEP_MS / 1000, iterations=10, ls_iterations=20)),
+        decimation=CONTROL_SUBSTEPS,
         episode_length_s=a.episode_length_s,
         seed=a.seed,
     )

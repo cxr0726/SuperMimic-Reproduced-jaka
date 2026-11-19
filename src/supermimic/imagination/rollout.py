@@ -195,6 +195,8 @@ def imagine(
     s = start.state
     frame = start.frame.clone()
     a_prev = start.prev_action
+    prev_exec, first_step = start.prev_exec, start.first_step
+    continuing = torch.zeros_like(first_step) if first_step is not None else None
     c = torch.ones(n, device=device)
 
     states = [s]
@@ -271,6 +273,7 @@ def imagine(
     term_sum = torch.zeros(len(term_names), device=device)
 
     for t in range(horizon):
+        history_args = (prev_exec, first_step) if first_step is not None else ()
         obs_flat = flatten_history_term_major(torch.stack(hist, 0), observation_layout=layout)
         if layout == "isaac_khan":
             obs_flat = torch.cat([future_orientation, obs_flat], dim=-1)
@@ -292,13 +295,13 @@ def imagine(
                     a = checkpoint(policy_forward_fn, obs_flat, goals[-1], **encoder_kwargs,
                                    use_reentrant=False, preserve_rng_state=checkpoint_preserve_rng_state)
                 step_result = checkpoint(
-                    step_fn, s, a, a_prev, start.xi, ref,
+                    step_fn, s, a, a_prev, start.xi, ref, *history_args,
                     use_reentrant=False, preserve_rng_state=checkpoint_preserve_rng_state,
                 )
         else:
             a = (decode_from_latent_fn(obs_flat, goals[-1], latents[t]) if batch_encoder else
                  policy_forward_fn(obs_flat, goals[-1], **encoder_kwargs))
-            step_result = step_fn(s, a, a_prev, start.xi, ref)
+            step_result = step_fn(s, a, a_prev, start.xi, ref, *history_args)
         if returns_body_poses:
             s_next, r, term_vec, logits, obs_clean, anchor_pose, body_pos, body_quat = step_result
             if cache_body_poses:
@@ -318,6 +321,7 @@ def imagine(
         hist = hist[1:] + [(obs_clean + sensor_noise[t] if obs_noise else obs_clean)
                           if batch_encoder else add_noise(obs_clean)]
         a_prev = a
+        prev_exec, first_step = a, continuing
         s = s_next
         states.append(s)
         actions.append(a)

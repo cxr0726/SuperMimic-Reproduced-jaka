@@ -16,7 +16,7 @@ BATCH_REFERENCE_ENCODER=1
 LEARNER_FUSION=1
 REPLAY_SAMPLING=''
 OPTIMIZER=adam
-ACTUATOR_DELAY=False
+ACTUATOR_DELAY=True
 ACTION_MODE=default
 FOOT_TRACKING=0
 CONTEXT_LAYOUT=khan_dr_v4
@@ -45,12 +45,12 @@ goal is noise-augmented and running-normalized; the optional reference skip
 uses raw joint positions in radians. --foot-tracking restores extra foot rewards.
 Khan uses measured rear and forefoot colliders and a knee soft lower limit
 of -0.03 rad. All 27 hinges have a nominal frictionloss of 0.1 N m. DR v4 adds
-independent startup U(0,0.15) N m to each of the four ankle axes and U(0,0.15) kg
-to each foot. Episode-held encoder bias is +/-0.02 rad on the ankles and
+independent startup U(0,0.15) N m to each ankle axis and the same startup
+U(0,0.15) kg to both feet. Episode-held encoder bias is +/-0.02 rad on the ankles and
 +/-0.01 rad elsewhere. DR v4 gives xi 105 and critic 619. DR v3 gives 101 and
 615, with nominal ankle frictionloss and startup foot payload U(0,0.2) kg.
-Actuator delay is disabled by default for this server experiment; --actuator-delay
-enables held 0–20 ms delay with an immediate first control step.
+By default actuator delay is sampled once per episode from 0, 5, 10, 15, 20 ms.
+The first control step is immediate. Use --no-actuator-delay for a delay ablation.
 Reset clearance remains 0.05 m and first-step action-rate is unchanged. Every
 incomplete final bin is merged into the previous bin. Physical reset requires
 at least 32 remaining reference steps. Activation recomputation remains disabled.
@@ -77,8 +77,8 @@ Options:
   --ankle-encoder-bias RAD   Ankle encoder bias half-range (default: 0.02 rad)
   --no-goal-noise            Disable encoder goal augmentation
   --goal-noise               Enable Isaac encoder goal noise (default)
-  --no-actuator-delay        Disable actuator delay (default for this server experiment)
-  --actuator-delay           Enable held 0–20 ms delay; first control step is immediate
+  --no-actuator-delay        Disable actuator delay
+  --actuator-delay           Enable held 0–20 ms delay (default); first control step is immediate
   --update-capture          Capture full WM and Actor/Critic updates (default; single GPU)
   --no-update-capture       Use ordinary learner updates for comparison
   --batch-reference-encoder Batch reference-only goals across H32 (default)
@@ -268,13 +268,13 @@ printf '[INFO] Episode encoder bias: four ankle axes +/- %s rad; other 23 axes +
 printf '[INFO] Knee soft lower -0.03 rad; nominal frictionloss 0.1 N m on all 27 hinges\n'
 if [[ "$CONTEXT_LAYOUT" == khan_dr_v4 ]]; then
     printf '[INFO] Khan DR v4: xi 105; critic 619; four ankles add independent startup U(0,0.15) N m\n'
-    FOOT_PAYLOAD_MAX=0.15
+    FOOT_PAYLOAD="shared startup payload U(0,0.15) kg, same addition on both feet"
 else
     printf '[INFO] Khan DR v3: xi 101; critic 615; ankle frictionloss: nominal\n'
-    FOOT_PAYLOAD_MAX=0.2
+    FOOT_PAYLOAD="independent startup payload U(0,0.2) kg per foot"
 fi
 printf '[INFO] Kp/Kd x0.8-1.2 per reset; 12 leg armatures x0.8-1.2 at startup; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$ACTUATOR_DELAY"
-printf '[INFO] Feet: nominal ankle_roll_Link mass 0.58502 kg; independent startup payload U(0,%s) kg per foot, authored COM/inertia retained\n' "$FOOT_PAYLOAD_MAX"
+printf '[INFO] Feet: nominal ankle_roll_Link mass 0.58502 kg; %s, authored COM/inertia retained\n' "$FOOT_PAYLOAD"
 if ((FOOT_TRACKING)); then
     printf '[INFO] Extra foot pos/ori rewards: ON, weights 0.25/0.25; raw reward cap %s\n' "$RAW_REWARD_CAP"
 else

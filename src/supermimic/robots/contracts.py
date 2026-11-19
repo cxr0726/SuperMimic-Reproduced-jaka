@@ -9,6 +9,7 @@ from supermimic.envs.mdp.rewards import TrackingRewardCfg
 from supermimic.observation_layout import resolve_observation_layout
 from supermimic.robots.registry import RobotName, get_robot_spec, resolve_robot_environment
 from supermimic.sim_context import (
+    PHYSICS_STEP_MS,
     KHAN_ANKLE_JOINTS,
     KHAN_FOOT_BODIES,
     KHAN_LOWER_BODY_JOINTS,
@@ -93,7 +94,7 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
             **settings,
             "actuator_delay_enabled_in_training": settings["actuator_delay"] and env_config.get("domain_randomization", True),
             "actuator_delay_sampling": "per_environment_per_fused_group_held_for_episode",
-            "actuator_delay_physics_dt_s": 0.005,
+            "actuator_delay_physics_dt_s": PHYSICS_STEP_MS / 1000,
             "nominal_evaluation_delay": False,
             "delay_initial_pending_target": "zero_physical_target_after_robot_reset",
             "world_model_delay_queue": False, "delay_in_xi": True,
@@ -208,6 +209,19 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
                 "mode": "startup", "independent_per_joint": True,
                 "operation": "add_to_nominal", "xi": "actual_total_frictionloss_nm",
             }
+            if env_config.get("foot_mass_shared", False):
+                contract["version"] = 15
+                contract["simulation_schema"]["dynamics_randomization"]["foot_mass_delta_kg"][
+                    "independent_per_body"
+                ] = False
+        if env_config.get("wm_delay_history", False):
+            contract["version"] = 16
+            contract["simulation_schema"].update({
+                "world_model_delay_queue": True,
+                "world_model_input_dim": spec.state_dim + 2 * spec.num_joints + context.dim,
+                "world_model_delay_actions": "first_and_last_applied_commands",
+                "world_model_delay_timing": "number_of_substeps_before_within_step_command_switch",
+            })
         if layout == "isaac_khan":
             contract["observation_schema"] = {
                 "future_frames": 5, "history": 5, "goal_dim": 155, "policy_dim": 465,

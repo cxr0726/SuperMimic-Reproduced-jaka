@@ -91,8 +91,10 @@ class _RecordedBuffer:
     def add(self, ids, **kwargs):
         self.rows.append((ids.clone(), {key: value.clone() for key, value in kwargs.items()}))
 
-    def end_episode(self, ids):
-        self.end_calls.append(ids.clone())
+    def end_episode(self, ids, *, mask=None):
+        ended = ids if mask is None else ids[mask]
+        if ended.numel():
+            self.end_calls.append(ended.clone())
 
 
 class _Physics:

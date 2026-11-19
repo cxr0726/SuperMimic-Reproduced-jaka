@@ -40,7 +40,8 @@ class ReplayRecorder(RecorderTerm):
         n = env.num_envs
         self.action_dim = self.state_io.num_joints
         self.buffer = ReplayBuffer(n, int(p["capacity"]), self.state_io.state_dim,
-                                   self.action_dim, self.ctx.xi_dim, env.device)
+                                   self.action_dim, self.ctx.xi_dim, env.device,
+                                   delay_history=p.get("delay_history", False))
         self.prev_s = torch.zeros(n, self.state_io.state_dim, device=env.device)
         self.prev_xi = torch.zeros(n, self.ctx.xi_dim, device=env.device)
         self.prev_frame = torch.zeros(n, dtype=torch.long, device=env.device)
@@ -71,6 +72,9 @@ class ReplayRecorder(RecorderTerm):
     def record_post_reset(self, env_ids: torch.Tensor) -> None:
         if not self.enabled:
             return
+        # External resets have no pre-reset hook. End any still-open episode so
+        # its last command can never be sampled as history of the new episode.
+        self.buffer.end_episode(env_ids, mask=~self.ep_start[env_ids])
         self._remember(env_ids)
         self.ep_start[env_ids] = True
 
@@ -117,6 +121,7 @@ class ReplayRecorder(RecorderTerm):
             ep_start=torch.zeros(env_ids.numel(), dtype=torch.bool, device=env.device),
         )
         self.buffer.end_episode(env_ids)
+        self.ep_start[env_ids] = True
 
     def record_post_step(self) -> None:
         if not self.enabled:

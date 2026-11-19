@@ -1,5 +1,7 @@
 # Khan 参考残差动作与编码器 goal 噪声
 
+当前启动器默认启用带 WM 指令历史的执行器延迟。本文记录参考残差实验的历史配方，当前开关见 [服务器训练说明](KHAN_SERVER_TRAINING.md)。
+
 2026-11-09：新的 Khan `isaac_khan` 训练默认启用下一参考帧残差动作，以及只作用于 motion encoder 的 goal 噪声。本次服务器实验的两个 `.sh` 启动器默认关闭执行器延迟，显式传入 `--env.actuator-delay False`；可用 `--actuator-delay` 恢复0–20 ms延迟。Python机器人默认与旧检查点的延迟实现保留，ξ仍为91维，无延迟时delay_steps为0。训练网络规模、优化器、batch、H32、奖励和机器人参数不变。本次不增加 PD 目标裁剪，也不增加二阶动作或加速度惩罚。
 
 ## 动作公式与接口

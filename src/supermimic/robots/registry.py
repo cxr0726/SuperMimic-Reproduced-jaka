@@ -12,6 +12,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from supermimic.sim_context import PHYSICS_STEP_MS
+
 RobotName = Literal["g1", "khan_mini"]
 
 
@@ -130,9 +132,9 @@ def resolve_robot_environment(
     spec = get_robot_spec(robot)
     delay = spec.default_actuator_delay if actuator_delay is None else actuator_delay
     offset = spec.default_reset_root_z_offset if reset_root_z_offset is None else reset_root_z_offset
-    if (not math.isfinite(actuator_delay_max_ms) or actuator_delay_max_ms < 0
-            or not math.isclose(actuator_delay_max_ms / 5, round(actuator_delay_max_ms / 5))):
-        raise ValueError("Actuator delay must be a nonnegative multiple of the 5 ms physics step")
+    substeps = actuator_delay_max_ms / PHYSICS_STEP_MS
+    if not math.isfinite(substeps) or substeps < 0 or not math.isclose(substeps, round(substeps)):
+        raise ValueError(f"Actuator delay must be a nonnegative multiple of the {PHYSICS_STEP_MS} ms physics step")
     if not math.isfinite(offset) or offset < 0:
         raise ValueError("reset_root_z_offset must be finite and nonnegative")
     return {"actuator_delay": bool(delay), "actuator_delay_max_ms": float(actuator_delay_max_ms),

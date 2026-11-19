@@ -1,11 +1,11 @@
 # Khan 服务器训练：Isaac观测布局、SuperMimic尺度与原优化参数
 
 > `codex/khan-muon-only` 的两个服务器脚本采用
-> `khan_dr_v4` 物理上下文（ξ105、WM199、critic619），三个网络均用 Adam，默认关闭额外足部奖励，
+> `khan_dr_v4` 物理上下文（ξ105、启用延迟时 WM226、critic619），三个网络均用 Adam，默认关闭额外足部奖励，
 > 单步奖励上界0.112。两膝硬下界为 `-0.15099473684210526` rad，软下界为 `-0.03` rad；
 > 全27个转动关节标称 `frictionloss=0.1 N·m`，四踝另加startup U(0,0.15) N·m。
 > 两侧ankle_roll_Link标称质量各加0.1 kg至0.58502 kg，惯量同比乘1.2061770648633046，COM和主轴保持原值。
-> 每脚再独立加startup U(0,0.15) kg，仅质量变化；四踝encoder bias ±0.02 rad，其余±0.01 rad。
+> 每个环境两脚共用一个 startup U(0,0.15) kg 的附重，仅质量变化。四踝 encoder bias ±0.02 rad，其余 ±0.01 rad。
 > 所有 27 轴的采集执行噪声为 0。默认启用 WM 整窗与 Actor/Critic 网络编译、
 > 单 GPU 完整更新 CUDA Graph、批量参考编码和 CDF 回放采样。
 > 详细配置以 [当前分支说明](KHAN_OFFICIAL_PORT.md) 为准。
@@ -13,7 +13,7 @@
 ## 当前配置的训练命令
 
 服务器同步本分支的代码及整个 `assets/robots/khan_mini/`，使用新的run名从头训练。
-新的资产hash及105维上下文与此前101维的200k/220k/280k等检查点不兼容，不能用 `--resume` 接着训练旧run。
+默认配方增加了 WM 动作输入，且两脚附重改为共用采样。旧 run 的 checkpoint 仍可用于 eval 或导出，按新配方训练需要新建 run。
 以下库路径按服务器实际位置调整；脚本不下载数据。
 
 ```bash
@@ -24,7 +24,7 @@ git pull --ff-only origin codex/khan-muon-only
 
 bash scripts/training/train_khan_compact_server.sh \
   --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
-  --run-name khan_8452_adam_clean_dr_v4_4096 \
+  --run-name khan_8452_adam_drv4_delay20_sharedfeet_4096 \
   --num-envs 4096
 ```
 
@@ -33,7 +33,7 @@ bash scripts/training/train_khan_compact_server.sh \
 ```bash
 bash scripts/training/train_khan_server.sh \
   --data-dir data/npz/khan_mini/lafan1 \
-  --run-name khan_lafan1_adam_clean_dr_v4_4096 \
+  --run-name khan_lafan1_adam_drv4_delay20_sharedfeet_4096 \
   --num-envs 4096
 ```
 
@@ -52,7 +52,7 @@ startup在每个环境创建时采样，局部/自动reset后保持；reset项�
 |---|---|---|
 | 腰部附加质量 | U(-2,3) kg，仅质量变化 | startup |
 | 腰部局部COM偏移 | x ±0.035 m，y/z ±0.07 m | startup |
-| 两脚附加质量 | 每个ankle_roll_Link独立U(0,0.15) kg，保持校准后的COM/惯量 | startup |
+| 两脚附加质量 | 每环境采样一个 U(0,0.15) kg，两只 ankle_roll_Link 都加同一个值，保持校准后的 COM/惯量 | startup |
 | 12个腿关节armature | 各自乘U(0.8,1.2) | startup |
 | 四踝frictionloss | 标称0.1 + 独立U(0,0.15) N·m；其余23轴固定0.1 | startup |
 | 全27关节Kp、Kd | 分别独立乘U(0.8,1.2) | reset |
@@ -61,21 +61,24 @@ startup在每个环境创建时采样，局部/自动reset后保持；reset项�
 | 初始状态 | root xyz ±(0.05,0.05,0.01) m；rpy ±(0.1,0.1,0.2) rad；关节角±0.1 rad | reset |
 | 初始速度 | root线速度xyz ±(0.5,0.5,0.2) m/s；角速度xyz ±(0.52,0.52,0.78) rad/s | reset |
 | 采集执行噪声 | 27 轴的归一化动作 std=0 | 控制步 |
+| 执行器延迟 | 整个融合关节组共用 0/5/10/15/20 ms，首个控制步立即执行 | reset |
 | 传感器噪声 | q±0.01 rad，qd±0.5 rad/s，角速度±0.2 rad/s，重力投影±0.07，未来姿态6D分量±0.05 | 观测采样 |
 | actor goal噪声 | z±0.01 m，参考关节角±0.05 rad；critic/reward使用干净参考 | 编码器输入采样 |
 
-执行器延迟默认关闭，未加入间隙模型或episode级参考高度偏置。qd和角速度噪声进入actor前另乘0.2、0.5。
+两个启动器都默认启用执行器延迟。加 `--no-actuator-delay` 可对照，WM 输入恢复 199 维，双脚仍共用附重。qd 和角速度噪声进入 actor 前另乘 0.2、0.5。
 标称eval关闭DR和噪声：使用校准后的重脚、全关节frictionloss=0.1及固定足地摩擦系数1.0。
 
 XML整机标称质量为 **41.03253498863909 kg**。startup后的总质量为
-`M = 41.03253498863909 + W + L + R`，其中W~U(-2,3)、L/R各自独立~U(0,0.15) kg。
-支持范围 **39.0325349886–44.3325349886 kg**，均值 **41.6825349886 kg**，标准差 **1.4446741270 kg**。
-这是三个均匀变量之和，不是整个范围内均匀采样；COM、armature和摩擦随机化不改变上述body_mass总和。
+`M = 41.03253498863909 + W + 2D`，其中独立采样 W~U(-2,3) kg 和 D~U(0,0.15) kg。
+支持范围 **39.0325349886–44.3325349886 kg**，均值 **41.6825349886 kg**，标准差 **1.4459714151 kg**。
+双脚总附重 `2D` 本身是 U(0,0.30) kg，整机质量是两个均匀变量之和。COM、armature 和摩擦随机化不改变 body_mass 总和。
 
 ξ的前101维字段位置保持，足部质量增量以新标称质量为基准，center/scale均为0.075 kg；
 末尾四维依次为左pitch、左roll、右pitch、右roll实际frictionloss总值，center=0.175、scale=0.075 N·m。
-这些参数从生效后的物理模型读回，Replay、WM及critic使用相同的ξ，想象期间固定。actor输入维度保持465/155。
-新checkpoint记录context v4和robot contract v14，资产生成器同步包含标称足部修正。
+参数从生效后的物理模型读回。Replay 和 critic 保留实际延迟步数，actor 输入维度仍为 465/155。
+WM 在窗口开始读取上一条进队列的指令，想象从同样的指令开始，再按每步新动作更新历史。动力学输入包含本控制周期首尾实际生效的指令及切换时机。
+20 ms 的非首步只有上一条指令生效。reset 首步和 0 ms 延迟下只有当前指令生效。
+新 checkpoint 记录 context v4 和 robot contract v16。
 
 ## 历史配置与验证记录
 
@@ -87,7 +90,7 @@ reference residual和相应旧run名不代表上面的当前默认配置，不�
 参考直通分支、critic和奖励保持干净；原动作接口和目标不限幅行为不变。
 旧checkpoint按旧模式加载，新模式应新建run，详见 [参考残差与goal噪声](KHAN_REFERENCE_RESIDUAL.md)。
 
-本次服务器实验的两个 `.sh` 启动器默认关闭执行器延迟；`--actuator-delay` 可显式恢复0–20 ms延迟。
+历史的无延迟服务器实验曾把两个 `.sh` 启动器的执行器延迟默认关闭。
 Python机器人默认及历史延迟实现保留，ξ仍为91维，关闭时delay_steps为0。
 恢复此前启用延迟的run时需显式传 `--actuator-delay`，并匹配其余配置。
 

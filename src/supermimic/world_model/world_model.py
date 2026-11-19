@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from supermimic.normalization import RunningNormalizer
+from supermimic.sim_context import CONTROL_SUBSTEPS, PHYSICS_STEP_MS
 from supermimic.world_model.dynamics import MLP, DynamicsMLP
 from supermimic.world_model.heads import AnalyticHeads, ReferenceFrame
 from supermimic.world_model.state_spec import StateSpec, StateSpecCfg
@@ -30,6 +31,7 @@ class WorldModelCfg:
     hidden_activation: Literal["silu", "gelu"] = "silu"
     termination_mode: Literal["learned", "analytic"] = "learned"
     termination_softness: float = 0.05
+    delay_history: bool = False  # Derived from the training environment for Khan.
 
 
 class TerminationHead(nn.Module):
@@ -57,7 +59,14 @@ class WorldModel(nn.Module):
                (cfg.height_threshold, cfg.tilt_threshold, cfg.termination_softness)):
             raise ValueError("Termination thresholds and softness must be finite and positive")
         self.spec = StateSpec(cfg.state_spec, device, num_joints=heads.num_joints)
-        self.dynamics = DynamicsMLP(feat_dim=self.spec.feat_dim, act_dim=self.spec.num_joints,
+        self.delay_xi_index = None
+        if cfg.delay_history:
+            delay_slice = self.spec.context.slices.get("delay_steps")
+            if delay_slice is None or not math.isclose(self.spec.dt, CONTROL_SUBSTEPS * PHYSICS_STEP_MS / 1000):
+                raise ValueError("WM command history requires a Khan delay field and a 20 ms control step")
+            self.delay_xi_index = delay_slice.start
+        self.dynamics = DynamicsMLP(feat_dim=self.spec.feat_dim,
+                                    act_dim=self.spec.num_joints * (2 if cfg.delay_history else 1),
                                     xi_dim=self.spec.xi_dim, hidden=cfg.hidden,
                                     out_dim=self.spec.delta_dim, layer_norm=cfg.hidden_layer_norm,
                                     activation=cfg.hidden_activation)
@@ -83,14 +92,30 @@ class WorldModel(nn.Module):
 
     # ------------------------------------------------------------------ one step
 
-    def step(self, s: torch.Tensor, action: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
-        """s_{t+1} = integrate(s_t, f(s_t, a_t, xi))."""
+    def step(self, s: torch.Tensor, action: torch.Tensor, xi: torch.Tensor,
+             prev_exec: torch.Tensor | None = None, first_step: torch.Tensor | None = None) -> torch.Tensor:
+        """Predict one step from the commands that actually reach the plant."""
         feat = self.spec.canonical(s)
         if self.cfg.input_normalization:
             # Preserve this repository's heading representation, but replace its
             # fixed feature divisors with empirical statistics in physical units.
             feat = self.state_normalizer(feat * self.spec.in_scale)
             action = self.action_normalizer(self.proc_action(action))
+        index = self.delay_xi_index
+        if index is not None:
+            if prev_exec is None or first_step is None:
+                raise ValueError("Delayed WM steps require the previous executed command and reset flag")
+            if self.cfg.input_normalization:
+                prev_exec = self.action_normalizer(self.proc_action(prev_exec))
+            lag = xi[..., index:index + 1]
+            lag = torch.where(first_step.unsqueeze(-1), 0.0, lag)
+            first = torch.where(lag > 0, prev_exec, action)
+            last = torch.where(lag >= CONTROL_SUBSTEPS, first, action)
+            action = torch.cat((first, last), dim=-1)
+            # A constant command has no within-step switch. Do not expose a
+            # reset or full-period lag as a physical difference to the network.
+            split = torch.where(lag >= CONTROL_SUBSTEPS, 0.0, lag)
+            xi = torch.cat((xi[..., :index], split, xi[..., index + 1:]), dim=-1)
         delta = self.dynamics(feat, action, self.spec.normalize_xi(xi))
         return self.spec.integrate(s, delta)
 
@@ -124,9 +149,10 @@ class WorldModel(nn.Module):
 
     # ------------------------------------------------------------------ Eq. 1
 
-    def _loss_step(self, s, a, xi, s_true, done, ref_root_pos, ref_root_quat):
+    def _loss_step(self, s, a, xi, s_true, done, ref_root_pos, ref_root_quat,
+                   prev_exec=None, first_step=None):
         """One autoregressive step of Eq. 1: returns (s_next, sq_err (n,70), term_bce (n,), logits (n,))."""
-        s_next = self.step(s, a, xi)
+        s_next = self.step(s, a, xi, prev_exec, first_step)
         e = self.spec.error_vector(s_next, s_true)
         feats = self.heads.termination_features(s_next[..., 0:3], s_next[..., 3:7], ReferenceFrame(None, None, None, None, ref_root_pos, ref_root_quat))
         logits = self._termination_from_features(feats)
@@ -139,8 +165,9 @@ class WorldModel(nn.Module):
     def enable_compile(self, mode: str | None = "default") -> None:
         self._loss_step_fn = torch.compile(self._loss_step, mode=None if mode == "default" else mode, dynamic=False) if mode else self._loss_step
 
-    def _window_rollout(self, initial_state: torch.Tensor, actions: torch.Tensor,
-                        xi: torch.Tensor) -> torch.Tensor:
+    def _window_rollout(self, initial_state: torch.Tensor, actions: torch.Tensor, xi: torch.Tensor,
+                        prev_exec: torch.Tensor | None = None,
+                        first_step: torch.Tensor | None = None) -> torch.Tensor:
         """Predict every transition in a replay window without teacher forcing.
 
         Keeping this complete recurrence in one tensor-only function lets
@@ -149,9 +176,11 @@ class WorldModel(nn.Module):
         """
         state = initial_state
         predictions = []
+        continuing = torch.zeros_like(first_step) if first_step is not None else None
         for action in actions.unbind(0):
-            state = self.step(state, action, xi)
+            state = self.step(state, action, xi, prev_exec, first_step)
             predictions.append(state)
+            prev_exec, first_step = action, continuing
         return torch.stack(predictions)
 
     def _window_losses(self, predictions: torch.Tensor, targets: torch.Tensor,
@@ -189,7 +218,8 @@ class WorldModel(nn.Module):
 
     def window_loss_full(self, states: torch.Tensor, a_exec: torch.Tensor,
                          xi: torch.Tensor, done: torch.Tensor,
-                         ref_root_pos: torch.Tensor, ref_root_quat: torch.Tensor):
+                         ref_root_pos: torch.Tensor, ref_root_quat: torch.Tensor,
+                         prev_exec: torch.Tensor | None = None, first_step: torch.Tensor | None = None):
         """Tensor-only complete rollout plus batched loss, eager or compiled.
 
         Execution wrappers are installed by WorldModelTrainer and do not add
@@ -197,10 +227,12 @@ class WorldModel(nn.Module):
         """
         rollout = getattr(self, "_window_rollout_fn", None) or self._window_rollout
         losses = getattr(self, "_window_losses_fn", None) or self._window_losses
-        predictions = rollout(states[0], a_exec, xi)
+        predictions = rollout(states[0], a_exec, xi, prev_exec, first_step)
         return losses(predictions, states[1:], done, ref_root_pos, ref_root_quat)
 
-    def window_loss(self, states: torch.Tensor, a_exec: torch.Tensor, xi: torch.Tensor, done: torch.Tensor, refs: list[ReferenceFrame]):
+    def window_loss(self, states: torch.Tensor, a_exec: torch.Tensor, xi: torch.Tensor,
+                    done: torch.Tensor, refs: list[ReferenceFrame], prev_exec: torch.Tensor | None = None,
+                    first_step: torch.Tensor | None = None):
         """k-step autoregressive loss.
 
         states: (k+1, n, 71) logged states; a_exec: (k, n, 29); xi: (n, 33);
@@ -216,8 +248,14 @@ class WorldModel(nn.Module):
         err_last = None
         acc_num = 0.0
         step_fn = getattr(self, "_loss_step_fn", None) or self._loss_step
+        continuing = torch.zeros_like(first_step) if first_step is not None else None
         for j in range(k):
-            s, sq, bce, logits = step_fn(s, a_exec[j], xi, states[j + 1], done[j], refs[j].root_pos_w, refs[j].root_quat_w)
+            action = a_exec[j]
+            s, sq, bce, logits = step_fn(
+                s, action, xi, states[j + 1], done[j], refs[j].root_pos_w, refs[j].root_quat_w,
+                prev_exec, first_step,
+            )
+            prev_exec, first_step = action, continuing
             total_state = total_state + sq.sum(-1).mean()
             total_term = total_term + bce.mean()
             with torch.no_grad():
@@ -241,12 +279,9 @@ class WorldModel(nn.Module):
     # ------------------------------------------------------------------ diagnostics
 
     @torch.no_grad()
-    def rollout_error(self, states: torch.Tensor, a_exec: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+    def rollout_error(self, states: torch.Tensor, a_exec: torch.Tensor, xi: torch.Tensor,
+                      prev_exec: torch.Tensor | None = None,
+                      first_step: torch.Tensor | None = None) -> torch.Tensor:
         """Open-loop k-step normalised squared error per step (k,), averaged over the batch."""
-        k = a_exec.shape[0]
-        s = states[0]
-        out = []
-        for j in range(k):
-            s = self.step(s, a_exec[j], xi)
-            out.append(self.spec.normalized_sq_error(s, states[j + 1]).mean())
-        return torch.stack(out)
+        predictions = self._window_rollout(states[0], a_exec, xi, prev_exec, first_step)
+        return self.spec.normalized_sq_error(predictions, states[1:]).mean(dim=1)

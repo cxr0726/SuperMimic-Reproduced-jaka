@@ -52,6 +52,7 @@ def test_new_context_is_explicit_in_checkpoint_contract(kind, feet, version, xi,
     cfg.env.context_layout = kind
     cfg.env.foot_tracking = feet
     cfg.env.ankle_encoder_bias_half_range = 0.01  # Isolate the historical context versions.
+    cfg.env.wm_delay_history = False
     resolve_training_observations(cfg)
     saved = asdict(cfg)
     contract = robot_contract("khan_mini", "isaac_khan", env_config=saved["env"])
