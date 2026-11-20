@@ -24,6 +24,8 @@ class WindowBatch:
     reward: torch.Tensor  # (k, n)
     done: torch.Tensor  # (k, n) termination label of states 1..k
     frame: torch.Tensor  # (k, n) target frame of each transition
+    prev_exec: torch.Tensor | None = None  # (n, A) previous pre-queue command at the start
+    first_step: torch.Tensor | None = None  # (n,) initial control step after reset
 
 
 @dataclass
@@ -35,12 +37,16 @@ class StartBatch:
     hist_states: torch.Tensor  # (hist, n, S) states s_{t-hist+1..t} (backfilled at episode start)
     hist_actions: torch.Tensor  # (hist, n, A) clean actions a_{t-hist..t-1} aligned with hist_states' obs
     history_valid: torch.Tensor | None = None  # (hist,n); False denotes reset backfill
+    prev_exec: torch.Tensor | None = None  # Separate from the clean actor/reward history.
+    first_step: torch.Tensor | None = None
 
 
 class ReplayBuffer:
-    def __init__(self, num_envs: int, capacity: int, state_dim: int, act_dim: int, xi_dim: int, device):
+    def __init__(self, num_envs: int, capacity: int, state_dim: int, act_dim: int, xi_dim: int, device, *,
+                 delay_history: bool = False):
         self.E, self.T = num_envs, capacity
         self.device = torch.device(device)
+        self.delay_history = delay_history
         E, T = num_envs, capacity
         f = lambda *shape: torch.zeros(E, T, *shape, device=self.device)
         self.s = f(state_dim)
@@ -81,8 +87,8 @@ class ReplayBuffer:
         self.total_rows += int(env_ids.numel())
 
     @torch.no_grad()
-    def end_episode(self, env_ids) -> None:
-        self.ep_counter[env_ids] += 1
+    def end_episode(self, env_ids, *, mask: torch.Tensor | None = None) -> None:
+        self.ep_counter[env_ids] += 1 if mask is None else mask
 
     @property
     def size(self) -> int:
@@ -93,6 +99,21 @@ class ReplayBuffer:
     def _rolled(self, x: torch.Tensor, j: int) -> torch.Tensor:
         """x[:, (t + j) % T] for every t."""
         return torch.roll(x, shifts=-j, dims=1) if j else x
+
+    def _delay_history_available(self, dist_to_ptr: torch.Tensor) -> torch.Tensor:
+        # A same-episode predecessor can still be the *newest* row when the
+        # ring wraps behind the oldest one. Only reset starts may lack history.
+        prev_valid = (self._rolled(self.valid & ~self.terminal, -1)
+                      & (self._rolled(self.ep_id, -1) == self.ep_id)
+                      & (dist_to_ptr < self.T - 1))
+        return self.ep_start | prev_valid
+
+    def _sample_delay_history(self, e: torch.Tensor, t: torch.Tensor):
+        if not self.delay_history:
+            return None, None
+        first_step = self.ep_start[e, t]
+        prev_exec = self.a_exec[e, (t - 1) % self.T]
+        return torch.where(first_step[:, None], 0.0, prev_exec), first_step
 
     @torch.no_grad()
     def window_mask(self, k: int) -> torch.Tensor:
@@ -110,6 +131,8 @@ class ReplayBuffer:
         t = torch.arange(self.T, device=self.device)[None, :]
         dist_to_ptr = (self.ptr[:, None] - t - 1) % self.T  # rows strictly before ptr: 0 = newest
         ok &= dist_to_ptr >= k
+        if self.delay_history:
+            ok &= self._delay_history_available(dist_to_ptr)
         return ok
 
     @torch.no_grad()
@@ -127,6 +150,7 @@ class ReplayBuffer:
         offs = torch.arange(k + 1, device=self.device)
         tt = (t[None, :] + offs[:, None]) % self.T  # (k+1, n)
         ee = e[None, :].expand(k + 1, n)
+        prev_exec, first_step = self._sample_delay_history(e, t)
         return WindowBatch(
             states=self.s[ee, tt],
             a_exec=self.a_exec[ee[:-1], tt[:-1]],
@@ -135,6 +159,8 @@ class ReplayBuffer:
             reward=self.r[ee[:-1], tt[:-1]],
             done=self.done[ee[1:], tt[1:]],
             frame=self.frame[ee[:-1], tt[:-1]],
+            prev_exec=prev_exec,
+            first_step=first_step,
         )
 
     @torch.no_grad()
@@ -163,6 +189,8 @@ class ReplayBuffer:
         t_idx = torch.arange(self.T, device=self.device)[None, :]
         dist_to_ptr = (self.ptr[:, None] - t_idx - 1) % self.T
         mask &= dist_to_ptr < self.T - hist - 1  # keep history rows from being overwritten underneath
+        if self.delay_history:
+            mask &= self._delay_history_available(dist_to_ptr)
         if horizon is not None:
             mask &= self.frame + horizon <= clip_last[self.clip]
             if not bool(mask.any()):
@@ -174,14 +202,13 @@ class ReplayBuffer:
         same_ep = (self.ep_id[ee, tt] == self.ep_id[e, t][None, :]) & self.valid[ee, tt]
         # Backfill: for rows outside the episode, use the first in-episode row of the window.
         first_ok = same_ep.float().argmax(dim=0)  # first True index per column (same_ep[-1] is always True)
-        pos = torch.arange(hist, device=self.device)[:, None].expand(hist, n)
         tt_fixed = torch.where(same_ep, tt, tt[first_ok, torch.arange(n, device=self.device)][None, :].expand(hist, n))
         hist_states = self.s[ee, tt_fixed]
         # Actions preceding each history state: a at row-1 if same episode else 0.
         tprev = (tt_fixed - 1) % self.T
         prev_ok = (self.ep_id[ee, tprev] == self.ep_id[e, t][None, :]) & self.valid[ee, tprev] & ~self.ep_start[ee, tt_fixed]
         hist_actions = torch.where(prev_ok[..., None], self.a[ee, tprev], torch.zeros_like(self.a[ee, tprev]))
-        del pos
+        prev_exec, first_step = self._sample_delay_history(e, t)
         return StartBatch(
             state=self.s[e, t],
             xi=self.xi[e, t],
@@ -190,4 +217,6 @@ class ReplayBuffer:
             hist_states=hist_states,
             hist_actions=hist_actions,
             history_valid=same_ep,
+            prev_exec=prev_exec,
+            first_step=first_step,
         )

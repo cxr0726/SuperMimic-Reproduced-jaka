@@ -229,6 +229,12 @@ def test_dynamic_state_context_and_recorder_terminal_rows(num_joints):
     assert recorder.buffer.xi.shape == (2, 8, num_joints + 4)
     assert bool(recorder.buffer.terminal[0, 1])
     assert recorder.buffer.size == 2
+    ids = torch.tensor([1])
+    recorder._write_rows(ids, torch.zeros(1))
+    recorder.record_post_reset(ids)  # Manual reset skips record_pre_reset.
+    assert recorder.buffer.ep_counter.tolist() == [1, 1]
+    recorder._write_rows(ids, torch.zeros(1))
+    assert not recorder.buffer.window_mask(1)[1, 0]
 
 
 def test_khan_context_reads_waist_com_independently_of_base_anchor():

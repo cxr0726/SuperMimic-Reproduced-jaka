@@ -8,6 +8,9 @@ import math
 from dataclasses import dataclass
 from typing import Literal
 
+PHYSICS_STEP_MS = 5
+CONTROL_SUBSTEPS = 4
+
 ContextKind = Literal["base", "khan_dr_v1", "khan_dr_v2", "khan_dr_v3", "khan_dr_v4"]
 KHAN_ANKLE_JOINTS = (
     "Left_ankle_pitch_joint", "Left_ankle_roll_joint",

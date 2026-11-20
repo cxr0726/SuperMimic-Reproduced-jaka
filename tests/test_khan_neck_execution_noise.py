@@ -80,7 +80,7 @@ def test_environment_toggle_leaves_observations_rewards_and_randomization_unchan
     after = asdict(masked.actions["joint_pos"])
     assert before.pop("noise_excluded_joint_names") == ()
     assert after.pop("noise_excluded_joint_names") == NECK
-    assert before == after and after["noise_std"] == 0.1
+    assert before == after and after["noise_std"] == 0.0
     for field in ("observations", "rewards", "events", "commands", "terminations"):
         assert getattr(masked, field) == getattr(default, field)
 

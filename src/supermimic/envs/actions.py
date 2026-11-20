@@ -5,7 +5,7 @@ the action-rate penalty see it); Gaussian noise ``eps ~ N(0, std^2)`` is added t
 normalized action only when computing the requested set-point. ``executed_raw`` exposes
 ``a + eps`` for replay. When actuator delay is enabled, this is the current command
 before the physics-step target queue, not the historical target actually applied
-on every substep. The world model intentionally fits that delay implicitly.
+on every substep. Delayed WM training pairs it with the preceding replay command.
 """
 
 from __future__ import annotations

@@ -75,7 +75,7 @@ def test_saved_nondefault_delay_and_reset_semantics_are_validated():
 @pytest.mark.parametrize("field,value", [
     ("actuator_delay", False), ("actuator_delay_max_ms", 10.0),
     ("reset_root_z_offset", 0.0), ("domain_randomization", False),
-    ("disable_neck_action_noise", True),
+    ("action_noise_std", 0.1), ("foot_mass_shared", False),
 ])
 def test_resume_rejects_changed_delay_or_reset_before_loading_weights(tmp_path, field, value):
     from dataclasses import asdict
@@ -150,3 +150,17 @@ def test_range_format_migration_accepts_only_the_audited_xml_pair():
     saved["model_sha256"] = "unverified XML"
     with pytest.raises(ValueError, match="model_sha256"):
         validate_robot_contract({"robot_contract": saved}, "khan_mini")
+
+
+@pytest.mark.parametrize("masked,noise_std", [(False, 0.0), (True, 0.0), (False, 0.05)])
+def test_legacy_explicit_collection_noise_contract_still_loads(masked, noise_std):
+    env = {"context_layout": "khan_dr_v4", "disable_neck_action_noise": masked}
+    contract = robot_contract("khan_mini", env_config=env)
+    if masked:
+        contract["execution_noise_schema"]["other_joint_std_normalized"] = noise_std
+    env["action_noise_std"] = noise_std
+    checkpoint = {"config": {"env": env}, "robot_contract": contract}
+    validate_robot_contract(checkpoint, "khan_mini")
+    contract["simulation_schema"]["xi_dim"] = 101
+    with pytest.raises(ValueError, match="simulation_schema"):
+        validate_robot_contract(checkpoint, "khan_mini")

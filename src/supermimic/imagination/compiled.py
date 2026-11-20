@@ -46,10 +46,12 @@ class ImagStep:
             mode = None if compile_mode == "default" else compile_mode
             self._fn = torch.compile(self._step, mode=mode, dynamic=False)
 
-    def _step(self, s, a, a_prev, xi, ref_body_pos, ref_body_quat, ref_body_lin, ref_body_ang, ref_root_pos, ref_root_quat, ref_joint_pos=None, ref_joint_vel=None):
+    def _step(self, s, a, a_prev, xi, ref_body_pos, ref_body_quat, ref_body_lin, ref_body_ang,
+              ref_root_pos, ref_root_quat, ref_joint_pos=None, ref_joint_vel=None,
+              prev_exec=None, first_step=None):
         ref = ReferenceFrame(ref_body_pos, ref_body_quat, ref_body_lin, ref_body_ang,
                              ref_root_pos, ref_root_quat, ref_joint_pos, ref_joint_vel)
-        s_next = self.wm.step(s, a, xi)
+        s_next = self.wm.step(s, a, xi, prev_exec, first_step)
         bodies = self.wm.heads.robot_bodies(s_next)
         terms = self.wm.heads.reward(s_next, a, a_prev, ref, bodies)
         r = terms["total"]
@@ -63,7 +65,7 @@ class ImagStep:
             return (*result, bodies["pos"], bodies["quat"])
         return result
 
-    def __call__(self, s, a, a_prev, xi, ref: ReferenceFrame):
+    def __call__(self, s, a, a_prev, xi, ref: ReferenceFrame, prev_exec=None, first_step=None):
         return self._fn(s, a, a_prev, xi, ref.body_pos_w, ref.body_quat_w,
                         ref.body_lin_vel_w, ref.body_ang_vel_w, ref.root_pos_w,
-                        ref.root_quat_w, ref.joint_pos, ref.joint_vel)
+                        ref.root_quat_w, ref.joint_pos, ref.joint_vel, prev_exec, first_step)

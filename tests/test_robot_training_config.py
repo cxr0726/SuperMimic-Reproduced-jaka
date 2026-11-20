@@ -91,7 +91,7 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
         assert foot_mass.mode == "startup"
         assert foot_mass.params["operation"] == "add"
         assert foot_mass.params["ranges"] == (0.0, 0.15)
-        assert foot_mass.params["shared_random"] is False
+        assert foot_mass.params["shared_random"] is True
         assert foot_mass.params["asset_cfg"].body_names == (
             "Left_ankle_roll_Link", "Right_ankle_roll_Link",
         )
@@ -117,8 +117,9 @@ def test_robot_observation_reward_dr_and_solver_contract(anchor_obs, randomized)
     action_a, action_b = asdict(khan.actions["joint_pos"]), asdict(g1.actions["joint_pos"])
     assert set(action_a.pop("scale").values()) == {0.5}
     assert action_b.pop("scale") == G1_ACTION_SCALE
+    assert action_a.pop("noise_std") == 0.0
+    assert action_b.pop("noise_std") == 0.1
     assert action_a == action_b
-    assert action_a["noise_std"] == 0.1
     command_a, command_b = asdict(khan.commands["motion"]), asdict(g1.commands["motion"])
     assert command_a.pop("g_max") == pytest.approx(11.2)
     assert command_b.pop("g_max") == pytest.approx(10.0)
@@ -170,7 +171,7 @@ def test_robot_bindings_and_g1_compatibility_defaults():
     assert cfg.events["foot_friction"].params["asset_cfg"].geom_names == khan.foot_geom_regex
     assert cfg.recorders["replay"].params == {
         "capacity": 1000, "foot_geom_regex": khan.foot_geom_regex,
-        "com_body_name": khan.com_body, "context_layout": "khan_dr_v4",
+        "com_body_name": khan.com_body, "context_layout": "khan_dr_v4", "delay_history": False,
     }
     model = khan.load_model()
     assert all(name in [model.body(i).name for i in range(model.nbody)] for name in khan.tracked_bodies)
@@ -187,6 +188,7 @@ def test_production_compact_encoder_and_ema_preserve_optimizer_defaults():
     resolve_training_observations(cfg)
     assert cfg.env.context_layout == cfg.world_model.state_spec.context_layout == "khan_dr_v4"
     assert SimContextLayout(27, kind=cfg.env.context_layout).dim == 105
+    assert cfg.env.foot_mass_shared and cfg.env.wm_delay_history and cfg.world_model.delay_history
     assert cfg.world_model.hidden == (2048, 2048, 2048)
     assert cfg.policy.encoder_hidden == (1024, 512, 256)
     assert cfg.policy.decoder_hidden == (2048, 1024, 512, 256)

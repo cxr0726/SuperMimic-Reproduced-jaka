@@ -30,17 +30,20 @@ def test_v4_records_actual_friction_and_normalizes_new_ranges_without_moving_old
     torch.testing.assert_close(normalized[:, 101:], torch.tensor([[-1.], [0.], [1.]], dtype=torch.float64).expand(-1, 4))
 
 
-def test_fresh_v4_uses_independent_startup_additions_and_nominal_eval_disables_both():
+def test_fresh_v4_shares_foot_payload_and_randomizes_ankle_friction_independently():
     fresh = TrainConfig(robot="khan_mini")
     resolve_training_observations(fresh)
     assert fresh.env.context_layout == fresh.world_model.state_spec.context_layout == "khan_dr_v4"
     assert fresh.env.ankle_encoder_bias_half_range == .02
+    assert fresh.env.foot_mass_shared
     cfg = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=["unused"], robot="khan_mini"))
-    for name, func in (("foot_mass", dr.body_mass), ("ankle_frictionloss", dr.joint_friction)):
+    for name, func, shared in (
+        ("foot_mass", dr.body_mass, True), ("ankle_frictionloss", dr.joint_friction, False),
+    ):
         event = cfg.events[name]
         assert event.mode == "startup" and event.func is func
         assert event.params["ranges"] == (0., .15)
-        assert event.params["operation"] == "add" and event.params["shared_random"] is False
+        assert event.params["operation"] == "add" and event.params["shared_random"] is shared
     assert cfg.events["ankle_frictionloss"].params["asset_cfg"].joint_names == KHAN_ANKLE_JOINTS
     assert "dof_frictionloss" in cfg.events["ankle_frictionloss"].func.model_fields
     nominal = make_env_cfg(SuperMimicEnvCfgArgs(
@@ -56,12 +59,13 @@ def test_v4_contract_and_restore_preserve_physics_and_expanded_network_inputs():
     resolve_training_observations(cfg)
     saved = asdict(cfg)
     contract = robot_contract("khan_mini", "isaac_khan", env_config=saved["env"])
-    assert contract["version"] == 14
+    assert contract["version"] == 15
     schema = contract["simulation_schema"]
     assert schema["xi_dim"] == 105 and schema["world_model_input_dim"] == 199
     assert contract["observation_schema"]["critic_input_dim"] == 619
     assert schema["ankle_frictionloss_joint_order"] == list(KHAN_ANKLE_JOINTS)
     assert schema["dynamics_randomization"]["foot_mass_delta_kg"]["range"] == [0., .15]
+    assert schema["dynamics_randomization"]["foot_mass_delta_kg"]["independent_per_body"] is False
     assert schema["dynamics_randomization"]["ankle_frictionloss_nm"]["total_range"] == [.1, .25]
     assert contract["nominal_joint_physics"]["joint_frictionloss_randomized"] is True
     for foot in contract["nominal_foot_inertials"]["bodies"].values():
@@ -79,3 +83,15 @@ def test_v4_contract_and_restore_preserve_physics_and_expanded_network_inputs():
     saved["env"]["context_layout"] = "khan_dr_v3"
     with pytest.raises(ValueError, match="robot_contract differs"):
         validate_robot_contract({"config": saved, "robot_contract": contract}, "khan_mini", "isaac_khan")
+
+    saved["env"]["context_layout"] = "khan_dr_v4"
+    del saved["env"]["foot_mass_shared"]
+    historical = robot_contract("khan_mini", "isaac_khan", env_config=saved["env"])
+    assert historical["version"] == 14
+    assert historical["simulation_schema"]["dynamics_randomization"]["foot_mass_delta_kg"][
+        "independent_per_body"
+    ] is True
+    validate_robot_contract({"config": saved, "robot_contract": historical}, "khan_mini", "isaac_khan")
+    module.restore_config(restored, saved)
+    resolve_training_observations(restored)
+    assert restored.env.foot_mass_shared is False

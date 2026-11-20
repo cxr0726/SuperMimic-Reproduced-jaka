@@ -69,6 +69,12 @@ def test_foot_payload_is_independent_startup_only_and_opt_in_by_context_version(
             npz_files=["unused.npz"], robot="khan_mini", context_layout=kind,
         ))
         assert "foot_mass" not in legacy.events
+    legacy_v4 = make_env_cfg(SuperMimicEnvCfgArgs(
+        npz_files=["unused.npz"], robot="khan_mini", context_layout="khan_dr_v4",
+        foot_mass_shared=False,
+    ))
+    assert legacy_v4.events["foot_mass"].params["ranges"] == (0., 0.15)
+    assert legacy_v4.events["foot_mass"].params["shared_random"] is False
     nominal = make_env_cfg(SuperMimicEnvCfgArgs(
         npz_files=["unused.npz"], robot="khan_mini", context_layout="khan_dr_v3",
         domain_randomization=False,
@@ -140,7 +146,7 @@ def _readback(env, *, randomized):
             torch.testing.assert_close(xi[:, 101:], torch.full_like(xi[:, 101:], .1), rtol=0, atol=0)
     if randomized:
         assert ((delta >= 0.) & (delta <= (0.15 if v4 else 0.2) + 1e-7)).all()
-        assert not torch.equal(delta[:, 0], delta[:, 1])
+        assert torch.equal(delta[:, 0], delta[:, 1]) is v4
         assert (delta.std(dim=0) > 0.005).all()
         assert ((xi[:, 97] >= -2.) & (xi[:, 97] <= 3.)).all()
     else:

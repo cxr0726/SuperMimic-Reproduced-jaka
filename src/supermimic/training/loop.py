@@ -211,12 +211,14 @@ class Trainer:
                 action_noise_std=cfg.env.action_noise_std,
                 disable_neck_action_noise=cfg.env.disable_neck_action_noise,
                 ankle_encoder_bias_half_range=cfg.env.ankle_encoder_bias_half_range,
+                foot_mass_shared=cfg.env.foot_mass_shared,
                 obs_noise=cfg.env.obs_noise,
                 reset_noise=cfg.env.reset_noise,
                 domain_randomization=cfg.env.domain_randomization,
                 actuator_delay=cfg.env.actuator_delay,
                 actuator_delay_max_ms=cfg.env.actuator_delay_max_ms,
                 delay_reset_first_step_no_delay=cfg.env.delay_reset_first_step_no_delay,
+                wm_delay_history=cfg.env.wm_delay_history,
                 reset_root_z_offset=cfg.env.reset_root_z_offset,
                 sampling_mode=cfg.env.sampling_mode,
                 reset_sampler=cfg.env.reset_sampler,
@@ -299,7 +301,7 @@ class Trainer:
                   f"activation={cfg.policy.hidden_activation}; critic blocks: "
                   f"LayerNorm={cfg.critic.hidden_layer_norm}, activation={cfg.critic.hidden_activation}")
             print(f"[INFO] sim context: {self.wm.spec.context.kind}, xi={self.wm.spec.xi_dim}, "
-                  f"fields={self.wm.spec.context.sizes}; delay queue remains implicit")
+                  f"fields={self.wm.spec.context.sizes}; WM command history={cfg.world_model.delay_history}")
             delay_active = cfg.env.actuator_delay and cfg.env.domain_randomization
             print(f"[INFO] actuator delay: {'ON' if delay_active else 'OFF'}, "
                   f"range=0..{cfg.env.actuator_delay_max_ms if delay_active else 0:g} ms; "
@@ -373,7 +375,8 @@ class Trainer:
         saved_wm = ck["config"].get("world_model", {})
         legacy_wm = {"input_normalization": False, "hidden_layer_norm": False,
                      "hidden_activation": "silu", "termination_mode": "learned",
-                     "termination_softness": .05, "height_threshold": .25, "tilt_threshold": .8}
+                     "termination_softness": .05, "height_threshold": .25, "tilt_threshold": .8,
+                     "delay_history": False}
         differences = {name: (saved_wm.get(name, default), getattr(self.cfg.world_model, name))
                        for name, default in legacy_wm.items()
                        if saved_wm.get(name, default) != getattr(self.cfg.world_model, name)}
@@ -398,7 +401,7 @@ class Trainer:
         if self.cfg.robot == "khan_mini" and robot_contract_differences(ck["robot_contract"], robot_contract(
             self.cfg.robot, self.cfg.env.observation_layout, env_config=asdict(self.cfg.env),
         )):
-            raise ValueError("Checkpoint environment semantics differ (delay/reset/DR/reward); start a new run or use matching settings")
+            raise ValueError("Checkpoint environment semantics differ (delay/reset/DR/reward/execution noise); start a new run or use matching settings")
         if self.cfg.policy.action_mode == "reference_residual":
             for key in ("reference_q_default", "reference_action_scale"):
                 actual = ck["policy"].get(key)

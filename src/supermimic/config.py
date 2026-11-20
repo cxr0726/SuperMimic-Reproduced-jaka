@@ -13,8 +13,9 @@ from supermimic.observation_layout import (
     resolve_observation_sizes,
 )
 from supermimic.policy.nets import CriticCfg, PolicyCfg
-from supermimic.robots.registry import RobotName
+from supermimic.robots.registry import RobotName, resolve_action_noise_std
 from supermimic.sim_context import (
+    CONTROL_SUBSTEPS, PHYSICS_STEP_MS,
     ContextKind, resolve_context_layout, validate_ankle_encoder_bias_half_range,
 )
 from supermimic.world_model.wm_trainer import WMTrainerCfg
@@ -34,13 +35,14 @@ class DataCfg:
 class EnvCfg:
     num_envs: int = 4096
     episode_length_s: float = 10.0
-    action_noise_std: float = 0.1
+    action_noise_std: float | None = None  # Khan: clean collection; G1: 0.1.
     obs_noise: bool = True
     reset_noise: bool = True
     domain_randomization: bool = True
     actuator_delay: bool | None = None  # Khan: episode-held 0–20 ms delay; G1: off
     actuator_delay_max_ms: float = 20.0
     delay_reset_first_step_no_delay: bool | None = None  # Khan: prime the queue with the first command
+    wm_delay_history: bool | None = None  # Khan delayed training defaults to explicit command history.
     reset_root_z_offset: float | None = None  # Actual robot only: Khan .05 m, G1 zero
     sampling_mode: str = "return"
     reset_sampler: Literal["legacy", "window_value"] = "window_value"
@@ -57,8 +59,9 @@ class EnvCfg:
     tail_bin_merge_fraction: float | None = None  # Khan: merge every incomplete final bin (1.0)
     reset_min_remaining_steps: int | None = None  # Khan: policy horizon; G1: one reference step
     anchor_obs: bool = False
-    disable_neck_action_noise: bool = False  # Khan launchers enable this; legacy configs keep all-joint noise.
+    disable_neck_action_noise: bool = False  # Historical Khan runs with nonzero action_noise_std.
     ankle_encoder_bias_half_range: float | None = None  # Fresh Khan DR v3/v4: .02 rad; legacy/G1: .01.
+    foot_mass_shared: bool | None = None  # Fresh Khan DR v4 shares one added mass between both feet.
 
 
 @dataclass
@@ -115,8 +118,11 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
     from supermimic.robots.registry import get_robot_spec, resolve_robot_environment
 
     robot = get_robot_spec(cfg.robot)
+    cfg.env.action_noise_std = resolve_action_noise_std(cfg.robot, cfg.env.action_noise_std)
     cfg.env.context_layout = resolve_context_layout(cfg.robot, cfg.env.context_layout)
     cfg.world_model.state_spec.context_layout = cfg.env.context_layout
+    if cfg.env.foot_mass_shared is None:
+        cfg.env.foot_mass_shared = cfg.env.context_layout == "khan_dr_v4"
     if cfg.env.ankle_encoder_bias_half_range is None:
         cfg.env.ankle_encoder_bias_half_range = 0.02 if cfg.env.context_layout in ("khan_dr_v3", "khan_dr_v4") else 0.01
     cfg.env.ankle_encoder_bias_half_range = validate_ankle_encoder_bias_half_range(
@@ -133,6 +139,20 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
         cfg.env.merge_short_tail_bins = cfg.robot == "khan_mini"
     if cfg.env.delay_reset_first_step_no_delay is None:
         cfg.env.delay_reset_first_step_no_delay = cfg.robot == "khan_mini"
+    delay_active = (cfg.robot == "khan_mini" and cfg.env.actuator_delay and cfg.env.domain_randomization
+                    and cfg.env.actuator_delay_max_ms > 0)
+    if cfg.env.wm_delay_history is None:
+        cfg.env.wm_delay_history = delay_active and cfg.env.delay_reset_first_step_no_delay
+    if cfg.env.wm_delay_history and (
+        not delay_active or not cfg.env.delay_reset_first_step_no_delay
+        or round(cfg.env.actuator_delay_max_ms / PHYSICS_STEP_MS) > CONTROL_SUBSTEPS
+    ):
+        raise ValueError(
+            "WM command history requires Khan actuator delay with DR, first-step priming, and "
+            f"a maximum of {PHYSICS_STEP_MS * CONTROL_SUBSTEPS} ms. "
+            "Set --env.wm-delay-history False to reproduce legacy implicit delay."
+        )
+    cfg.world_model.delay_history = cfg.env.wm_delay_history
     if cfg.env.tail_bin_merge_fraction is None:
         cfg.env.tail_bin_merge_fraction = 1.0 if cfg.robot == "khan_mini" else 0.5
     if cfg.env.reset_min_remaining_steps is None:

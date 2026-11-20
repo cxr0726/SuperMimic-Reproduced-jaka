@@ -16,7 +16,7 @@
 | 更新对象 | 窗口中每个环境、回合、bin 的访问回报先平均，再按新样本数更新 |
 | 截断尾值 | 失败=0；动作结束=全 bin 价值均值；timeout/窗口末=来源clip内下一帧bin价值，后继不越clip |
 | 分布 | 均匀 0.5＋当前困难 0.4＋累计 focus² 历史 0.1 |
-| WM 输入 | 状态、物理 PD 目标分别运行均值/方差归一化；ξ 保持范围归一化 |
+| WM 输入 | 状态、物理 PD 目标分别运行均值/方差归一化。延迟模式使用周期首尾生效的指令及切换时机，ξ 保持原字段布局 |
 | WM 隐层 | 2048/2048/2048，Linear→LayerNorm→GELU |
 | 想象终止 | 解析软阈值，softness=0.05；不训练 termination MLP |
 | critic | bootstrap、GAE target 仅上界限制，当前Khan为0.112/(1−0.99)=11.2 |
@@ -28,15 +28,16 @@
 | 膝关节限位 | 硬范围 `[-0.15099473684210526, 2.2689]` rad，factor=0.9，计算后的软下界为 `-0.03` rad |
 | 关节 frictionloss | 全部27个 hinge 标称 `0.1 N·m`；四踝独立加startup U(0,0.15) N·m，nominal eval固定0.1 |
 | 标称脚质量/惯量 | 两侧ankle_roll_Link各0.58502 kg，惯量按原质量比例乘1.2061770648633046，COM与主轴不变 |
-| 足部质量DR | 两脚各自startup加U(0,0.15) kg，仅质量变化 |
+| 足部质量DR | 每个环境启动时采样一个 U(0,0.15) kg，两脚加同一个值，仅质量变化 |
 | encoder bias | 四踝±0.02 rad，其余23轴±0.01 rad，每回合独立均匀采样 |
-| 执行噪声 | 两个服务器脚本默认颈 yaw/pitch 为0，其余25轴std=0.1；观测和goal噪声保留 |
+| 执行器延迟 | 默认按整组关节每回合采样 0/5/10/15/20 ms，reset 首周期立即执行 |
+| 采集执行噪声 | 全 27 轴默认 std=0，保留观测和 encoder goal 噪声 |
 | 额外足部跟踪 | 默认关闭；保留原15 body及颈关节奖励，不改变足部质量随机化 |
-| DR | `khan_dr_v4`物理上下文，ξ105维、WM输入199维、critic619维；分支名仍为feat/khan-dr-v3-only |
+| DR | `khan_dr_v4`物理上下文，ξ105 维、默认 WM 输入 226 维、critic619 维；分支名仍为feat/khan-dr-v3-only |
 
 保留当前 clip 内分 bin、尾 bin 合并、物理及想象 H32 合法性、15 body/颈关节奖励、
 base_link anchor、Khan DR、reset 实际 root 抬高 0.05m、5/5 observation
-窗口以及原有优化参数和学习率调度。执行器 delay 和参考 FK 编译默认关闭。
+窗口以及原有优化参数和学习率调度。参考 FK 编译默认关闭。
 WM、Actor、Critic隐藏层均为Linear→LayerNorm→GELU。encoder最终latent仍经tanh，
 decoder动作输出和critic价值输出仍为普通Linear，不添加输出归一化或限幅。
 WM 仍使用现有 heading 表示（Khan67维状态特征）、66维速度/pose residual 输出、
@@ -46,7 +47,7 @@ WM 仍使用现有 heading 表示（Khan67维状态特征）、66维速度/pose 
 完整学习步骤 CUDA Graph 或新版融合优化。
 
 本分支用新run隔离上一轮的参考残差和额外足部奖励：默认关闭这两项，保留
-扩展后的DR v3、官方采样器/归一化/LayerNorm/GELU、网络、优化器及学习率调度。
+扩展后的 DR v4、官方采样器、归一化、LayerNorm/GELU、网络、优化器及学习率调度。
 `--reference-residual` 和 `--foot-tracking` 可分别恢复残差和足部奖励；
 `--no-reference-residual` 和 `--no-foot-tracking` 可显式指定当前默认值。
 这两个开关独立，不会关闭双脚质量随机化，也不会缩减ξ或critic输入。
@@ -251,42 +252,13 @@ G30 = r30 + 0.99*r31 + ... + 0.99^19*r49 + 0.99^20*V[bin(50)]
 
 ## 服务器训练
 
-先同步并切换到本分支，再在服务器项目目录运行。切换前应保存服务器自己的
-代码改动；以下命令不覆盖本地修改。默认eager参考FK、delay关闭、default动作、
-额外足部奖励关闭，采用context v4并保留encoder goal噪声，颈部执行噪声关闭；
-使用本次重脚标称模型、startup脚质量/四踝摩擦DR和膝限位资产，从头新建run：
+以 [服务器训练说明](KHAN_SERVER_TRAINING.md#当前配置的训练命令) 中的完整命令更新分支并从头训练。
+默认使用 8452 紧凑库、eager 参考 FK、0–20 ms 执行器延迟、显式 WM 指令历史、双脚共用附重、
+零采集执行噪声及 default 姿态动作。默认关闭额外足部奖励。
 
-```bash
-cd /home/jaka/Workspace/SuperMimic-Reproduced-jaka
-git fetch origin
-git switch feat/khan-dr-v3-only
-git pull --ff-only origin feat/khan-dr-v3-only
-
-bash scripts/training/train_khan_compact_server.sh \
-  --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
-  --run-name khan_8452_dr_v3_footb_fricdr015_bias02_4096 \
-  --num-envs 4096 --ankle-encoder-bias 0.02 --no-neck-action-noise --no-actuator-delay
-```
-
-开启参考 FK 编译时增加 `--reference-fk-compile`，并使用不同 run-name。
-编译对整体吞吐的收益需要在服务器 GPU 上测量；它不改变采样或归一化语义。
-仅检查路径和命令可增加 `--dry-run`，它不会加载 PT 张量或启动 CUDA。
-
-NPZ 混合库沿用原入口：
-
-```bash
-bash scripts/training/train_khan_server.sh \
-  --data-dir data/npz/khan_mini/mixed \
-  --run-name khan_mixed_dr_v3_footb_fricdr015_bias02_4096 \
-  --num-envs 4096 --ankle-encoder-bias 0.02 --no-neck-action-noise --no-actuator-delay
-```
-
-两个 wrapper 都保留环境变量清理、路径/资产检查、已有 checkpoint 防覆盖和
-`--resume`、`--stop-after-iterations` 功能。只允许从相同配置和新资产训练的检查点恢复；
-`--stop-after-iterations` 不缩短正式 320k 学习率调度。
-使用可选残差、足部奖励或颈部噪声的run，续训时还需显式匹配相应开关；
-脚本不会从文件名猜测设置，训练入口会检查checkpoint兼容性。原资产的旧run不能
-通过增加这些开关变成兼容；应在原版本和原资产下恢复。
+如需对照，在新的 run 中添加 `--no-actuator-delay`。如需开启参考 FK 编译，添加
+`--reference-fk-compile`。仅检查路径和命令可添加 `--dry-run`。
+两个启动器支持以同一配置恢复新 checkpoint。历史研究的非零执行噪声需显式选择。
 
 ## 观察指标
 

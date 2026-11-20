@@ -5,16 +5,17 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 NUM_ENVS=4096
-RUN_NAME=khan_8452_dr_v3_footb_fricdr015_bias02_4096
+RUN_NAME=khan_8452_drv4_delay20_sharedfeet_4096
 LIBRARY="$PROJECT_DIR/data/pt/khan_combined_8452_compact.pt"
 REFERENCE_FK_COMPILE=0
 RESUME=''
 STOP_AFTER=''
 DRY_RUN=0
-ACTUATOR_DELAY=False
+ACTUATOR_DELAY=True
 ACTION_MODE=default
 FOOT_TRACKING=0
-DISABLE_NECK_ACTION_NOISE=1
+ACTION_NOISE_STD=0.0
+NECK_ACTION_NOISE_MASK=0
 ANKLE_ENCODER_BIAS_HALF_RANGE=0.02
 GOAL_NOISE_Z=0.01
 GOAL_NOISE_JOINT_POS=0.05
@@ -38,13 +39,13 @@ uses raw joint positions in radians. --foot-tracking restores extra foot rewards
 Khan assets use a knee soft lower limit of -0.03 rad and nominal 0.1 N m
 frictionloss on all 27 hinges. Four ankle axes add independent startup U(0,0.15) N m.
 Each ankle_roll_Link has nominal mass 0.58502 kg and uniformly scaled inertia;
-independent startup foot payload U(0,0.15) kg retains that nominal COM/inertia.
-Neck execution noise is disabled by default; the other 25 axes retain std 0.1.
+both feet share one startup payload U(0,0.15) kg draw per environment.
+Physical collection uses zero Gaussian execution noise on all 27 axes by default.
 Episode-held encoder bias is +/-0.02 rad on four ankle axes and +/-0.01 elsewhere.
 Use --ankle-encoder-bias to select another range; resume requires the saved range.
 Use a fresh run with these assets; old checkpoints require their original assets.
-Actuator delay is disabled by default for this server experiment; --actuator-delay
-enables held 0–20 ms delay with an immediate first control step.
+Actuator delay draws 0/5/10/15/20 ms per episode by default; the first command
+takes effect immediately after reset. The world model uses command history.
 Reset clearance remains 0.05 m and first-step action-rate is unchanged. Every
 incomplete final bin is merged into the previous bin. Physical reset requires
 at least 32 remaining reference steps. Activation recomputation remains disabled.
@@ -59,20 +60,21 @@ its effect on total training throughput depends on the target GPU.
 Options:
   --library PATH             Packed compact .pt file (default: project data/pt/khan_combined_8452_compact.pt)
   --num-envs N               Parallel robot environments (default: 4096)
-  --run-name NAME            Directory under project logs/ (default: khan_8452_dr_v3_footb_fricdr015_bias02_4096)
+  --run-name NAME            Directory under project logs/ (default: khan_8452_drv4_delay20_sharedfeet_4096)
   --reference-fk-compile     Compile current/imagination reference FK on CUDA
   --no-reference-fk-compile  Use eager reference FK (default)
   --no-reference-residual    Use default-pose actions (default)
   --reference-residual       Opt in to clean next-reference residual actions
   --no-foot-tracking         Disable extra foot pos/ori rewards (default)
   --foot-tracking            Enable extra foot pos/ori rewards, weights 0.25/0.25
-  --no-neck-action-noise    Disable execution noise on both neck axes (default)
-  --neck-action-noise       Restore std 0.1 execution noise on both neck axes
+  --action-noise-std STD   Gaussian execution noise on normalized actions (default: 0.0)
+  --no-neck-action-noise   Exclude both neck axes when opting into positive execution noise
+  --neck-action-noise      Include both neck axes when opting into positive execution noise
   --ankle-encoder-bias RAD  Ankle encoder bias half-range (default: 0.02 rad)
   --no-goal-noise            Disable encoder goal augmentation
   --goal-noise               Enable Isaac encoder goal noise (default)
-  --no-actuator-delay        Disable actuator delay (default for this server experiment)
-  --actuator-delay           Enable held 0–20 ms delay; first control step is immediate
+  --no-actuator-delay        Disable actuator delay and WM command history for an ablation
+  --actuator-delay           Enable held 0–20 ms delay (default); first control step is immediate
   --resume PATH              Restore a Khan checkpoint with matching data/configuration/assets
   --stop-after-iterations N  Optional execution limit; retains the 320k LR schedule
   --dry-run                 Check paths and print command without executing Python or training
@@ -104,8 +106,9 @@ while (($#)); do
         --reference-residual) ACTION_MODE=reference_residual; shift ;;
         --no-foot-tracking) FOOT_TRACKING=0; shift ;;
         --foot-tracking) FOOT_TRACKING=1; shift ;;
-        --no-neck-action-noise) DISABLE_NECK_ACTION_NOISE=1; shift ;;
-        --neck-action-noise) DISABLE_NECK_ACTION_NOISE=0; shift ;;
+        --action-noise-std) need_value "$@"; ACTION_NOISE_STD="$2"; shift 2 ;;
+        --no-neck-action-noise) NECK_ACTION_NOISE_MASK=1; shift ;;
+        --neck-action-noise) NECK_ACTION_NOISE_MASK=0; shift ;;
         --ankle-encoder-bias) need_value "$@"; ANKLE_ENCODER_BIAS_HALF_RANGE="$2"; shift 2 ;;
         --no-goal-noise) GOAL_NOISE_Z=0.0; GOAL_NOISE_JOINT_POS=0.0; shift ;;
         --goal-noise) GOAL_NOISE_Z=0.01; GOAL_NOISE_JOINT_POS=0.05; shift ;;
@@ -118,6 +121,8 @@ while (($#)); do
 done
 
 positive_integer "$NUM_ENVS" || die '--num-envs must be a positive integer'
+[[ "$ACTION_NOISE_STD" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || \
+    die '--action-noise-std must be a nonnegative decimal'
 [[ "$ANKLE_ENCODER_BIAS_HALF_RANGE" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || \
     die '--ankle-encoder-bias must be a nonnegative decimal in radians'
 [[ -z "$STOP_AFTER" ]] || positive_integer "$STOP_AFTER" || \
@@ -172,14 +177,12 @@ command=(
     --policy.action-mode "$ACTION_MODE"
     --policy.goal-noise-z "$GOAL_NOISE_Z" --policy.goal-noise-joint-pos "$GOAL_NOISE_JOINT_POS"
     --env.actuator-delay "$ACTUATOR_DELAY" --env.delay-reset-first-step-no-delay True
-    --env.ankle-encoder-bias-half-range "$ANKLE_ENCODER_BIAS_HALF_RANGE"
+    --env.action-noise-std "$ACTION_NOISE_STD" --env.ankle-encoder-bias-half-range "$ANKLE_ENCODER_BIAS_HALF_RANGE"
     --env.merge-short-tail-bins True --env.tail-bin-merge-fraction 1.0
     --env.reset-min-remaining-steps 32
 )
-if ((DISABLE_NECK_ACTION_NOISE)); then
+if [[ "$NECK_ACTION_NOISE_MASK" == 1 && "$ACTION_NOISE_STD" == *[1-9]* ]]; then
     command+=(--env.disable-neck-action-noise)
-else
-    command+=(--env.no-disable-neck-action-noise)
 fi
 # The additional foot rewards are independent of the physics context.
 RAW_REWARD_CAP=0.112
@@ -220,14 +223,16 @@ else
 fi
 printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; then running normalization; critic/reward stay clean; reference skip uses raw clean radians\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
 printf '[INFO] Episode encoder bias: four ankle axes +/- %s rad; other 23 axes +/- 0.01 rad\n' "$ANKLE_ENCODER_BIAS_HALF_RANGE"
-printf '[INFO] Khan: xi 105; critic 619; Kp/Kd x0.8-1.2 per reset; 12 leg armatures x0.8-1.2 at startup; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$ACTUATOR_DELAY"
+WM_INPUT_DIM=199
+[[ "$ACTUATOR_DELAY" == True ]] && WM_INPUT_DIM=226
+printf '[INFO] Khan: xi 105; WM input %s; critic 619; Kp/Kd x0.8-1.2 per reset; 12 leg armatures x0.8-1.2 at startup; waist mass -2..3 kg; actuator delay %s (configured 0–20 ms; applied only when enabled)\n' "$WM_INPUT_DIM" "$ACTUATOR_DELAY"
 printf '[INFO] Khan asset joint limits: knee soft lower -0.03 rad; nominal frictionloss 0.1 N m on all 27 hinges; four ankles add startup U(0,0.15) N m\n'
-if ((DISABLE_NECK_ACTION_NOISE)); then
-    printf '[INFO] Execution noise: neck yaw/pitch OFF; other 25 axes std 0.1; clean action history unchanged\n'
+if [[ "$NECK_ACTION_NOISE_MASK" == 1 && "$ACTION_NOISE_STD" == *[1-9]* ]]; then
+    printf '[INFO] Execution noise: neck yaw/pitch OFF; other 25 axes std %s\n' "$ACTION_NOISE_STD"
 else
-    printf '[INFO] Execution noise: all 27 axes std 0.1; clean action history unchanged\n'
+    printf '[INFO] Execution noise: all 27 axes std %s\n' "$ACTION_NOISE_STD"
 fi
-printf '[INFO] Feet: nominal ankle_roll_Link mass 0.58502 kg with uniform inertia scaling; startup payload U(0,0.15) kg independently left/right, nominal COM/inertia retained; context v4\n'
+printf '[INFO] Feet: nominal ankle_roll_Link mass 0.58502 kg with uniform inertia scaling; shared startup payload U(0,0.15) kg, same addition on both feet, nominal COM/inertia retained; context v4\n'
 if ((FOOT_TRACKING)); then
     printf '[INFO] Extra foot pos/ori rewards: ON, weights 0.25/0.25; raw reward cap %s\n' "$RAW_REWARD_CAP"
 else
@@ -235,7 +240,7 @@ else
 fi
 printf '[INFO] Waist local COM offset at startup: x +/-0.035 m, y/z +/-0.07 m\n'
 printf '[INFO] Reset bins: merge every incomplete final bin; require >=32 remaining reference steps; first-step action-rate unchanged\n'
-printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; full convex feet\n'
+printf '[INFO] Nominal ankle armature pitch 0.02 / roll 0.01; ankle pitch Kp/Kd 80/2, roll 20/1; reset root clearance 0.05 m; measured rear and forefoot collisions\n'
 printf '[COMMAND]'
 printf ' %q' "${command[@]}"
 printf '\n'

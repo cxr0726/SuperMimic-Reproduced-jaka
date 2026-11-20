@@ -48,7 +48,7 @@ class WorldModelTrainer:
         # Only the root pose of the references is needed for the termination features.
         r = self.lib.ref(w.frame.reshape(-1))
         refs = [ReferenceFrame(None, None, None, None, r.root_pos_w[j * n : (j + 1) * n], r.root_quat_w[j * n : (j + 1) * n]) for j in range(k)]
-        return self.wm.window_loss(w.states, w.a_exec, w.xi, w.done, refs)
+        return self.wm.window_loss(w.states, w.a_exec, w.xi, w.done, refs, w.prev_exec, w.first_step)
 
     def update(self, buffer: ReplayBuffer) -> dict[str, float]:
         agg: dict[str, torch.Tensor] = {}
@@ -71,4 +71,4 @@ class WorldModelTrainer:
     def online_error(self, buffer: ReplayBuffer, n: int = 1024, k: int = 8) -> torch.Tensor:
         """k-step open-loop error on (recent) replay windows; (k,) tensor."""
         w = buffer.sample_windows(n, k)
-        return self.wm.rollout_error(w.states, w.a_exec, w.xi)
+        return self.wm.rollout_error(w.states, w.a_exec, w.xi, w.prev_exec, w.first_step)

@@ -69,7 +69,11 @@ def restore_config(obj, saved):
     if isinstance(obj, TrainConfig):
         obj.env.context_layout = checkpoint_context_layout(saved)
         obj.env.foot_tracking = checkpoint_foot_tracking(saved)
-        obj.env.ankle_encoder_bias_half_range = saved.get("env", {}).get("ankle_encoder_bias_half_range", 0.01)
+        env = saved.get("env", {})
+        obj.env.action_noise_std = env.get("action_noise_std", 0.1)
+        obj.env.ankle_encoder_bias_half_range = env.get("ankle_encoder_bias_half_range", 0.01)
+        obj.env.foot_mass_shared = env.get("foot_mass_shared", False)
+        obj.env.wm_delay_history = env.get("wm_delay_history", False)
 
 
 def load_benchmark_checkpoint(path, device):
@@ -89,6 +93,19 @@ def load_benchmark_checkpoint(path, device):
     resolve_training_observations(cfg)
     checkpoint = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
     return cfg, policy.to(device), checkpoint
+
+
+def reference_start(wm, frame, hist_states, hist_actions):
+    """Build synthetic starts for the reference FK performance comparison."""
+    xi = wm.spec.xi_offset.repeat(frame.numel(), 1)
+    previous = hist_actions[-1]
+    if wm.delay_xi_index is None:
+        return StartBatch(hist_states[-1], xi, frame, previous, hist_states, hist_actions)
+    # Synthetic references have no recorded plant delay queue.
+    xi[:, wm.delay_xi_index] = 0
+    first_step = torch.zeros_like(frame, dtype=torch.bool)
+    return StartBatch(hist_states[-1], xi, frame, previous, hist_states, hist_actions,
+                      prev_exec=previous, first_step=first_step)
 
 
 def weights_hash(models):
@@ -179,8 +196,7 @@ def main():
     hist_states = torch.cat((qpos, qvel), -1)
     hist_states[..., 2] += .05
     hist_actions = (lib.ref(history_frames).joint_pos - q0) / .5
-    start = StartBatch(hist_states[-1], wm.spec.xi_offset.repeat(n, 1), frame,
-                       hist_actions[-1], hist_states, hist_actions)
+    start = reference_start(wm, frame, hist_states, hist_actions)
     original_bodies = lib.bodies
     reference_events, reference_strides = [], []
 

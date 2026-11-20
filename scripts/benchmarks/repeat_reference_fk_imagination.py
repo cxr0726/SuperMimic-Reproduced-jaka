@@ -23,11 +23,11 @@ import torch
 from benchmark_reference_fk_imagination import (
     difference,
     load_benchmark_checkpoint,
+    reference_start,
     snapshot,
     weights_hash,
 )
 
-from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.envs.mdp.rewards import TrackingRewardCfg
 from supermimic.imagination.objective import policy_objective
@@ -176,8 +176,7 @@ def main():
     hist_states = torch.cat((qpos, qvel), -1)
     hist_states[..., 2] += .05
     hist_actions = (lib.ref(history_frames).joint_pos - q0) / .5
-    start = StartBatch(hist_states[-1], wm.spec.xi_offset.repeat(n, 1), frame,
-                       hist_actions[-1], hist_states, hist_actions)
+    start = reference_start(wm, frame, hist_states, hist_actions)
     original_bodies = lib.bodies
     monitor = GCMonitor()
     reference_events, reference_wall = [], []
