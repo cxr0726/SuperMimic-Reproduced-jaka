@@ -176,6 +176,7 @@ def main():
                           spec.anchor_body, spec.root_body, limits, q0,
                           reward_cfg=TrackingRewardCfg.for_joint_names(
                               spec.joint_names, foot_tracking=cfg.env.foot_tracking,
+                              ankle_action_second_diff_weight=cfg.env.ankle_action_second_diff_weight,
                           ))
     mapping = ({name: checkpoint["wm"][name] for name in ("action_scale", "action_offset")}
                if cfg.world_model.input_normalization else {})

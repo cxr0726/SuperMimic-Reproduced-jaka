@@ -17,6 +17,7 @@ LEARNER_FUSION=1
 REPLAY_SAMPLING=''
 OPTIMIZER=adam
 ACTUATOR_DELAY=True
+ANKLE_ACTION_SECOND_DIFF_WEIGHT=-0.02
 ACTION_MODE=default
 FOOT_TRACKING=0
 CONTEXT_LAYOUT=khan_dr_v4
@@ -51,6 +52,8 @@ U(0,0.15) kg to both feet. Episode-held encoder bias is +/-0.02 rad on the ankle
 615, with nominal ankle frictionloss and startup foot payload U(0,0.2) kg.
 By default actuator delay is sampled once per episode from 0, 5, 10, 15, 20 ms.
 The first control step is immediate. Use --no-actuator-delay for a delay ablation.
+The four ankle axes have a squared action second-difference penalty (weight -0.02),
+starting at the third control step in each episode.
 Reset clearance remains 0.05 m and first-step action-rate is unchanged. Every
 incomplete final bin is merged into the previous bin. Physical reset requires
 at least 32 remaining reference steps. Activation recomputation remains disabled.
@@ -79,6 +82,7 @@ Options:
   --goal-noise               Enable Isaac encoder goal noise (default)
   --no-actuator-delay        Disable actuator delay
   --actuator-delay           Enable held 0–20 ms delay (default); first control step is immediate
+  --no-ankle-action-second-diff  Disable the ankle penalty for matching older runs
   --update-capture          Capture full WM and Actor/Critic updates (default; single GPU)
   --no-update-capture       Use ordinary learner updates for comparison
   --batch-reference-encoder Batch reference-only goals across H32 (default)
@@ -127,6 +131,7 @@ while (($#)); do
         --goal-noise) GOAL_NOISE_Z=0.01; GOAL_NOISE_JOINT_POS=0.05; shift ;;
         --no-actuator-delay) ACTUATOR_DELAY=False; shift ;;
         --actuator-delay) ACTUATOR_DELAY=True; shift ;;
+        --no-ankle-action-second-diff) ANKLE_ACTION_SECOND_DIFF_WEIGHT=0.0; shift ;;
         --update-capture) UPDATE_CAPTURE=1; shift ;;
         --no-update-capture) UPDATE_CAPTURE=0; shift ;;
         --batch-reference-encoder) BATCH_REFERENCE_ENCODER=1; shift ;;
@@ -199,6 +204,7 @@ command=(
     --policy.goal-noise-z "$GOAL_NOISE_Z" --policy.goal-noise-joint-pos "$GOAL_NOISE_JOINT_POS"
     --env.actuator-delay "$ACTUATOR_DELAY" --env.delay-reset-first-step-no-delay True
     --env.action-noise-std 0.0 --env.ankle-encoder-bias-half-range "$ANKLE_ENCODER_BIAS_HALF_RANGE"
+    --env.ankle-action-second-diff-weight "$ANKLE_ACTION_SECOND_DIFF_WEIGHT"
     --env.merge-short-tail-bins True --env.tail-bin-merge-fraction 1.0
     --env.reset-min-remaining-steps 32
     --wm-trainer.optimizer "$OPTIMIZER"
@@ -264,6 +270,7 @@ else
 fi
 printf '[INFO] Encoder goal noise: z +/- %s m, q +/- %s rad; then running normalization; critic/reward stay clean\n' "$GOAL_NOISE_Z" "$GOAL_NOISE_JOINT_POS"
 printf '[INFO] Physical collection execution noise: 0 on all 27 joints\n'
+printf '[INFO] Four-ankle action second-difference weight: %s (scored from step 3)\n' "$ANKLE_ACTION_SECOND_DIFF_WEIGHT"
 printf '[INFO] Episode encoder bias: four ankle axes +/- %s rad; other 23 axes +/- 0.01 rad\n' "$ANKLE_ENCODER_BIAS_HALF_RANGE"
 printf '[INFO] Knee soft lower -0.03 rad; nominal frictionloss 0.1 N m on all 27 hinges\n'
 if [[ "$CONTEXT_LAYOUT" == khan_dr_v4 ]]; then

@@ -7,6 +7,7 @@ import torch
 
 from supermimic.data.replay_buffer import ReplayBuffer, StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
+from supermimic.envs.mdp.rewards import action_second_diff_l2
 from supermimic.imagination.compiled import REWARD_TERM_NAMES
 from supermimic.imagination.rollout import imagine
 from supermimic.policy.nets import Policy, PolicyCfg
@@ -163,3 +164,40 @@ def test_imagination_reaches_last_frame_and_keeps_future_goal_padding():
     assert rollout.goals[:, 0].reshape(3, 4, 12)[:, :, 0].tolist() == [
         [1.0, 2.0, 3.0, 3.0], [2.0, 3.0, 3.0, 3.0], [3.0, 3.0, 3.0, 3.0],
     ]
+
+
+@pytest.mark.parametrize("activation_checkpoint", [False, True])
+def test_imagined_second_difference_advances_replay_history_and_backpropagates(activation_checkpoint):
+    library = _tiny_library()
+    policy = SimpleNamespace(cfg=SimpleNamespace())
+    heads = SimpleNamespace(anchor_index=0, root_error_features=lambda s, ref: torch.zeros(len(s), 4))
+    state = library._ref[:1].repeat(3, 1)
+    history = torch.zeros(3, 3, 1)
+    history[-2, 2, 0] = 4
+    history[-1, 1:, 0] = 2
+    start = StartBatch(
+        state, torch.zeros(3, 5), torch.zeros(3, dtype=torch.long), history[-1],
+        state.repeat(3, 1, 1), history,
+        history_valid=torch.tensor([[False, False, True], [False, True, True], [True, True, True]]),
+    )
+    commands = torch.tensor([1., 3., 9.], requires_grad=True)
+
+    def actor(obs, goal):
+        return commands[goal[:, :1].long()]
+
+    def transition(s, a, prev, xi, ref, *, prev_prev_action, second_diff_valid):
+        reward = -action_second_diff_l2(a, prev, prev_prev_action, (0,), second_diff_valid)
+        obs = analytic_observation(s, a, xi, library.default_joint_pos)
+        return s, reward, reward[None], reward * 0 - 20, obs, s[:, :7]
+
+    transition.term_names = ("ankle_action_second_diff_l2",)
+    rollout = imagine(
+        SimpleNamespace(heads=heads), policy, library, start, horizon=3,
+        obs_noise=False, step_fn=transition, policy_forward_fn=actor,
+        activation_checkpoint=activation_checkpoint,
+    )
+    torch.testing.assert_close(rollout.rewards, torch.tensor([
+        [0., 0., -1.], [0., -9., -9.], [-16., -16., -16.],
+    ]))
+    rollout.rewards[-1, 0].backward()
+    torch.testing.assert_close(commands.grad, torch.tensor([-8., 16., -8.]))

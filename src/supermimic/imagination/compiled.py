@@ -40,7 +40,8 @@ class ImagStep:
                            + (("motion_neck_pos",) if cfg.w_neck_pos else ())
                            + (("motion_neck_vel",) if cfg.w_neck_vel else ())
                            + (("motion_foot_pos",) if cfg.w_foot_pos else ())
-                           + (("motion_foot_ori",) if cfg.w_foot_ori else ()))
+                           + (("motion_foot_ori",) if cfg.w_foot_ori else ())
+                           + (("ankle_action_second_diff_l2",) if cfg.w_ankle_action_second_diff else ()))
         self._fn = self._step
         if compile_mode:
             mode = None if compile_mode == "default" else compile_mode
@@ -48,12 +49,15 @@ class ImagStep:
 
     def _step(self, s, a, a_prev, xi, ref_body_pos, ref_body_quat, ref_body_lin, ref_body_ang,
               ref_root_pos, ref_root_quat, ref_joint_pos=None, ref_joint_vel=None,
-              prev_exec=None, first_step=None):
+              prev_exec=None, first_step=None, prev_prev_action=None, second_diff_valid=None):
         ref = ReferenceFrame(ref_body_pos, ref_body_quat, ref_body_lin, ref_body_ang,
                              ref_root_pos, ref_root_quat, ref_joint_pos, ref_joint_vel)
         s_next = self.wm.step(s, a, xi, prev_exec, first_step)
         bodies = self.wm.heads.robot_bodies(s_next)
-        terms = self.wm.heads.reward(s_next, a, a_prev, ref, bodies)
+        terms = self.wm.heads.reward(
+            s_next, a, a_prev, ref, bodies,
+            prev_prev_action=prev_prev_action, second_diff_valid=second_diff_valid,
+        )
         r = terms["total"]
         term_vec = torch.stack([terms[k] for k in self.term_names], dim=0)
         logits = self.wm.termination_logits(s_next, ref)
@@ -65,7 +69,9 @@ class ImagStep:
             return (*result, bodies["pos"], bodies["quat"])
         return result
 
-    def __call__(self, s, a, a_prev, xi, ref: ReferenceFrame, prev_exec=None, first_step=None):
+    def __call__(self, s, a, a_prev, xi, ref: ReferenceFrame, prev_exec=None, first_step=None,
+                 *, prev_prev_action=None, second_diff_valid=None):
         return self._fn(s, a, a_prev, xi, ref.body_pos_w, ref.body_quat_w,
                         ref.body_lin_vel_w, ref.body_ang_vel_w, ref.root_pos_w,
-                        ref.root_quat_w, ref.joint_pos, ref.joint_vel, prev_exec, first_step)
+                        ref.root_quat_w, ref.joint_pos, ref.joint_vel, prev_exec, first_step,
+                        prev_prev_action, second_diff_valid)

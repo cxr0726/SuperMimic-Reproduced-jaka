@@ -44,6 +44,9 @@ def checkpoint_foot_tracking(config: dict) -> bool:
 def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_config: dict | None = None) -> dict:
     spec = get_robot_spec(robot)
     reward_config = asdict(TrackingRewardCfg.for_joint_names(spec.joint_names))
+    # The ankle action penalty belongs to training only. Keep nominal scoring
+    # and historical reward dictionaries stable.
+    reward_config.pop("w_ankle_action_second_diff")
     # These fields did not exist in historical G1 or Khan v1/v2 contracts.
     # Keep their serialized dictionaries identical for old play/eval/export.
     for key in ("std_foot_pos", "std_foot_ori", "w_foot_pos", "w_foot_ori"):
@@ -155,6 +158,7 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
         if foot_tracking:
             foot_reward = TrackingRewardCfg.for_joint_names(spec.joint_names, foot_tracking=True)
             contract["reward_config"] = asdict(foot_reward)
+            contract["reward_config"].pop("w_ankle_action_second_diff")
             contract["foot_tracking_schema"] = {
                 "bodies": list(KHAN_FOOT_BODIES),
                 "reference_frame": "robot_anchor_xy_yaw_reanchor_reference_z_retained",
@@ -222,6 +226,16 @@ def robot_contract(robot: RobotName, observation_layout: str = "auto", *, env_co
                 "world_model_delay_actions": "first_and_last_applied_commands",
                 "world_model_delay_timing": "number_of_substeps_before_within_step_command_switch",
             })
+        ankle_action_weight = env_config.get("ankle_action_second_diff_weight", 0.0)
+        if ankle_action_weight:
+            contract["version"] = 17
+            contract["ankle_action_second_diff_schema"] = {
+                "weight": ankle_action_weight,
+                "joint_names": list(KHAN_ANKLE_JOINTS),
+                "action_source": "clean_normalized_policy_action",
+                "first_scored_control_step": 3,
+                "physical_and_imagined": True,
+            }
         if layout == "isaac_khan":
             contract["observation_schema"] = {
                 "future_frames": 5, "history": 5, "goal_dim": 155, "policy_dim": 465,

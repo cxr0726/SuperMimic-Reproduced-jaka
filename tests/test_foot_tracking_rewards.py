@@ -10,6 +10,7 @@ import torch
 from supermimic.envs.mdp.rewards import (
     KHAN_FOOT_BODY_NAMES,
     TrackingRewardCfg,
+    ankle_action_second_diff_l2,
     foot_orientation_tracking_exp,
     foot_position_tracking_exp,
     motion_foot_orientation_error_exp,
@@ -20,7 +21,7 @@ from supermimic.envs.mdp.rewards import (
 from supermimic.imagination.compiled import ImagStep
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.robots.khan_mini import get_khan_mini_spec, load_profile
-from supermimic.sim_context import KHAN_FOOT_BODIES
+from supermimic.sim_context import KHAN_ANKLE_JOINTS, KHAN_FOOT_BODIES
 from supermimic.world_model.heads import AnalyticHeads, ReferenceFrame
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 
@@ -195,3 +196,32 @@ def test_imagined_step_logs_optional_foot_terms_and_validates_tracked_names():
     legacy = AnalyticHeads(heads.fk, ("base_link",), "base_link", "base_link", heads.soft_limits,
                            heads.default_joint_pos)
     assert legacy.foot_body_ids == ()
+
+
+def test_ankle_second_difference_matches_physical_reward_and_ignores_other_axes():
+    heads, state, ref, bodies, profile = _components()
+    action = torch.full((2, heads.num_joints), 0.5)
+    prev = torch.zeros_like(action)
+    prev_prev = torch.zeros_like(action)
+    joint_ids = heads.ankle_joint_ids
+    assert set(profile["joint_names"][i] for i in joint_ids) == set(KHAN_ANKLE_JOINTS)
+    action[:, joint_ids] = torch.tensor([1.0, 0.5, 0.0, -0.5])
+    prev[:, joint_ids] = torch.tensor([0.0, 0.25, 0.0, 0.0])
+    env = SimpleNamespace(
+        action_manager=SimpleNamespace(action=action, prev_action=prev, prev_prev_action=prev_prev),
+        episode_length_buf=torch.tensor([2, 3]),
+    )
+    physical = ankle_action_second_diff_l2(env, joint_ids)
+    torch.testing.assert_close(physical, torch.tensor([0.0, 1.25]))
+    env.episode_length_buf = torch.tensor([1, 2])
+    assert not ankle_action_second_diff_l2(env, joint_ids).any()
+
+    before = heads.reward(state, action, prev, ref, bodies)
+    heads.reward_cfg = replace(heads.reward_cfg, w_ankle_action_second_diff=-0.02)
+    after = heads.reward(
+        state, action, prev, ref, bodies, prev_prev_action=prev_prev,
+        second_diff_valid=torch.tensor([False, True]),
+    )
+    penalty = -0.02 * heads.reward_cfg.dt * physical
+    torch.testing.assert_close(after["ankle_action_second_diff_l2"], penalty)
+    torch.testing.assert_close(after["total"], before["total"] + penalty)

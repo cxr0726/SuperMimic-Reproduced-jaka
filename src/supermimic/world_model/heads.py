@@ -22,6 +22,7 @@ from supermimic.envs.mdp.rewards import (
 )
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.kinematics.rotations import projected_gravity, quat_apply_inverse
+from supermimic.sim_context import KHAN_ANKLE_JOINTS
 from supermimic.world_model.state_spec import StateSpec
 
 OBS_DIM = 93
@@ -137,6 +138,7 @@ class AnalyticHeads:
         self.default_joint_pos = default_joint_pos
         joint_names = fk.joint_names[1:]  # The first joint is the free root, not an action.
         self.neck_joint_ids = [i for i, name in enumerate(joint_names) if name in NECK_JOINT_NAMES]
+        self.ankle_joint_ids = tuple(i for i, name in enumerate(joint_names) if name in KHAN_ANKLE_JOINTS)
         self.reward_cfg = reward_cfg or TrackingRewardCfg.for_joint_names(joint_names)
         if (self.reward_cfg.w_neck_pos or self.reward_cfg.w_neck_vel) and not self.neck_joint_ids:
             raise ValueError("Neck tracking reward requires neck joints in the FK model")
@@ -157,7 +159,11 @@ class AnalyticHeads:
             "root_quat": out["quat"][..., self.root_fk_index, :],
         }
 
-    def reward(self, s_next: torch.Tensor, action: torch.Tensor, prev_action: torch.Tensor, ref: ReferenceFrame, bodies=None):
+    def reward(
+        self, s_next: torch.Tensor, action: torch.Tensor, prev_action: torch.Tensor,
+        ref: ReferenceFrame, bodies=None, *, prev_prev_action: torch.Tensor | None = None,
+        second_diff_valid: torch.Tensor | None = None,
+    ):
         """Reward r_{t+1} of reaching s_next (= s_{t+1}) under target frame g_t. Returns dict with 'total'."""
         b = bodies if bodies is not None else self.robot_bodies(s_next)
         return tracking_reward_terms(
@@ -180,6 +186,9 @@ class AnalyticHeads:
             ref_joint_vel=ref.joint_vel,
             neck_joint_ids=self.neck_joint_ids,
             foot_body_ids=self.foot_body_ids,
+            ankle_joint_ids=self.ankle_joint_ids,
+            prev_prev_action=prev_prev_action,
+            second_diff_valid=second_diff_valid,
         )
 
     @staticmethod

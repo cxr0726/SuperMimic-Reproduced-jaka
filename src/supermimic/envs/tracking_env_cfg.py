@@ -121,6 +121,7 @@ class SuperMimicEnvCfgArgs:
     observation_layout: ObservationLayoutOption = "auto"
     context_layout: ContextKind | None = None  # Checkpoints pass their saved layout.
     foot_tracking: bool = False
+    ankle_action_second_diff_weight: float = 0.0
     extra_command_kwargs: dict = field(default_factory=dict)
     disable_neck_action_noise: bool = False
     ankle_encoder_bias_half_range: float = 0.01  # Legacy/direct API default; training passes its saved range.
@@ -165,6 +166,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         raise ValueError("Extra foot rewards require the Khan DR v3 or v4 layout")
     tracking_rewards = TrackingRewardCfg.for_joint_names(
         robot_spec.joint_names, foot_tracking=a.foot_tracking,
+        ankle_action_second_diff_weight=a.ankle_action_second_diff_weight,
     )
     # ---------------------------------------------------------------- observations
     noise = (lambda lo, hi: Unoise(n_min=lo, n_max=hi)) if a.obs_noise else (lambda lo, hi: None)
@@ -434,6 +436,13 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             weight=tracking_rewards.w_foot_ori,
             params={"command_name": "motion", "std": tracking_rewards.std_foot_ori,
                     "body_names": KHAN_FOOT_BODIES},
+        )
+    if tracking_rewards.w_ankle_action_second_diff:
+        rewards["ankle_action_second_diff_l2"] = RewardTermCfg(
+            func=sm_rewards.ankle_action_second_diff_l2,
+            weight=tracking_rewards.w_ankle_action_second_diff,
+            params={"joint_ids": tuple(i for i, name in enumerate(robot_spec.joint_names)
+                                       if name in KHAN_ANKLE_JOINTS)},
         )
 
     # ---------------------------------------------------------------- terminations

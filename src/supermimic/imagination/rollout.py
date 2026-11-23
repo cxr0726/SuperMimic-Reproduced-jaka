@@ -195,6 +195,17 @@ def imagine(
     s = start.state
     frame = start.frame.clone()
     a_prev = start.prev_action
+    use_second_diff = "ankle_action_second_diff_l2" in term_names
+    if use_second_diff:
+        if start.hist_actions.shape[0] < 3:
+            raise ValueError("Ankle action second difference requires at least three replay history states")
+        a_prev_prev = start.hist_actions[-2]
+        valid_after_imagined_step = torch.ones_like(frame, dtype=torch.bool)
+        second_diff_valid = has_previous_action = valid_after_imagined_step
+        if start.history_valid is not None:
+            # A command is real when its source state is in the current episode.
+            second_diff_valid = start.history_valid[-3]
+            has_previous_action = start.history_valid[-2]
     prev_exec, first_step = start.prev_exec, start.first_step
     continuing = torch.zeros_like(first_step) if first_step is not None else None
     c = torch.ones(n, device=device)
@@ -274,6 +285,9 @@ def imagine(
 
     for t in range(horizon):
         history_args = (prev_exec, first_step) if first_step is not None else ()
+        reward_history = {}
+        if use_second_diff:
+            reward_history = {"prev_prev_action": a_prev_prev, "second_diff_valid": second_diff_valid}
         obs_flat = flatten_history_term_major(torch.stack(hist, 0), observation_layout=layout)
         if layout == "isaac_khan":
             obs_flat = torch.cat([future_orientation, obs_flat], dim=-1)
@@ -297,11 +311,12 @@ def imagine(
                 step_result = checkpoint(
                     step_fn, s, a, a_prev, start.xi, ref, *history_args,
                     use_reentrant=False, preserve_rng_state=checkpoint_preserve_rng_state,
+                    **reward_history,
                 )
         else:
             a = (decode_from_latent_fn(obs_flat, goals[-1], latents[t]) if batch_encoder else
                  policy_forward_fn(obs_flat, goals[-1], **encoder_kwargs))
-            step_result = step_fn(s, a, a_prev, start.xi, ref, *history_args)
+            step_result = step_fn(s, a, a_prev, start.xi, ref, *history_args, **reward_history)
         if returns_body_poses:
             s_next, r, term_vec, logits, obs_clean, anchor_pose, body_pos, body_quat = step_result
             if cache_body_poses:
@@ -320,6 +335,9 @@ def imagine(
         ref = ref_at(t + 1)
         hist = hist[1:] + [(obs_clean + sensor_noise[t] if obs_noise else obs_clean)
                           if batch_encoder else add_noise(obs_clean)]
+        if use_second_diff:
+            a_prev_prev = a_prev
+            second_diff_valid, has_previous_action = has_previous_action, valid_after_imagined_step
         a_prev = a
         prev_exec, first_step = a, continuing
         s = s_next

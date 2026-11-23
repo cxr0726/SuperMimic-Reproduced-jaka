@@ -106,6 +106,7 @@ def test_default_compact_run_preserves_current_training_configuration(project, n
     assert cfg.env.foot_tracking is False
     assert cfg.env.context_layout == "khan_dr_v4"
     assert cfg.env.action_noise_std == 0.0 and cfg.env.obs_noise
+    assert cfg.env.ankle_action_second_diff_weight == -0.02
     assert cfg.env.ankle_encoder_bias_half_range == 0.02 and cfg.env.domain_randomization
     assert "Physical collection execution noise: 0 on all 27 joints" in result.stdout
     assert "Knee soft lower -0.03 rad" in result.stdout
@@ -115,6 +116,7 @@ def test_default_compact_run_preserves_current_training_configuration(project, n
     assert "critic upper bound 11.2" in result.stdout
     baseline = TrainConfig(robot="khan_mini")
     baseline.env.action_noise_std = 0.0
+    baseline.env.ankle_action_second_diff_weight = -0.02
     resolve_training_observations(cfg)
     resolve_training_observations(baseline)
     assert cfg.env.foot_mass_shared and cfg.env.wm_delay_history and cfg.world_model.delay_history
@@ -209,6 +211,12 @@ def test_ankle_encoder_bias_override_reaches_training_cli(project):
     resolve_training_observations(cfg)
     assert cfg.env.ankle_encoder_bias_half_range == 0.01
     assert cfg.env.action_noise_std == 0.0
+
+
+def test_ankle_action_second_difference_can_be_disabled(project):
+    result = run_launcher(project, "--dry-run", "--no-ankle-action-second-diff")
+    assert result.returncode == 0, result.stderr
+    assert parse_config(result.stdout).env.ankle_action_second_diff_weight == 0.0
 
 
 @pytest.mark.parametrize("args,expected", [

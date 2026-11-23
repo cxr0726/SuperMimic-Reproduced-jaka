@@ -53,6 +53,7 @@ class EnvCfg:
     observation_layout: Literal["auto", "supermimic", "isaac_khan"] = "auto"
     context_layout: ContextKind | None = None  # None resolves fresh robot defaults.
     foot_tracking: bool = False  # Extra foot rewards, independent of the DR layout.
+    ankle_action_second_diff_weight: float = 0.0  # Khan server launchers set -0.02.
     compact_library: bool = False
     reference_fk_compile: bool = False  # Opt-in: benchmark CUDA compact FK on the target GPU
     merge_short_tail_bins: bool | None = None  # Training default: Khan on, original G1 off
@@ -166,6 +167,8 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
     future, history = resolve_observation_sizes(
         layout, cfg.env.future_frames, cfg.policy.history, cfg.env.anchor_obs,
     )
+    if cfg.env.ankle_action_second_diff_weight and history < 3:
+        raise ValueError("Ankle action second-difference training requires at least three replay history states")
     cfg.env.observation_layout = layout
     cfg.env.future_frames = future
     cfg.policy.observation_layout = layout

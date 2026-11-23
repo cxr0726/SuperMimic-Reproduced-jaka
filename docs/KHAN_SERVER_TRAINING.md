@@ -8,12 +8,14 @@
 > 每个环境两脚共用一个 startup U(0,0.15) kg 的附重，仅质量变化。四踝 encoder bias ±0.02 rad，其余 ±0.01 rad。
 > 所有 27 轴的采集执行噪声为 0。默认启用 WM 整窗与 Actor/Critic 网络编译、
 > 单 GPU 完整更新 CUDA Graph、批量参考编码和 CDF 回放采样。
+> 训练时左右踝的 pitch、roll 四个轴另计归一化动作的二阶差分平方和，系数 `-0.02`。
 > 详细配置以 [当前分支说明](KHAN_OFFICIAL_PORT.md) 为准。
 
 ## 当前配置的训练命令
 
 服务器同步本分支的代码及整个 `assets/robots/khan_mini/`，使用新的run名从头训练。
-默认配方增加了 WM 动作输入，且两脚附重改为共用采样。旧 run 的 checkpoint 仍可用于 eval 或导出，按新配方训练需要新建 run。
+默认训练启用四踝动作二阶差分惩罚。旧 run 的 checkpoint 仍可用于 eval 或导出，
+按新配方训练请新建 run。恢复旧配方或做对照实验时，可加 `--no-ankle-action-second-diff` 并匹配其余训练配置。
 以下库路径按服务器实际位置调整；脚本不下载数据。
 
 ```bash
@@ -24,8 +26,9 @@ git pull --ff-only origin codex/khan-muon-only
 
 bash scripts/training/train_khan_compact_server.sh \
   --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
-  --run-name khan_8452_adam_drv4_delay20_sharedfeet_4096 \
-  --num-envs 4096
+  --run-name khan_8452_adam_drv4_delay20_sharedfeet_ankle_second_diff_4096 \
+  --num-envs 4096 \
+  --actuator-delay
 ```
 
 加 `--dry-run` 可检查路径和实际CLI，不启动CUDA或训练。NPZ入口为：
@@ -33,7 +36,7 @@ bash scripts/training/train_khan_compact_server.sh \
 ```bash
 bash scripts/training/train_khan_server.sh \
   --data-dir data/npz/khan_mini/lafan1 \
-  --run-name khan_lafan1_adam_drv4_delay20_sharedfeet_4096 \
+  --run-name khan_lafan1_adam_drv4_delay20_sharedfeet_ankle_second_diff_4096 \
   --num-envs 4096
 ```
 
@@ -78,7 +81,10 @@ XML整机标称质量为 **41.03253498863909 kg**。startup后的总质量为
 参数从生效后的物理模型读回。Replay 和 critic 保留实际延迟步数，actor 输入维度仍为 465/155。
 WM 在窗口开始读取上一条进队列的指令，想象从同样的指令开始，再按每步新动作更新历史。动力学输入包含本控制周期首尾实际生效的指令及切换时机。
 20 ms 的非首步只有上一条指令生效。reset 首步和 0 ms 延迟下只有当前指令生效。
-新 checkpoint 记录 context v4 和 robot contract v16。
+四踝惩罚和 `action_rate_l2` 一样使用干净的归一化策略指令，计算
+`-0.02 * dt * sum((a_t - 2*a_(t-1) + a_(t-2))^2)`。
+真实采集与想象从每回合第三个控制步起计入该项。标准 eval 继续使用相同的跟踪回报口径。
+默认新 checkpoint 记录 context v4 和 robot contract v17。
 
 ## 历史配置与验证记录
 

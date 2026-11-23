@@ -76,6 +76,7 @@ def test_saved_nondefault_delay_and_reset_semantics_are_validated():
     ("actuator_delay", False), ("actuator_delay_max_ms", 10.0),
     ("reset_root_z_offset", 0.0), ("domain_randomization", False),
     ("action_noise_std", 0.1),
+    ("ankle_action_second_diff_weight", -0.02),
 ])
 def test_resume_rejects_changed_delay_or_reset_before_loading_weights(tmp_path, field, value):
     from dataclasses import asdict
@@ -128,6 +129,21 @@ def test_fixed_joint_physics_and_neck_noise_are_saved_without_expanding_dr_v3():
     checkpoint["config"]["env"] = {**settings, "disable_neck_action_noise": False}
     with pytest.raises(ValueError, match="execution_noise_schema"):
         validate_robot_contract(checkpoint, "khan_mini")
+
+
+@pytest.mark.parametrize("foot_tracking", [False, True])
+def test_training_only_ankle_penalty_preserves_nominal_reward_contract(foot_tracking):
+    settings = {"context_layout": "khan_dr_v4", "wm_delay_history": True, "foot_tracking": foot_tracking}
+    legacy = robot_contract("khan_mini", env_config=settings)
+    assert legacy["version"] == 16
+    assert legacy == robot_contract("khan_mini", env_config={**settings, "ankle_action_second_diff_weight": 0.0})
+    env = {**settings, "ankle_action_second_diff_weight": -0.02}
+    contract = robot_contract("khan_mini", env_config=env)
+    assert contract["version"] == 17
+    assert contract["reward_config"] == legacy["reward_config"]
+    assert contract["simulation_schema"] == legacy["simulation_schema"]
+    assert contract["ankle_action_second_diff_schema"]["weight"] == -0.02
+    validate_robot_contract({"config": {"env": env}, "robot_contract": contract}, "khan_mini")
 
 
 def test_range_format_migration_accepts_only_the_audited_xml_pair():

@@ -234,6 +234,7 @@ class Trainer:
                 observation_layout=cfg.env.observation_layout,
                 context_layout=cfg.env.context_layout,
                 foot_tracking=cfg.env.foot_tracking,
+                ankle_action_second_diff_weight=cfg.env.ankle_action_second_diff_weight,
                 episode_length_s=cfg.env.episode_length_s,
                 action_noise_std=cfg.env.action_noise_std,
                 disable_neck_action_noise=cfg.env.disable_neck_action_noise,
@@ -281,6 +282,7 @@ class Trainer:
             robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone(),
             reward_cfg=TrackingRewardCfg.for_joint_names(
                 robot_spec.joint_names, foot_tracking=cfg.env.foot_tracking,
+                ankle_action_second_diff_weight=cfg.env.ankle_action_second_diff_weight,
             ),
         )
         action_term = env.action_manager.get_term("joint_pos")

@@ -16,12 +16,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from math import isfinite
 from typing import TYPE_CHECKING
 
 import torch
 from mjlab.utils.lab_api.math import quat_apply, quat_box_minus, quat_inv, quat_mul, yaw_quat
 
-from supermimic.sim_context import KHAN_FOOT_BODIES
+from supermimic.sim_context import KHAN_ANKLE_JOINTS, KHAN_FOOT_BODIES
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -66,20 +67,47 @@ class TrackingRewardCfg:
     w_foot_pos: float = 0.0
     w_foot_ori: float = 0.0
     dt: float = 0.02
+    w_ankle_action_second_diff: float = 0.0
 
     @classmethod
     def for_joint_names(
         cls, joint_names: Sequence[str], *, foot_tracking: bool = False,
+        ankle_action_second_diff_weight: float = 0.0,
     ) -> TrackingRewardCfg:
-        """Keep legacy rewards unless foot tracking is explicitly enabled."""
+        """Enable optional robot-specific rewards from training configuration."""
+        if not isfinite(ankle_action_second_diff_weight) or ankle_action_second_diff_weight > 0:
+            raise ValueError("Ankle action second-difference weight must be finite and nonpositive")
+        if ankle_action_second_diff_weight and not set(KHAN_ANKLE_JOINTS).issubset(joint_names):
+            raise ValueError("Ankle action second-difference penalty requires the four Khan ankle axes")
         cfg = cls(w_foot_pos=0.25, w_foot_ori=0.25) if foot_tracking else cls()
         if set(NECK_JOINT_NAMES).issubset(joint_names):
             cfg.w_neck_pos, cfg.w_neck_vel = 0.5, 0.1
+        cfg.w_ankle_action_second_diff = ankle_action_second_diff_weight
         return cfg
 
     @property
     def max_step_reward(self) -> float:
         return self.dt * (self.w_body_pos + self.w_body_ori + self.w_body_lin_vel + self.w_body_ang_vel + self.w_root_pos + self.w_root_ori + self.w_neck_pos + self.w_neck_vel + self.w_foot_pos + self.w_foot_ori)
+
+
+def action_second_diff_l2(
+    action: torch.Tensor, prev_action: torch.Tensor, prev_prev_action: torch.Tensor,
+    joint_ids: Sequence[int], valid: torch.Tensor,
+) -> torch.Tensor:
+    """Squared second difference of normalized commands with two real predecessors."""
+    previous = _selected_joints(prev_action, joint_ids)
+    latest_delta = _selected_joints(action, joint_ids) - previous
+    previous_delta = previous - _selected_joints(prev_prev_action, joint_ids)
+    return torch.where(valid, (latest_delta - previous_delta).square().sum(-1), 0.0)
+
+
+def ankle_action_second_diff_l2(env: ManagerBasedRlEnv, joint_ids: tuple[int, ...]) -> torch.Tensor:
+    actions = env.action_manager
+    # The episode counter already includes the command applied on this step.
+    return action_second_diff_l2(
+        actions.action, actions.prev_action, actions.prev_prev_action, joint_ids,
+        env.episode_length_buf >= 3,
+    )
 
 
 def joint_tracking_error_exp(
@@ -225,6 +253,9 @@ def tracking_reward_terms(
     ref_joint_vel: torch.Tensor | None = None,
     neck_joint_ids: Sequence[int] = (),
     foot_body_ids: Sequence[int] = (),
+    ankle_joint_ids: Sequence[int] = (),
+    prev_prev_action: torch.Tensor | None = None,
+    second_diff_valid: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Per-term weighted, dt-scaled rewards (N,) plus 'total'."""
     ra_pos = robot_body_pos_w[..., anchor_index, :]
@@ -280,6 +311,12 @@ def tracking_reward_terms(
             terms["motion_foot_ori"] = dt * cfg.w_foot_ori * foot_orientation_tracking_exp(
                 _selected_bodies(robot_body_quat_w, foot_body_ids), _selected_bodies(rel_quat, foot_body_ids), cfg.std_foot_ori,
             )
+    if cfg.w_ankle_action_second_diff:
+        if len(ankle_joint_ids) != len(KHAN_ANKLE_JOINTS) or prev_prev_action is None or second_diff_valid is None:
+            raise ValueError("Ankle action second-difference penalty requires four ankle IDs and valid action history")
+        terms["ankle_action_second_diff_l2"] = dt * cfg.w_ankle_action_second_diff * action_second_diff_l2(
+            action, prev_action, prev_prev_action, ankle_joint_ids, second_diff_valid,
+        )
     total = terms["motion_global_root_pos"]
     for k, v in terms.items():
         if k != "motion_global_root_pos":
