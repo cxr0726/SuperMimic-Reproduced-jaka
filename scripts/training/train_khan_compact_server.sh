@@ -16,6 +16,7 @@ BATCH_REFERENCE_ENCODER=1
 LEARNER_FUSION=1
 REPLAY_SAMPLING=''
 OPTIMIZER=adam
+WM_REPRESENTATION=''
 ACTUATOR_DELAY=True
 ANKLE_ACTION_SECOND_DIFF_WEIGHT=-0.02
 ACTION_MODE=default
@@ -91,6 +92,7 @@ Options:
   --no-learner-fusion       Use the d98f4df single-step compilation boundary
   --replay-sampling MODE    cdf (default) or multinomial; same legal-pair distribution
   --optimizer MODE          adam (default) or muon; selects WM, Actor and Critic together
+  --wm-representation MODE  partymimic or legacy; fresh runs use partymimic, resumes inherit the checkpoint
   --resume PATH              Restore a Khan checkpoint with matching data/configuration/assets
   --stop-after-iterations N  Optional execution limit; retains the 320k LR schedule
   --dry-run                 Check paths and print command without executing Python or training
@@ -114,6 +116,10 @@ while (($#)); do
         --library) need_value "$@"; LIBRARY="$2"; shift 2 ;;
         --num-envs) need_value "$@"; NUM_ENVS="$2"; shift 2 ;;
         --run-name) need_value "$@"; RUN_NAME="$2"; shift 2 ;;
+        --wm-representation)
+            need_value "$@"
+            [[ "$2" == partymimic || "$2" == legacy ]] || die '--wm-representation expects partymimic or legacy'
+            WM_REPRESENTATION="$2"; shift 2 ;;
         --reference-fk-compile) REFERENCE_FK_COMPILE=1; shift ;;
         --no-reference-fk-compile) REFERENCE_FK_COMPILE=0; shift ;;
         --resume) need_value "$@"; RESUME="$2"; shift 2 ;;
@@ -239,6 +245,9 @@ if ((!LEARNER_FUSION)); then
 fi
 if [[ -n "$REPLAY_SAMPLING" ]]; then
     command+=(--replay-sampling "$REPLAY_SAMPLING")
+fi
+if [[ -n "$WM_REPRESENTATION" ]]; then
+    command+=(--world-model.state-spec.representation "$WM_REPRESENTATION")
 fi
 if [[ -n "$STOP_AFTER" ]]; then
     command+=(--schedule.stop-after-iterations "$STOP_AFTER")

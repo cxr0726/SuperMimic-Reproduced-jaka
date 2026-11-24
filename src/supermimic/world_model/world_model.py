@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from copy import copy
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -17,9 +18,12 @@ from supermimic.world_model.heads import AnalyticHeads, ReferenceFrame
 from supermimic.world_model.state_spec import StateSpec, StateSpecCfg
 
 
+LEGACY_WM_HIDDEN = (2048, 2048, 2048)
+
+
 @dataclass
 class WorldModelCfg:
-    hidden: tuple[int, ...] = (2048, 2048, 2048)
+    hidden: tuple[int, ...] | None = LEGACY_WM_HIDDEN
     term_hidden: tuple[int, ...] = (64, 64)
     state_spec: StateSpecCfg = field(default_factory=StateSpecCfg)
     term_loss_weight: float = 1.0
@@ -53,6 +57,8 @@ class WorldModel(nn.Module):
                  action_scale: torch.Tensor | None = None, action_offset: torch.Tensor | None = None):
         super().__init__()
         self.cfg = cfg
+        if cfg.hidden is None:
+            raise ValueError("Resolve the training WM hidden layers before constructing the world model")
         if cfg.termination_mode not in ("learned", "analytic"):
             raise ValueError("termination_mode must be learned or analytic")
         if any(not math.isfinite(x) or x <= 0 for x in
@@ -87,7 +93,10 @@ class WorldModel(nn.Module):
             self.register_buffer("action_offset", action_offset.clone())
             self.state_normalizer = RunningNormalizer(self.spec.feat_dim)
             self.action_normalizer = RunningNormalizer(self.spec.num_joints)
-        self.heads = heads  # analytic observation / reward / FK (no parameters)
+        # Heads own no parameters. Share the FK and limits, but bind each WM
+        # to its own state convention even when a caller reuses a heads object.
+        self.heads = copy(heads)
+        self.heads.representation = cfg.state_spec.representation
         self.to(device)
 
     # ------------------------------------------------------------------ one step
@@ -97,8 +106,7 @@ class WorldModel(nn.Module):
         """Predict one step from the commands that actually reach the plant."""
         feat = self.spec.canonical(s)
         if self.cfg.input_normalization:
-            # Preserve this repository's heading representation, but replace its
-            # fixed feature divisors with empirical statistics in physical units.
+            # Empirical moments operate on physical values in the WM feature frames.
             feat = self.state_normalizer(feat * self.spec.in_scale)
             action = self.action_normalizer(self.proc_action(action))
         index = self.delay_xi_index

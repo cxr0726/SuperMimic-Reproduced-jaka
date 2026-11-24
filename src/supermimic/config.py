@@ -18,8 +18,9 @@ from supermimic.sim_context import (
     CONTROL_SUBSTEPS, PHYSICS_STEP_MS,
     ContextKind, resolve_context_layout, validate_ankle_encoder_bias_half_range,
 )
+from supermimic.world_model.state_spec import StateSpecCfg, WMRepresentation
 from supermimic.world_model.wm_trainer import WMTrainerCfg
-from supermimic.world_model.world_model import WorldModelCfg
+from supermimic.world_model.world_model import LEGACY_WM_HIDDEN, WorldModelCfg
 
 
 @dataclass
@@ -90,6 +91,8 @@ class TrainConfig:
     data: DataCfg = field(default_factory=DataCfg)
     env: EnvCfg = field(default_factory=EnvCfg)
     world_model: WorldModelCfg = field(default_factory=lambda: WorldModelCfg(
+        hidden=None,  # Fresh Khan: 1024 x 3. Resume: inherit the saved architecture.
+        state_spec=StateSpecCfg(representation=None),  # Fresh: PartyMimic. Resume: inherit the checkpoint.
         input_normalization=True, hidden_layer_norm=True, hidden_activation="gelu",
         termination_mode="analytic",
     ))
@@ -110,7 +113,15 @@ class TrainConfig:
     resume: Path | None = None
 
 
-def resolve_training_observations(cfg: TrainConfig) -> None:
+def checkpoint_wm_representation(saved_config: dict) -> WMRepresentation:
+    """Checkpoints predating the frame change store MuJoCo body angular velocity."""
+    name = saved_config.get("world_model", {}).get("state_spec", {}).get("representation", "legacy")
+    if name not in ("legacy", "partymimic"):
+        raise ValueError(f"Unknown checkpoint WM representation {name!r}")
+    return name
+
+
+def resolve_training_observations(cfg: TrainConfig, *, checkpoint_config: dict | None = None) -> None:
     """Resolve robot defaults before constructing networks or saving configuration.
 
     None denotes an unspecified window, so an explicit incompatible Isaac window
@@ -120,6 +131,27 @@ def resolve_training_observations(cfg: TrainConfig) -> None:
     from supermimic.robots.registry import get_robot_spec, resolve_robot_environment
 
     robot = get_robot_spec(cfg.robot)
+    if checkpoint_config is not None:
+        saved_hidden = tuple(checkpoint_config.get("world_model", {}).get("hidden", LEGACY_WM_HIDDEN))
+        if cfg.world_model.hidden is not None and cfg.world_model.hidden != saved_hidden:
+            raise ValueError(
+                f"Checkpoint WM hidden layers {saved_hidden} differ from requested {cfg.world_model.hidden}. "
+                "A different architecture requires a fresh WM."
+            )
+        cfg.world_model.hidden = saved_hidden
+    elif cfg.world_model.hidden is None:
+        cfg.world_model.hidden = (1024, 1024, 1024) if cfg.robot == "khan_mini" else LEGACY_WM_HIDDEN
+    spec = cfg.world_model.state_spec
+    saved = checkpoint_wm_representation(checkpoint_config) if checkpoint_config is not None else None
+    if spec.representation is None:
+        spec.representation = saved or "partymimic"
+    if spec.representation not in ("partymimic", "legacy"):
+        raise ValueError(f"Unknown WM representation {spec.representation!r}")
+    if saved is not None and spec.representation != saved:
+        raise ValueError(
+            f"Checkpoint WM representation {saved!r} differs "
+            f"from requested {spec.representation!r}. A different representation requires a fresh WM."
+        )
     cfg.env.action_noise_std = resolve_action_noise_std(cfg.robot, cfg.env.action_noise_std)
     cfg.env.context_layout = resolve_context_layout(cfg.robot, cfg.env.context_layout)
     cfg.world_model.state_spec.context_layout = cfg.env.context_layout

@@ -1,12 +1,14 @@
 """Robot-sized state, analytic heads and differentiable Khan FK on CPU."""
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import mujoco
 import numpy as np
 import pytest
 import torch
 
+from supermimic.envs.state_io import StateIO
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.kinematics.rotations import quat_apply, quat_from_yaw, quat_mul
 from supermimic.robots.khan_mini import get_khan_mini_spec, load_profile
@@ -50,9 +52,13 @@ def test_robot_sized_state_integration_and_normalisation(num_joints):
     changed[:, :2] += torch.tensor([0.7, -1.2], dtype=torch.float64)
     changed[:, 3:7] = quat_mul(yaw, states[:, 3:7])
     changed[:, spec.nq:spec.nq + 3] = quat_apply(yaw, states[:, spec.nq:spec.nq + 3])
+    changed[:, spec.nq + 3:spec.nq + 6] = quat_apply(yaw, states[:, spec.nq + 3:spec.nq + 6])
     torch.testing.assert_close(spec.canonical(changed), spec.canonical(states), rtol=0, atol=1e-12)
 
-    integrating = StateSpec(StateSpecCfg(), "cpu", torch.float64, num_joints=num_joints)
+    # The legacy integrator uses an orthogonal heading even for near-vertical roots.
+    # PartyMimic's regularized heading projection is covered by its geometry tests.
+    integrating = StateSpec(StateSpecCfg(representation="legacy"), "cpu", torch.float64,
+                            num_joints=num_joints)
     predicted = integrating.integrate(states, zero_delta)
     torch.testing.assert_close(predicted[:, :3], states[:, :3] + 0.02 * pieces[3], rtol=0, atol=1e-14)
     torch.testing.assert_close(predicted[:, 7:spec.nq], pieces[2] + 0.02 * pieces[5], rtol=0, atol=1e-14)
@@ -102,12 +108,24 @@ def _khan_states(model, count=5):
     return qpos, qvel
 
 
-def test_khan_fk_fixed_links_velocities_and_gradients():
+@pytest.mark.parametrize("representation", ["legacy", "partymimic"])
+def test_khan_fk_fixed_links_velocities_and_gradients(representation):
+    """Check simulator capture through the WM's reward FK against native MuJoCo."""
     model = get_khan_mini_spec().compile()
     qpos, qvel = _khan_states(model)
     qp = torch.tensor(qpos, dtype=torch.float64, requires_grad=True)
     qv = torch.tensor(qvel, dtype=torch.float64, requires_grad=True)
-    out = G1Kinematics(model, dtype=torch.float64)(qp, qv)
+    env = SimpleNamespace(
+        sim=SimpleNamespace(data=SimpleNamespace(qpos=qp, qvel=qv)),
+        scene=SimpleNamespace(env_origins=torch.zeros_like(qp[:, :3])),
+    )
+    state = StateIO(env, representation=representation).read()
+    fk = G1Kinematics(model, dtype=torch.float64)
+    profile = load_profile()
+    heads = AnalyticHeads(fk, tuple(fk.body_names), profile["anchor_body"], profile["root_body"],
+                          torch.from_numpy(model.jnt_range[1:]), torch.from_numpy(model.qpos0[7:]))
+    cfg = WorldModelCfg(hidden=(16,), state_spec=StateSpecCfg(representation=representation))
+    out = WorldModel(cfg, heads, "cpu").heads.robot_bodies(state)
     data = mujoco.MjData(model)
     velocity = np.zeros(6)
     for sample in range(len(qpos)):

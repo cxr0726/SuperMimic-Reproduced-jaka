@@ -42,6 +42,7 @@ def test_restore_policy_missing_fields_uses_legacy_not_fresh_training_defaults(b
     assert cfg.policy.encoder_hidden == (16, 8)
     assert cfg.policy.decoder_hidden == (16, 8)
     assert cfg.policy.history == cfg.policy.future_frames == 5
+    assert cfg.world_model.state_spec.representation == "legacy"
 
 
 @pytest.mark.parametrize("mode", ["legacy", "reference_residual"])
@@ -65,6 +66,7 @@ def test_benchmark_checkpoint_loader_roundtrips_policy_on_cpu(benchmark_module, 
     original = Policy(cfg.policy, **kwargs)
     config = asdict(cfg)
     if mode == "legacy":
+        config["world_model"]["state_spec"].pop("representation")
         for name in ("action_mode", "reference_residual_beta", "reference_frame_offset",
                      "goal_noise_z", "goal_noise_joint_pos"):
             config["policy"].pop(name)
@@ -83,6 +85,7 @@ def test_benchmark_checkpoint_loader_roundtrips_policy_on_cpu(benchmark_module, 
     assert restored.cfg.goal_noise_z == (0.0 if mode == "legacy" else .01)
     assert restored.cfg.goal_noise_joint_pos == (0.0 if mode == "legacy" else .05)
     assert restored_cfg.env.observation_layout == "isaac_khan"
+    assert restored_cfg.world_model.state_spec.representation == ("legacy" if mode == "legacy" else "partymimic")
     assert restored_cfg.policy.history == restored_cfg.env.future_frames == 5
     obs, goal = torch.randn(3, 465), torch.randn(3, 155)
     torch.testing.assert_close(restored(obs, goal), original(obs, goal), rtol=0, atol=0)

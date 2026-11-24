@@ -5,6 +5,7 @@ they do not construct optimizers or train a policy/world model.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -28,6 +29,35 @@ NPZ = ROOT / "data/npz/khan_mini/lafan1/walk1_subject1.npz"
 NEEDS_CUDA_DATA = pytest.mark.skipif(
     not torch.cuda.is_available() or not NPZ.is_file(), reason="needs CUDA and converted Khan LAFAN1"
 )
+
+
+def test_replay_state_io_converts_world_angular_velocity_on_read_and_partial_write():
+    # A quarter turn about z maps (x, y, z) in the root to (-y, x, z) in world.
+    origins = torch.tensor([[0., 0., 0.], [10., -6., 2.]])
+    qpos = torch.zeros(2, 9)
+    qpos[:, :3] = origins + torch.tensor([0.3, -0.1, 0.7])
+    qpos[:, [3, 6]] = 0.5**0.5
+    qvel = torch.arange(16).float().reshape(2, 8)
+    env = SimpleNamespace(
+        sim=SimpleNamespace(data=SimpleNamespace(qpos=qpos, qvel=qvel)),
+        scene=SimpleNamespace(env_origins=origins),
+    )
+    native = StateIO(env)
+    replay = StateIO(env, representation="partymimic")
+    before = native.read()
+    external = replay.read()
+    torch.testing.assert_close(external[:, :12], before[:, :12])
+    torch.testing.assert_close(external[:, 12:15], torch.stack((-qvel[:, 4], qvel[:, 3], qvel[:, 5]), -1))
+    torch.testing.assert_close(external[:, 15:], before[:, 15:])
+
+    update = external[1:].clone()
+    update[:, :3] = torch.tensor([1., 2., 3.])
+    update[:, 12:15] = torch.tensor([4., -5., 6.])
+    replay.write(torch.tensor([1]), update, forward=False)
+    torch.testing.assert_close(qpos[1, :3], origins[1] + torch.tensor([1., 2., 3.]))
+    torch.testing.assert_close(qvel[1, 3:6], torch.tensor([-5., -4., 6.]))
+    torch.testing.assert_close(native.read()[0], before[0])
+    torch.testing.assert_close(replay.read()[1:], update)
 
 
 def test_khan_config_uses_isaac_observation_and_extends_neck_tracking_reward():
@@ -133,6 +163,8 @@ def test_khan_spaces_observation_reward_history_and_replay(setup_khan):
     obs, _ = env.reset()
     cmd = env.command_manager.get_term("motion")
     rec = env.recorder_manager.get_term("replay")
+    assert rec.state_io.representation == "partymimic"
+    env_ids = torch.arange(env.num_envs, device=env.device)
     assert obs["policy"].shape == (8, 465)
     assert obs["goal"].shape == (8, 155)
     assert env.action_manager.total_action_dim == 27
@@ -147,8 +179,16 @@ def test_khan_spaces_observation_reward_history_and_replay(setup_khan):
     full_history_checks = 0
     worst_rewards = {name: 0.0 for name in env.cfg.rewards}
     for _ in range(40):
+        pre_step_root_twist_w = torch.cat((robot.data.root_link_lin_vel_w,
+                                           robot.data.root_link_ang_vel_w), dim=-1).clone()
+        write_rows = rec.buffer.ptr.clone()
         actions = 0.1 * torch.randn(env.num_envs, 27, device=env.device)
         obs, reward, _, _, _ = env.step(actions)
+        # The recorded source row and the collection normalizer use the same
+        # pre-step world twist, including on steps that end an episode.
+        torch.testing.assert_close(rec.buffer.s[env_ids, write_rows, 34:40],
+                                   pre_step_root_twist_w, rtol=0, atol=2e-5)
+        torch.testing.assert_close(rec.last_step_states, rec.buffer.s[env_ids, write_rows], rtol=0, atol=0)
         assert torch.isfinite(obs["policy"]).all() and torch.isfinite(obs["goal"]).all()
         assert torch.isfinite(reward).all() and reward.max() <= 0.112001
         _refresh(env, cmd)

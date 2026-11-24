@@ -58,7 +58,10 @@ def test_prepared_multinomial_matches_historical_replay_samples_and_rng():
             torch.manual_seed(924)
             actual = getattr(current, method)(64, 3, **arguments)
             actual_rng = torch.get_rng_state().clone()
-        assert vars(actual).keys() == vars(expected).keys()
+        # This oracle predates the optional actuator history. With history off,
+        # the two extra fields carry no data and every historical field is identical.
+        assert vars(actual).keys() == vars(expected).keys() | {"prev_exec", "first_step"}
+        assert actual.prev_exec is None and actual.first_step is None
         for name, value in vars(expected).items():
             if isinstance(value, torch.Tensor):
                 torch.testing.assert_close(getattr(actual, name), value, rtol=0, atol=0)
@@ -208,7 +211,7 @@ def test_h32_pushed_acceleration_preserves_functional_updates_and_budget(tmp_pat
                     value[:, 3] = expected_value[:, 3] = 0.
                 torch.testing.assert_close(value, expected_value, rtol=3e-4, atol=3e-6)
             with torch.no_grad():
-                probe = reference.wm.spec.canonical(start.state)
+                probe = reference.wm.spec.critic_features(start.state)
                 assert probe[:, 3].abs().max() < 1e-6
                 probe[:, 3] = 0.
                 goal = torch.zeros(4, reference.critic.goal_scale.numel(), device="cuda:0")

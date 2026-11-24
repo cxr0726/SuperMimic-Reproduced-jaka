@@ -268,7 +268,7 @@ def test_fp64_heading_coordinate_is_null_for_critic_values_and_gradients():
     spec = StateSpec(StateSpecCfg(), "cpu", dtype=torch.float64, num_joints=2)
     state = torch.randn(64, spec.state_dim, dtype=torch.float64)
     state[:, 3:7] /= state[:, 3:7].norm(dim=-1, keepdim=True)
-    features = spec.canonical(state)
+    features = spec.critic_features(state)
     assert features[:, 3].abs().max() < 1e-13
     inputs = (features, torch.randn(64, critic.goal_scale.numel(), dtype=torch.float64),
               torch.randn(64, 6, dtype=torch.float64), torch.randn(64, 4, dtype=torch.float64),
@@ -309,7 +309,7 @@ def _assert_h32_functional_parity(actual, expected, observations, xi):
     for trainer in (actual, expected):
         observation = observations[id(trainer)]
         null_amplitude = max(null_amplitude, float(observation["features"][..., 3].abs().max()))
-        oracle = trainer.wm.spec.canonical(observation["states"].double())
+        oracle = trainer.wm.spec.critic_features(observation["states"].double())
         oracle_amplitude = max(oracle_amplitude, float(oracle[..., 3].abs().max()))
     assert null_amplitude < 1e-6
     assert oracle_amplitude < 1e-13

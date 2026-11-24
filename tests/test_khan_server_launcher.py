@@ -184,6 +184,12 @@ def test_ankle_action_second_difference_can_be_disabled(project):
     assert parse_config(result.stdout).env.ankle_action_second_diff_weight == 0.0
 
 
+def test_explicit_legacy_wm_reaches_training_cli(project):
+    result = run_launcher(project, "--dry-run", "--wm-representation", "legacy")
+    assert result.returncode == 0, result.stderr
+    assert parse_config(result.stdout).world_model.state_spec.representation == "legacy"
+
+
 @pytest.mark.parametrize("args,expected", [
     (["--run-name", "../escape"], "one nonempty directory name"),
     (["--num-envs", "0"], "positive integer"),
@@ -193,6 +199,7 @@ def test_ankle_action_second_difference_can_be_disabled(project):
     (["--policy-trainer.batch-size", "128"], "Unknown option"),
     (["--run-name", "--dry-run"], "requires a value"),
     (["--optimizer", "sgd"], "muon or adam"),
+    (["--wm-representation", "unknown"], "partymimic or legacy"),
     (["--ankle-encoder-bias", "nan"], "nonnegative decimal"),
     (["--optimizer", "--dry-run"], "requires a value"),
 ])

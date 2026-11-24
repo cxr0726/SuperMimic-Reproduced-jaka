@@ -172,6 +172,7 @@ def test_robot_bindings_and_g1_compatibility_defaults():
     assert cfg.recorders["replay"].params == {
         "capacity": 1000, "foot_geom_regex": khan.foot_geom_regex,
         "com_body_name": khan.com_body, "context_layout": "khan_dr_v4", "delay_history": False,
+        "wm_representation": "partymimic",
     }
     model = khan.load_model()
     assert all(name in [model.body(i).name for i in range(model.nbody)] for name in khan.tracked_bodies)
@@ -189,7 +190,7 @@ def test_production_compact_encoder_and_ema_preserve_optimizer_defaults():
     assert cfg.env.context_layout == cfg.world_model.state_spec.context_layout == "khan_dr_v4"
     assert SimContextLayout(27, kind=cfg.env.context_layout).dim == 105
     assert cfg.env.foot_mass_shared and cfg.env.wm_delay_history and cfg.world_model.delay_history
-    assert cfg.world_model.hidden == (2048, 2048, 2048)
+    assert cfg.world_model.hidden == (1024, 1024, 1024)
     assert cfg.policy.encoder_hidden == (1024, 512, 256)
     assert cfg.policy.decoder_hidden == (2048, 1024, 512, 256)
     assert cfg.policy_trainer.ema_decay == .995
@@ -208,6 +209,29 @@ def test_production_compact_encoder_and_ema_preserve_optimizer_defaults():
     assert cfg.schedule.stop_after_iterations is None
     assert cfg.env.obs_noise and cfg.env.reset_noise and cfg.env.domain_randomization
     assert not cfg.env.anchor_obs
+
+
+@pytest.mark.parametrize("saved_wm,expected_width", [
+    ({}, 2048),
+    ({"hidden": [2048, 2048, 2048]}, 2048),
+    ({"hidden": [1024, 1024, 1024]}, 1024),
+])
+def test_khan_resume_inherits_world_model_width(saved_wm, expected_width):
+    cfg = TrainConfig(robot="khan_mini")
+    resolve_training_observations(cfg, checkpoint_config={"world_model": saved_wm})
+    assert cfg.world_model.hidden == (expected_width,) * 3
+
+
+def test_explicit_world_model_width_and_g1_default():
+    cfg = TrainConfig()
+    resolve_training_observations(cfg)
+    assert cfg.world_model.hidden == (2048, 2048, 2048)
+    cfg = TrainConfig(robot="khan_mini")
+    cfg.world_model.hidden = (256, 128)
+    resolve_training_observations(cfg)
+    assert cfg.world_model.hidden == (256, 128)
+    with pytest.raises(ValueError, match="Checkpoint WM hidden layers"):
+        resolve_training_observations(cfg, checkpoint_config={"world_model": {"hidden": [1024] * 3}})
 
 
 @pytest.mark.parametrize("requested,saved", [("g1", "khan_mini"), ("khan_mini", "g1"), ("khan_mini", None)])

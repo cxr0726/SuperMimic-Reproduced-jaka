@@ -17,7 +17,7 @@
 | 截断尾值 | 失败=0；动作结束=全 bin 价值均值；timeout/窗口末=来源clip内下一帧bin价值，后继不越clip |
 | 分布 | 均匀 0.5＋当前困难 0.4＋累计 focus² 历史 0.1 |
 | WM 输入 | 状态、物理 PD 目标分别运行均值/方差归一化；ξ 保持范围归一化 |
-| WM 隐层 | 2048/2048/2048，Linear→LayerNorm→GELU |
+| Khan WM 隐层 | 1024/1024/1024，Linear→LayerNorm→GELU |
 | 想象终止 | 解析软阈值，softness=0.05；不训练 termination MLP |
 | critic | bootstrap、GAE target 仅上界限制，当前Khan为0.112/(1−0.99)=11.2 |
 | actor 输入 | obs/goal 运行归一化，输入维度仍为 465＋155=620 |
@@ -32,17 +32,22 @@
 | encoder bias | 四踝±0.02 rad，其余23轴±0.01 rad，每回合独立均匀采样 |
 | 执行噪声 | 两个服务器脚本对全部 27 轴设为 0，Replay 的 `a_exec` 与 `a` 相等 |
 | 额外足部跟踪 | 默认关闭；保留原15 body及颈关节奖励，不改变足部质量随机化 |
-| DR | `khan_dr_v4` 物理上下文，ξ105 维、WM 输入 199 维、critic 619 维 |
+| DR | `khan_dr_v4` 物理上下文，ξ105 维。含延迟命令历史时 WM 输入 226 维，关闭历史时 199 维。critic 为 619 维 |
 | 学习侧执行 | WM 整窗和 Actor/Critic 网络编译、完整更新 CUDA Graph（单 GPU）、H32 批量参考编码、合法窗口和起点的 CDF 采样 |
 | 优化器 | WM、Actor、Critic 均为 Adam，单 GPU 初始学习率均 2e-4，weight decay 为 0。Actor β=(0.9, 0.95)，WM/Critic β=(0.9, 0.999) |
 
 保留当前 clip 内分 bin、尾 bin 合并、物理及想象 H32 合法性、15 body/颈关节奖励、
 base_link anchor、Khan DR、reset 实际 root 抬高 0.05m、5/5 observation
-窗口以及原有优化参数和学习率调度。执行器 delay 和参考 FK 编译默认关闭。
+窗口以及原有优化参数和学习率调度。当前 Khan 服务器配方默认启用执行器 delay，参考 FK 编译按需开启。
 WM、Actor、Critic隐藏层均为Linear→LayerNorm→GELU。encoder最终latent仍经tanh，
 decoder动作输出和critic价值输出仍为普通Linear，不添加输出归一化或限幅。
-WM 仍使用现有 heading 表示（Khan67维状态特征）、66维速度/pose residual 输出、
-8 次真实 transition 监督及原误差尺度。
+当前分支新建训练默认使用 `partymimic` WM。Khan replay 的 67 维状态保存世界系根线速度和角速度，
+WM 输入把两者转入当前根机体系。66 维输出预测当前机体系的根速度增量、关节速度增量以及位姿修正。
+每个控制步有 4 个物理子步，根平移、旋转和关节角按 3/8 起始速度和 5/8 预测末速度积分。
+位置误差在真值航向系计算，两种根速度误差在真值机体系计算。训练继续对完整 8 步逐状态监督。
+服务器启动脚本支持 `--wm-representation legacy` 以复现旧积分；续训自动从 checkpoint 恢复模式，
+未标记的历史权重使用 `legacy`。续训同样继承保存的 WM 宽度，包括历史 Khan 的 2048×3。
+切换坐标表示或网络宽度需要新建训练。
 运行输入归一化取代WM原固定输入除数，输出scale和loss scale保持现有实现。
 完整更新捕获使用 capturable Adam，将学习率与步数留在 CUDA 张量中。
 融合归约、随机数调用顺序以及 Adam 步长计算的浮点实现可造成执行路径间数值差异。

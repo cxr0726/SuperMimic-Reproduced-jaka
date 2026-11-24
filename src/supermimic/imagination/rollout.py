@@ -182,8 +182,10 @@ def imagine(
         return g, None, g
 
     # Initial observation history from the logged states/actions (noise re-sampled per frame).
+    representation = getattr(wm.heads, "representation", "legacy")
     hist = [add_noise(analytic_observation(start.hist_states[i], start.hist_actions[i], start.xi,
-                                         q0, layout)) for i in range(start.hist_states.shape[0])]
+                                           q0, layout, representation=representation))
+            for i in range(start.hist_states.shape[0])]
     if layout == "isaac_khan" and start.history_valid is not None:
         # A reset fills each history buffer with the same first noisy observation.
         # Preserve that correlation when reconstructing history from replay rows.

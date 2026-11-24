@@ -64,6 +64,7 @@ from supermimic.sim_context import (
     resolve_context_layout,
     validate_ankle_encoder_bias_half_range,
 )
+from supermimic.world_model.state_spec import WMRepresentation
 
 
 class QuietSimulationCfg(SimulationCfg):
@@ -126,6 +127,7 @@ class SuperMimicEnvCfgArgs:
     disable_neck_action_noise: bool = False
     ankle_encoder_bias_half_range: float = 0.01  # Legacy/direct API default; training passes its saved range.
     foot_mass_shared: bool | None = None  # Use the current recipe for the selected context unless specified.
+    wm_representation: WMRepresentation = "partymimic"
 
 
 def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
@@ -460,6 +462,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             "com_body_name": robot_spec.com_body,
             "context_layout": a.context_layout,
             "delay_history": a.wm_delay_history,
+            "wm_representation": a.wm_representation,
         })
 
     cfg = ManagerBasedRlEnvCfg(

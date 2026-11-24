@@ -20,7 +20,7 @@ from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.world_model import WorldModel
 
 
-def _trainer(tmp_path, *, actor_noise=True):
+def _trainer(tmp_path, *, actor_noise=True, checkpoint_config=None):
     trainer = Trainer.__new__(Trainer)
     policy_cfg = PolicyCfg(
         encoder_hidden=(8,), decoder_hidden=(8,), latent_dim=4, history=5,
@@ -40,7 +40,7 @@ def _trainer(tmp_path, *, actor_noise=True):
     trainer.cfg.schedule.warmup_iterations = 40
     trainer.cfg.schedule.log_interval = 50
     trainer.cfg.schedule.checkpoint_interval = 50
-    resolve_training_observations(trainer.cfg)
+    resolve_training_observations(trainer.cfg, checkpoint_config=checkpoint_config)
     heads = AnalyticHeads.__new__(AnalyticHeads)
     heads.num_joints, heads.default_joint_pos = 27, torch.zeros(27)
     trainer.wm = WorldModel(
@@ -376,6 +376,7 @@ def _assert_tree_equal(actual, expected):
 @pytest.mark.parametrize("change, error", [
     ("actor_norm", "semantics differ"), ("action_mode", "semantics differ"),
     ("wm_norm", "training algorithm differs"), ("wm_ln", "training algorithm differs"),
+    ("wm_representation", "WM representation"),
     ("wm_term", "training algorithm differs"), ("critic_bound", "training algorithm differs"),
     ("action_scale", "WM action_scale differs"), ("sampler_contract", "sampler contract differs"),
     ("sampler_state", "Window sampler"),
@@ -399,6 +400,8 @@ def test_resume_semantic_rejections_precede_all_model_optimizer_and_sampler_muta
         saved["config"]["policy"]["action_mode"] = "reference_residual"
     elif change == "wm_norm":
         saved["config"]["world_model"].pop("input_normalization")
+    elif change == "wm_representation":
+        saved["config"]["world_model"]["state_spec"].pop("representation")
     elif change == "wm_ln":
         saved["config"]["world_model"]["hidden_layer_norm"] = False
     elif change == "wm_term":
@@ -436,6 +439,19 @@ def test_resume_semantic_rejections_precede_all_model_optimizer_and_sampler_muta
     with pytest.raises(ValueError, match=error):
         restored.load(path)
     _assert_tree_equal(_state(restored), before)
+
+
+def test_resume_inherits_unmarked_legacy_representation(tmp_path):
+    original = _trainer(tmp_path, checkpoint_config={"world_model": {"hidden": [8], "state_spec": {}}})
+    assert original.wm.spec.cfg.representation == "legacy"
+    original.save()
+    path = tmp_path / "ckpt_latest.pt"
+    saved = torch.load(path, weights_only=False)
+    del saved["config"]["world_model"]["state_spec"]["representation"]
+    torch.save(saved, path)
+    restored = _trainer(tmp_path, checkpoint_config=saved["config"])
+    restored.load(path)
+    _assert_tree_equal(_state(original), _state(restored))
 
 
 def test_resume_restores_window_moments_but_drops_pending_physical_trajectory(tmp_path):

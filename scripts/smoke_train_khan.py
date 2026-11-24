@@ -95,7 +95,7 @@ def verify_checkpoint_restore(trainer, models, checkpoint: Path) -> dict:
 
 def verify_production_config(cfg: TrainConfig) -> dict:
     """Fail if a smoke-only simplification leaks into an optimization setting."""
-    formal = TrainConfig()
+    formal = TrainConfig(robot=cfg.robot)
     resolve_training_observations(cfg)
     resolve_training_observations(formal)
     wm = asdict(cfg.world_model)

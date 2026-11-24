@@ -224,7 +224,7 @@ def _tiny_trainer(monkeypatch, decay):
     actor = torch.nn.Linear(2, 1)
     _set_parameters(actor, 0)
     wm = torch.nn.Linear(2, 2)
-    wm.spec = SimpleNamespace(normalize_xi=lambda xi: xi, canonical=lambda state: state)
+    wm.spec = SimpleNamespace(normalize_xi=lambda xi: xi, critic_features=lambda state: state)
     lib = SimpleNamespace(default_joint_pos=torch.zeros(2), clip_last=torch.tensor([100]))
     cfg = PolicyTrainerCfg(
         horizon=1, batch_size=2, history=1, future_frames=1,

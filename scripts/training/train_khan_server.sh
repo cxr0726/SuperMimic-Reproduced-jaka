@@ -14,6 +14,7 @@ UPDATE_CAPTURE=1
 BATCH_REFERENCE_ENCODER=1
 LEARNER_FUSION=1
 REPLAY_SAMPLING=''
+WM_REPRESENTATION=''
 OPTIMIZER=adam
 ACTUATOR_DELAY=True
 ANKLE_ACTION_SECOND_DIFF_WEIGHT=-0.02
@@ -86,6 +87,7 @@ Options:
   --learner-fusion          Compile full WM window and Actor/Critic blocks (default)
   --no-learner-fusion       Use the d98f4df single-step compilation boundary
   --replay-sampling MODE    cdf (default) or multinomial; same legal-pair distribution
+  --wm-representation MODE  partymimic or legacy; fresh runs use partymimic, resumes inherit checkpoint
   --optimizer MODE          adam (default) or muon; selects WM, Actor and Critic together
   --resume PATH               Restore a Khan checkpoint with the same data/configuration
   --stop-after-iterations N   Optional execution limit; retains the 320k LR schedule
@@ -130,6 +132,7 @@ while (($#)); do
         --learner-fusion) LEARNER_FUSION=1; shift ;;
         --no-learner-fusion) LEARNER_FUSION=0; shift ;;
         --replay-sampling) need_value "$@"; REPLAY_SAMPLING="$2"; shift 2 ;;
+        --wm-representation) need_value "$@"; WM_REPRESENTATION="$2"; shift 2 ;;
         --optimizer) need_value "$@"; OPTIMIZER="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -142,6 +145,7 @@ positive_integer "$NUM_ENVS" || die '--num-envs must be a positive integer'
     die '--ankle-encoder-bias must be a nonnegative decimal in radians'
 [[ -z "$REPLAY_SAMPLING" || "$REPLAY_SAMPLING" == cdf || "$REPLAY_SAMPLING" == multinomial ]] || die '--replay-sampling must be cdf or multinomial'
 [[ "$OPTIMIZER" == muon || "$OPTIMIZER" == adam ]] || die '--optimizer must be muon or adam'
+[[ -z "$WM_REPRESENTATION" || "$WM_REPRESENTATION" == partymimic || "$WM_REPRESENTATION" == legacy ]] || die '--wm-representation must be partymimic or legacy'
 [[ -z "$STOP_AFTER" ]] || positive_integer "$STOP_AFTER" || \
     die '--stop-after-iterations must be a positive integer'
 [[ -n "$RUN_NAME" && "$RUN_NAME" != . && "$RUN_NAME" != .. && "$RUN_NAME" != */* \
@@ -212,6 +216,9 @@ if ((!LEARNER_FUSION)); then
 fi
 if [[ -n "$REPLAY_SAMPLING" ]]; then
     command+=(--replay-sampling "$REPLAY_SAMPLING")
+fi
+if [[ -n "$WM_REPRESENTATION" ]]; then
+    command+=(--world-model.state-spec.representation "$WM_REPRESENTATION")
 fi
 # Additional foot rewards are independent of foot payload randomization.
 RAW_REWARD_CAP=0.112

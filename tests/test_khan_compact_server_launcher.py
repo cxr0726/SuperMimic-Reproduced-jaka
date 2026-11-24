@@ -75,6 +75,15 @@ def test_learning_execution_flags_can_disable_capture_without_changing_batches(p
     assert cfg.policy_trainer.horizon == 32 and cfg.schedule.updates_per_env_step == .4
 
 
+@pytest.mark.parametrize("mode", ["legacy", "partymimic"])
+def test_wm_representation_switch_reaches_trainer(project, mode):
+    result = run_launcher(project, "--dry-run", "--wm-representation", mode)
+    assert result.returncode == 0, result.stderr
+    cfg = parse_config(result.stdout)
+    resolve_training_observations(cfg)
+    assert cfg.world_model.state_spec.representation == mode
+
+
 def test_fusion_and_cdf_controls_keep_original_budget(project):
     result = run_launcher(project, "--dry-run", "--no-learner-fusion", "--replay-sampling", "multinomial")
     assert result.returncode == 0, result.stderr

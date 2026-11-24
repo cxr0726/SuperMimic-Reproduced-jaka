@@ -21,12 +21,14 @@ import numpy as np
 import torch
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
+from supermimic.config import checkpoint_wm_representation
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
 from supermimic.envs.sim_context import SimContext
 from supermimic.envs.state_io import StateIO
 from supermimic.eval.benchmark import load_policy_from_checkpoint
 from supermimic.robots.registry import get_robot_spec
+from supermimic.world_model.state_spec import from_mujoco_state
 
 
 def cpu(tensor):
@@ -36,6 +38,8 @@ def cpu(tensor):
 @torch.no_grad()
 def record(ckpt: Path, npz_dir: Path, out_dir: Path, clips: list[str], seconds: float, device: str):
     policy, config = load_policy_from_checkpoint(ckpt, device)
+    representation = checkpoint_wm_representation(config)
+    context_layout = config.get("world_model", {}).get("state_spec", {}).get("context_layout", "base")
     iteration = int(torch.load(ckpt, map_location="cpu", weights_only=False)["iteration"])
     spec = get_robot_spec(config["robot"])
     if spec.name != "khan_mini":
@@ -57,7 +61,7 @@ def record(ckpt: Path, npz_dir: Path, out_dir: Path, clips: list[str], seconds: 
     try:
         robot = env.scene["robot"]
         io = StateIO(env)
-        context = SimContext(env, spec.foot_geom_regex, spec.com_body)
+        context = SimContext(env, spec.foot_geom_regex, spec.com_body, context_layout=context_layout)
         cmd = env.command_manager.get_term("motion")
         lib = cmd.library
         if [c.name for c in lib.clips] != names:
@@ -226,7 +230,10 @@ def record(ckpt: Path, npz_dir: Path, out_dir: Path, clips: list[str], seconds: 
             freeze_after_terminal=np.array(True), joint_names=np.array(joint_names),
         )
         transitions_path = out_dir / f"transitions_{suffix}.npz"
-        np.savez_compressed(transitions_path, **{key: np.asarray(value) for key, value in transition.items()},
+        arrays = {key: np.asarray(value) for key, value in transition.items()}
+        for key in ("s", "s_next"):
+            arrays[key] = from_mujoco_state(torch.from_numpy(arrays[key]), representation).numpy()
+        np.savez_compressed(transitions_path, **arrays, state_representation=representation,
                             joint_names=np.array(joint_names), soft_limits=soft, hard_limits=hard,
                             effort_limits=effort_limit, dt=np.array(dt))
         csv_path = out_dir / f"trace_{suffix}.csv"

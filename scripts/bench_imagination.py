@@ -20,6 +20,7 @@ def main(batch: int = 2048, horizon: int = 32, modes: tuple[str, ...] = ("eager"
     from supermimic.kinematics.g1_fk import G1Kinematics
     from supermimic.policy.nets import Policy, PolicyCfg
     from supermimic.world_model.heads import AnalyticHeads
+    from supermimic.world_model.state_spec import from_mujoco_state
     from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -37,7 +38,7 @@ def main(batch: int = 2048, horizon: int = 32, modes: tuple[str, ...] = ("eager"
     # Synthetic start batch from library reference states.
     f = torch.randint(0, lib.num_frames - 100, (batch,), device=dev)
     qpos, qvel = lib.ref_qpos_qvel(f)
-    s0 = torch.cat([qpos, qvel], -1)
+    s0 = from_mujoco_state(torch.cat([qpos, qvel], -1), wm.spec.cfg.representation)
     start = StartBatch(
         state=s0,
         xi=torch.zeros(batch, 33, device=dev) + torch.tensor([0.75] + [0.0] * 32, device=dev),

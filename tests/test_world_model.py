@@ -34,9 +34,11 @@ def test_state_spec_identity_and_errors():
     s_rot[:, 0:2] += torch.randn(64, 2, dtype=torch.float64)
     s_rot[:, 3:7] = quat_mul(qy, s[:, 3:7])
     s_rot[:, 36:39] = quat_apply(qy, s[:, 36:39])
+    s_rot[:, 39:42] = quat_apply(qy, s[:, 39:42])
     np.testing.assert_allclose(spec.canonical(s_rot).numpy(), spec.canonical(s).numpy(), atol=1e-9)
-    # Explicit integration with zero delta = constant-velocity extrapolation.
-    spec2 = StateSpec(StateSpecCfg(explicit_integration=True), dev, torch.float64)
+    # In legacy mode the zero-delta prior extrapolates world position directly.
+    # Party's regularized heading drifts are checked against a separate matrix oracle.
+    spec2 = StateSpec(StateSpecCfg(representation="legacy", explicit_integration=True), dev, torch.float64)
     s3 = spec2.integrate(s, torch.zeros(64, 70, dtype=torch.float64))
     np.testing.assert_allclose(s3[:, 0:3].numpy(), (s[:, 0:3] + 0.02 * s[:, 36:39]).numpy(), atol=1e-12)
     np.testing.assert_allclose(s3[:, 7:36].numpy(), (s[:, 7:36] + 0.02 * s[:, 42:71]).numpy(), atol=1e-12)

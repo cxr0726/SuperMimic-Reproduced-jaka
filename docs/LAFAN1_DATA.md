@@ -76,7 +76,8 @@ NPZ 没有独立的 `root_pos`、`root_quat` 字段。根节点是 `pelvis`，�
   `src/supermimic/data/motion_convert.py::forward_kinematics`。
 
 需要区分角速度的两种表达：NPZ 和 MotionLibrary 参考状态中的根角速度为世界系；
-MuJoCo `qvel` 与模型使用的仿真状态中的根角速度为 body 系。
+MuJoCo `qvel` 中的根角速度为 body 系。新建训练的 `partymimic` WM 在采集 replay 时把它转到世界系，
+在构建网络输入时再转回当前根 body 系。`legacy` WM 的 replay 保留 MuJoCo 的 body 系角速度。
 `MotionLibrary.ref_qpos_qvel()` 会通过根四元数的逆旋转完成转换。
 
 ## 29 个关节的完整顺序

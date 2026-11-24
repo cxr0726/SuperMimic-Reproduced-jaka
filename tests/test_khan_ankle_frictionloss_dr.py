@@ -68,8 +68,10 @@ def test_frictionloss_is_independent_additive_startup_sampling_for_v4():
     assert FIELD not in g1.events
 
 
-def test_frictionloss_layout_is_explicit_in_checkpoint_contract():
+@pytest.mark.parametrize(("use_history", "wm_width"), [(False, 199), (True, 226)])
+def test_frictionloss_layout_is_explicit_in_checkpoint_contract(use_history, wm_width):
     cfg = TrainConfig(robot="khan_mini")
+    cfg.env.wm_delay_history = use_history
     resolve_training_observations(cfg)
     assert cfg.env.context_layout == cfg.world_model.state_spec.context_layout == "khan_dr_v4"
     assert cfg.policy.action_mode == "default" and not cfg.env.foot_tracking
@@ -77,13 +79,16 @@ def test_frictionloss_layout_is_explicit_in_checkpoint_contract():
     contract = robot_contract("khan_mini", "isaac_khan", env_config=saved["env"])
     schema = contract["simulation_schema"]
     assert schema["xi_fields"][FIELD] == 4
-    assert schema["xi_dim"] == 105 and schema["world_model_input_dim"] == 199
+    assert schema["xi_dim"] == 105 and schema["world_model_input_dim"] == wm_width
     assert contract["observation_schema"]["critic_input_dim"] == 619
     validate_robot_contract({"config": saved, "robot_contract": contract}, "khan_mini", "isaac_khan")
 
     v3_env = {**saved["env"], "context_layout": "khan_dr_v3"}
     legacy = robot_contract("khan_mini", "isaac_khan", env_config=v3_env)
-    assert legacy["version"] != contract["version"]
+    if use_history:
+        assert legacy["version"] == contract["version"] == 16  # Shared command-history format.
+    else:
+        assert legacy["version"] != contract["version"]
     assert legacy["simulation_schema"]["xi_dim"] == 101
     assert FIELD not in legacy["simulation_schema"]["xi_fields"]
     assert legacy["reward_config"] == contract["reward_config"]

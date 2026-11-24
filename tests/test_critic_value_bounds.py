@@ -95,7 +95,7 @@ class _Critic(torch.nn.Module):
 def _trainer(monkeypatch, enabled, offset=20.):
     monkeypatch.setattr(compiled, "ImagStep", lambda *args, **kwargs: object())
     wm = torch.nn.Linear(2, 2)
-    wm.spec = SimpleNamespace(normalize_xi=lambda xi: xi, canonical=lambda state: state)
+    wm.spec = SimpleNamespace(normalize_xi=lambda xi: xi, critic_features=lambda state: state)
     wm.heads = SimpleNamespace(reward_cfg=SimpleNamespace(max_step_reward=.112))
     lib = SimpleNamespace(default_joint_pos=torch.zeros(1), clip_last=torch.tensor([100]))
     cfg = PolicyTrainerCfg(

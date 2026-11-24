@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from supermimic.config import EnvCfg, TrainConfig, resolve_training_observations
+from supermimic.config import EnvCfg, TrainConfig, checkpoint_wm_representation, resolve_training_observations
 from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.envs.mdp.rewards import TrackingRewardCfg
@@ -33,6 +33,7 @@ from supermimic.policy.nets import Critic, CriticCfg, PolicyCfg
 from supermimic.robots.contracts import checkpoint_context_layout, checkpoint_foot_tracking
 from supermimic.robots.registry import get_robot_spec
 from supermimic.world_model.heads import AnalyticHeads
+from supermimic.world_model.state_spec import from_mujoco_state
 from supermimic.world_model.wm_trainer import WMTrainerCfg
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 
@@ -72,6 +73,7 @@ def restore_config(obj, saved):
         else:
             setattr(obj, field.name, tuple(value) if isinstance(current, tuple) else value)
     if isinstance(obj, TrainConfig):
+        obj.world_model.state_spec.representation = checkpoint_wm_representation(saved)
         obj.env.context_layout = checkpoint_context_layout(saved)
         obj.env.foot_tracking = checkpoint_foot_tracking(saved)
         obj.env.action_noise_std = saved.get("env", {}).get("action_noise_std", 0.1)
@@ -100,7 +102,8 @@ def load_benchmark_checkpoint(path, device):
 
 
 def reference_start(wm, frame, hist_states, hist_actions):
-    """Build synthetic starts for the reference FK performance comparison."""
+    """Build WM starts from native reference qpos/qvel for the FK comparison."""
+    hist_states = from_mujoco_state(hist_states, wm.spec.cfg.representation)
     xi = wm.spec.xi_offset.repeat(frame.numel(), 1)
     previous = hist_actions[-1]
     if wm.delay_xi_index is None:

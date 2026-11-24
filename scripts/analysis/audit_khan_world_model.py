@@ -10,34 +10,34 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 
-from supermimic.world_model.dynamics import DynamicsMLP
+from supermimic.config import checkpoint_wm_representation
 from supermimic.world_model.heads import AnalyticHeads, ReferenceFrame
-from supermimic.world_model.state_spec import StateSpec, StateSpecCfg
-from supermimic.world_model.world_model import TerminationHead
+from supermimic.world_model.state_spec import StateSpecCfg, from_mujoco_state, to_mujoco_state
+from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 
 
 def load_model(path: Path):
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    cfg = checkpoint["config"]["world_model"]
+    config = checkpoint["config"]
+    saved_wm = dict(config["world_model"])
+    saved_spec = {**saved_wm.pop("state_spec"), "representation": checkpoint_wm_representation(config)}
     spec_cfg = StateSpecCfg(**{
         key: tuple(value) if isinstance(value, list) else value
-        for key, value in cfg["state_spec"].items()
+        for key, value in saved_spec.items()
     })
-    nj = checkpoint["config"]["policy"]["num_joints"]
-    spec = StateSpec(spec_cfg, "cpu", num_joints=nj)
-    dynamics = DynamicsMLP(spec.feat_dim, nj, spec.xi_dim, cfg["hidden"], spec.delta_dim)
-    termination = TerminationHead(cfg["term_hidden"], cfg["height_threshold"], cfg["tilt_threshold"])
-    for module, prefix in ((dynamics, "dynamics."), (termination, "term_head.")):
-        module.load_state_dict({
-            key.removeprefix(prefix): value for key, value in checkpoint["wm"].items()
-            if key.startswith(prefix)
-        })
-        module.eval()
-    return spec, dynamics, termination
+    cfg = WorldModelCfg(state_spec=spec_cfg, **saved_wm)
+    # The audit scores root and joint states only, so no robot FK is required.
+    heads = SimpleNamespace(num_joints=config["policy"]["num_joints"])
+    mapping = ({name: checkpoint["wm"][name] for name in ("action_scale", "action_offset")}
+               if cfg.input_normalization else {})
+    wm = WorldModel(cfg, heads, "cpu", **mapping)
+    wm.load_state_dict(checkpoint["wm"])
+    return wm.eval()
 
 
 def features(state, pos, quat):
@@ -62,17 +62,32 @@ def main():
         names = data["clip_name"]
         tensors = {key: torch.from_numpy(data[key]).float() for key in
                    ("s", "s_next", "action", "xi", "ref_root_pos", "ref_root_quat")}
-        for model_it, (spec, dynamics, termination) in models.items():
-            def step(state, action, xi, spec=spec, dynamics=dynamics):
-                delta = dynamics(spec.canonical(state), action, spec.normalize_xi(xi))
-                return spec.integrate(state, delta)
+        stored_representation = str(data.get("state_representation", "legacy"))
+        for model_it, wm in models.items():
+            spec = wm.spec
+            states, targets = tensors["s"], tensors["s_next"]
+            if stored_representation != spec.cfg.representation:
+                states, targets = (from_mujoco_state(to_mujoco_state(s, stored_representation),
+                                                     spec.cfg.representation) for s in (states, targets))
+            if tensors["xi"].shape[-1] != spec.xi_dim:
+                raise ValueError(f"Recorded context width differs from WM {model_it}; use a matching capture")
+            # record_khan_failure disables physical delay. For zero lag the predecessor
+            # command is unused even when the trained WM models delayed actuation.
+            if wm.delay_xi_index is not None and tensors["xi"][:, wm.delay_xi_index].ne(0).any():
+                raise ValueError("This zero-delay audit cannot reconstruct a delayed command from the archive")
+
+            def step(state, action, xi):
+                return wm.step(state, action, xi, prev_exec=action,
+                               first_step=torch.zeros_like(action[..., 0], dtype=torch.bool))
+
+            termination = wm._termination_from_features
 
             predictions = torch.cat([
-                step(tensors["s"][start:start + 256], tensors["action"][start:start + 256],
+                step(states[start:start + 256], tensors["action"][start:start + 256],
                      tensors["xi"][start:start + 256])
                 for start in range(0, len(names), 256)
             ])
-            nse = spec.normalized_sq_error(predictions, tensors["s_next"])
+            nse = spec.normalized_sq_error(predictions, targets)
             for name in dict.fromkeys(names):
                 indices = np.flatnonzero(names == name)
                 indices = indices[np.argsort(data["step"][indices])]
@@ -86,21 +101,21 @@ def main():
                 }
                 for horizon in (1, 8, 32):
                     window = idx[-horizon:]
-                    state = tensors["s"][window[0]].unsqueeze(0)
+                    state = states[window[0]].unsqueeze(0)
                     survival = 1.0
                     pred_features, actual_features = [], []
                     for sample in window:
                         state = step(state, tensors["action"][sample:sample + 1], tensors["xi"][sample:sample + 1])
                         pf = features(state, tensors["ref_root_pos"][sample:sample + 1],
                                       tensors["ref_root_quat"][sample:sample + 1])
-                        af = features(tensors["s_next"][sample:sample + 1],
+                        af = features(targets[sample:sample + 1],
                                       tensors["ref_root_pos"][sample:sample + 1],
                                       tensors["ref_root_quat"][sample:sample + 1])
                         survival *= float(1 - termination(pf).sigmoid()[0])
                         pred_features.append(pf[0].numpy())
                         actual_features.append(af[0].numpy())
                     final = window[-1]
-                    true_state = tensors["s_next"][final:final + 1]
+                    true_state = targets[final:final + 1]
                     af = features(true_state, tensors["ref_root_pos"][final:final + 1],
                                   tensors["ref_root_quat"][final:final + 1])
                     window_result = {

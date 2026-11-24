@@ -321,7 +321,7 @@ def test_imagination_builds_current_future_orientation_and_five_term_histories(
     if noise:
         assert not torch.equal(captured[0][0][:, :30], rollout.critic_goals[0, :, 155:185])
     trainer = SimpleNamespace(wm=SimpleNamespace(
-        spec=SimpleNamespace(canonical=lambda state: state), heads=heads,
+        spec=SimpleNamespace(critic_features=lambda state: state), heads=heads,
     ))
     _, value_goals, _, value_errors = PolicyTrainer._critic_inputs(trainer, rollout)
     assert value_goals is rollout.critic_goals

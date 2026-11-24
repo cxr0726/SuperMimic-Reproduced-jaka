@@ -1,10 +1,8 @@
 """Analytic heads of the world model (plan D4): observation, reward, termination.
 
-Everything here is a pure differentiable function of the simulator state
-``s = [qpos | qvel]`` (71-d for G1, 67-d for Khan; root relative to the env origin,
-see ``StateIO``), the previous clean action, the sim context ``xi`` and the
-reference frame, so the same code serves the simulator-side tests and the
-imagined rollouts.
+Physical sensors and FK consume MuJoCo's body-frame root angular velocity.
+Standalone heads accept native simulator state. A world model binds its heads
+to its replay representation and converts back at these physical interfaces.
 """
 
 from __future__ import annotations
@@ -23,7 +21,7 @@ from supermimic.envs.mdp.rewards import (
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.kinematics.rotations import projected_gravity, quat_apply_inverse
 from supermimic.sim_context import KHAN_ANKLE_JOINTS
-from supermimic.world_model.state_spec import StateSpec
+from supermimic.world_model.state_spec import StateSpec, WMRepresentation, to_mujoco_state
 
 OBS_DIM = 93
 # Term layout of the ``policy`` observation group (order matters: term-major history).
@@ -48,14 +46,14 @@ def split_state(s: torch.Tensor):
 
 def analytic_observation(
     s: torch.Tensor, prev_action: torch.Tensor, xi: torch.Tensor, default_joint_pos: torch.Tensor,
-    observation_layout: str = "supermimic",
+    observation_layout: str = "supermimic", *, representation: WMRepresentation = "legacy",
 ) -> torch.Tensor:
     """Noise-free proprioception (paper Table A.1, width 3*num_joints+6).
 
     The joint-sized slice of xi after friction is the encoder bias:
     observed joint positions are ``q + bias - q0``.
     """
-    _, root_quat, q, _, ang_b, qd = split_state(s)
+    _, root_quat, q, _, ang_b, qd = split_state(to_mujoco_state(s, representation))
     bias = xi[..., 1:1 + default_joint_pos.shape[-1]]
     if observation_layout == "isaac_khan":
         return torch.cat([projected_gravity(root_quat), 0.5 * ang_b,
@@ -117,6 +115,8 @@ class ReferenceFrame:
 class AnalyticHeads:
     """Reward / termination features computed from the predicted state through differentiable FK."""
 
+    representation: WMRepresentation = "legacy"
+
     def __init__(
         self,
         fk: G1Kinematics,
@@ -148,7 +148,8 @@ class AnalyticHeads:
         )
 
     def robot_bodies(self, s: torch.Tensor) -> dict[str, torch.Tensor]:
-        out = self.fk(s[..., :self.fk.nq], s[..., self.fk.nq:])
+        native = to_mujoco_state(s, self.representation)
+        out = self.fk(native[..., :self.fk.nq], native[..., self.fk.nq:])
         idx = self.tracked_idx
         return {
             "pos": out["pos"][..., idx, :],

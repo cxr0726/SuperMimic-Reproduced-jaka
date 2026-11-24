@@ -213,7 +213,7 @@ class PolicyTrainer:
     def _critic_inputs(self, ro: ImagRollout):
         H1, n, _ = ro.states.shape
         states = ro.states.reshape(H1 * n, -1)
-        feat = self.wm.spec.canonical(states).reshape(H1, n, -1)
+        feat = self.wm.spec.critic_features(states).reshape(H1, n, -1)
         goals = ro.critic_goals if ro.critic_goals is not None else ro.goals
         errors = None
         if ro.critic_reference is not None:

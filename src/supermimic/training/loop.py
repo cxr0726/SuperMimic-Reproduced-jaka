@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from supermimic.config import TrainConfig, resolve_training_observations
+from supermimic.config import TrainConfig, checkpoint_wm_representation, resolve_training_observations
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
 from supermimic.envs.mdp.reset_sampling import reset_diagnostic_metrics
@@ -199,7 +199,6 @@ class Trainer:
         self.robot_spec = robot_spec = get_robot_spec(cfg.robot)
         if cfg.data.npz_dir is None:
             cfg.data.npz_dir = robot_spec.default_npz_dir
-        resolve_training_observations(cfg)
         if cfg.data.library is not None:
             cfg.env.compact_library = True
         self.rank, local_rank, self.world = init_distributed()
@@ -212,6 +211,10 @@ class Trainer:
             cfg.policy_trainer.critic_lr *= self.world**0.5
         torch.manual_seed(cfg.seed + 1000 * self.rank)
         self.device = cfg.device
+        # The recorder needs the stored state convention before it collects its first row.
+        checkpoint = (torch.load(cfg.resume, map_location=self.device, weights_only=False)
+                      if cfg.resume is not None else None)
+        resolve_training_observations(cfg, checkpoint_config=checkpoint["config"] if checkpoint is not None else None)
         self.log_dir = Path(cfg.log_root) / cfg.run_name
         self.log_dir.mkdir(parents=True, exist_ok=True)
         if self.is_main:
@@ -247,6 +250,7 @@ class Trainer:
                 actuator_delay_max_ms=cfg.env.actuator_delay_max_ms,
                 delay_reset_first_step_no_delay=cfg.env.delay_reset_first_step_no_delay,
                 wm_delay_history=cfg.env.wm_delay_history,
+                wm_representation=cfg.world_model.state_spec.representation,
                 reset_root_z_offset=cfg.env.reset_root_z_offset,
                 sampling_mode=cfg.env.sampling_mode,
                 reset_sampler=cfg.env.reset_sampler,
@@ -316,6 +320,8 @@ class Trainer:
         self.policy_trainer = PolicyTrainer(self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer)
         n_params = lambda m: sum(p.numel() for p in m.parameters())
         if self.is_main:
+            print(f"[INFO] WM state, integration and error frames: {cfg.world_model.state_spec.representation}; "
+                  f"hidden={cfg.world_model.hidden}")
             if cfg.policy.action_mode == "reference_residual":
                 print(f"[INFO] action mode: reference_residual; beta={cfg.policy.reference_residual_beta:g}, "
                       f"frame offset={cfg.policy.reference_frame_offset}")
@@ -370,7 +376,7 @@ class Trainer:
         self.num_updates = 0
         self._utd_acc = 0.0
         if cfg.resume is not None:
-            self.load(cfg.resume)
+            self.load(cfg.resume, checkpoint=checkpoint)
 
     # ------------------------------------------------------------------ checkpoints
 
@@ -402,8 +408,8 @@ class Trainer:
                               policy_ema_decay=ema.decay)
         torch.save(checkpoint, self.log_dir / name)
 
-    def load(self, path: Path) -> None:
-        ck = torch.load(path, map_location=self.device, weights_only=False)
+    def load(self, path: Path, *, checkpoint: dict | None = None) -> None:
+        ck = checkpoint if checkpoint is not None else torch.load(path, map_location=self.device, weights_only=False)
         saved_robot = ck["config"].get("robot", "g1")
         if saved_robot != self.cfg.robot:
             raise ValueError(f"Checkpoint robot {saved_robot!r} differs from {self.cfg.robot!r}")
@@ -417,6 +423,10 @@ class Trainer:
         saved_policy = ck["config"].get("policy", {})
         validate_policy_training_semantics(saved_policy, self.cfg.policy)
         saved_wm = ck["config"].get("world_model", {})
+        saved_representation = checkpoint_wm_representation(ck["config"])
+        if self.cfg.world_model.state_spec.representation != saved_representation:
+            raise ValueError(f"Checkpoint WM representation {saved_representation!r} differs from "
+                             f"current {self.cfg.world_model.state_spec.representation!r}")
         legacy_wm = {"input_normalization": False, "hidden_layer_norm": False,
                      "hidden_activation": "silu", "termination_mode": "learned",
                      "termination_softness": .05, "height_threshold": .25, "tilt_threshold": .8,

@@ -47,7 +47,8 @@ def probes(trainer, start):
     window = lib.reference_window(start.frame, trainer.cfg.policy.future_frames)
     goal = isaac_goal_command(window.root_pos_w, window.root_quat_w, window.joint_pos)
     orientation = isaac_anchor_orientation(start.state[:, 3:7], window.root_quat_w)
-    history = torch.stack([analytic_observation(s, a, start.xi, lib.default_joint_pos, "isaac_khan")
+    history = torch.stack([analytic_observation(s, a, start.xi, lib.default_joint_pos, "isaac_khan",
+                                               representation=wm.spec.cfg.representation)
                            for s, a in zip(start.hist_states, start.hist_actions, strict=True)])
     obs = torch.cat((orientation, flatten_history_term_major(history, observation_layout="isaac_khan")), -1)
     ref = reference_at(lib, start.frame)
@@ -55,7 +56,7 @@ def probes(trainer, start):
         window.joint_vel, window.root_quat_w, window.root_ang_vel_w, window.root_lin_vel_w)), -1)
     return {"obs": obs, "goal": goal, "state": start.state, "xi": start.xi,
             "prev_exec": start.prev_exec, "first_step": start.first_step,
-            "feat": wm.spec.canonical(start.state), "critic_goal": critic_goal,
+            "feat": wm.spec.critic_features(start.state), "critic_goal": critic_goal,
             "xi_norm": wm.spec.normalize_xi(start.xi), "root_error": wm.heads.root_error_features(start.state, ref),
             "tracking_error": wm.heads.critic_error_features(start.state, ref)}
 

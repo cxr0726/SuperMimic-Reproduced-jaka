@@ -26,17 +26,18 @@ git pull --ff-only origin codex/khan-muon-only
 
 bash scripts/training/train_khan_compact_server.sh \
   --library /home/jaka/Workspace/SuperMimic-Reproduced-jaka/data/pt/khan_combined_8452_compact.pt \
-  --run-name khan_8452_adam_drv4_delay20_sharedfeet_ankle_second_diff_4096 \
+  --run-name khan_8452_adam_drv4_delay20_sharedfeet_ankle_second_diff_partywm1024_4096 \
   --num-envs 4096 \
-  --actuator-delay
+  --actuator-delay --optimizer adam --wm-representation partymimic
 ```
 
+新建 Khan 训练的 WM 隐层为 1024×3，启动日志和 run 目录的 `config.json` 会记录解析出的宽度。
 加 `--dry-run` 可检查路径和实际CLI，不启动CUDA或训练。NPZ入口为：
 
 ```bash
 bash scripts/training/train_khan_server.sh \
   --data-dir data/npz/khan_mini/lafan1 \
-  --run-name khan_lafan1_adam_drv4_delay20_sharedfeet_ankle_second_diff_4096 \
+  --run-name khan_lafan1_adam_drv4_delay20_sharedfeet_ankle_second_diff_partywm1024_4096 \
   --num-envs 4096
 ```
 

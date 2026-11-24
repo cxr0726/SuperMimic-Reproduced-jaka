@@ -10,12 +10,14 @@ import torch
 
 from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
+from supermimic.imagination.compiled import ImagStep
 from supermimic.imagination.rollout import imagine
 from supermimic.kinematics.g1_fk import G1Kinematics
+from supermimic.kinematics.rotations import quat_apply_inverse
 from supermimic.policy.nets import Policy, PolicyCfg
 from supermimic.robots.registry import get_robot_spec
-from supermimic.world_model.heads import AnalyticHeads, ReferenceFrame
-from supermimic.world_model.state_spec import StateSpecCfg
+from supermimic.world_model.heads import AnalyticHeads, ReferenceFrame, analytic_observation
+from supermimic.world_model.state_spec import StateSpecCfg, from_mujoco_state
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 
 
@@ -66,6 +68,31 @@ def _normalizer_buffers(wm):
             if name.startswith(("state_normalizer.", "action_normalizer."))}
 
 
+def test_imagined_actor_and_fk_keep_native_sensor_semantics_in_both_modes(heads):
+    legacy = _model(heads, state_spec=StateSpecCfg(representation="legacy"))
+    party = _model(heads, state_spec=StateSpecCfg(representation="partymimic"))
+    native = _states(legacy)
+    state = from_mujoco_state(native, "partymimic")
+    assert not torch.allclose(native[:, legacy.spec.nq + 3:legacy.spec.nq + 6],
+                              state[:, party.spec.nq + 3:party.spec.nq + 6])
+    actual_bodies = party.heads.robot_bodies(state)
+    for name, value in legacy.heads.robot_bodies(native).items():
+        torch.testing.assert_close(actual_bodies[name], value)
+    ref = _reference(legacy, native)
+    a = torch.zeros(len(state), heads.num_joints)
+    xi = party.spec.xi_offset.repeat(len(state), 1)
+    layout = "isaac_khan" if heads.num_joints == 27 else "supermimic"
+    native_step = ImagStep(legacy, heads.default_joint_pos, observation_layout=layout)
+    party_step = ImagStep(party, heads.default_joint_pos, observation_layout=layout)
+    # With zero velocity increments both models have the same constant-twist prior.
+    native_next, expected_reward, _, _, _, _ = native_step(native, a, a, xi, ref)
+    next_state, reward, _, _, obs, _ = party_step(state, a, a, xi, ref)
+    expected_obs = analytic_observation(native_next, a, xi, heads.default_joint_pos, layout)
+    torch.testing.assert_close(next_state, from_mujoco_state(native_next, "partymimic"))
+    torch.testing.assert_close(reward, expected_reward)
+    torch.testing.assert_close(obs, expected_obs)
+
+
 def test_fresh_moments_are_raw_features_and_physical_pd_targets_with_stable_storage(heads):
     wm = _model(heads)
     state = _states(wm)
@@ -87,7 +114,7 @@ def test_fresh_moments_are_raw_features_and_physical_pd_targets_with_stable_stor
     assert addresses == {name: value.data_ptr() for name, value in wm.named_buffers()}
     # These are physical raw angular/joint velocities, not divided by old scales.
     torch.testing.assert_close(wm.state_normalizer.mean[10:13],
-                               state[:, wm.spec.nq + 3:wm.spec.nq + 6].mean(0))
+                               quat_apply_inverse(state[:, 3:7], state[:, wm.spec.nq + 3:wm.spec.nq + 6]).mean(0))
     torch.testing.assert_close(wm.state_normalizer.mean[-heads.num_joints:],
                                state[:, -heads.num_joints:].mean(0))
 
@@ -105,7 +132,7 @@ def test_running_input_transform_replaces_fixed_scale_instead_of_applying_both(h
     expected = wm.spec.canonical(state) * wm.spec.in_scale / 1.01
     torch.testing.assert_close(captured[0][0], expected, rtol=1e-6, atol=1e-7)
     torch.testing.assert_close(captured[0][0][:, 10:13],
-                               state[:, wm.spec.nq + 3:wm.spec.nq + 6] / 1.01)
+                               quat_apply_inverse(state[:, 3:7], state[:, wm.spec.nq + 3:wm.spec.nq + 6]) / 1.01)
     torch.testing.assert_close(captured[0][0][:, -heads.num_joints:],
                                state[:, -heads.num_joints:] / 1.01)
     torch.testing.assert_close(captured[0][1],
